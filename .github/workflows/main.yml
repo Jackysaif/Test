@@ -24,7 +24,7 @@ jobs:
       - name: Display startup info
         run: |
           echo "🔑 VPS starting with hostname 'notfleppy'"
-          echo "Creating username 'not' and password 'fleppy'"
+          echo "Creating username 'not' with password 'fleppy'"
           echo "Root password = fleppy"
 
       - name: Set hostname
@@ -78,6 +78,8 @@ jobs:
 
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
+        with:
+          github-ssh-keys: false   # prevents SSH key spam looping
 
       - name: Show Tailscale IP and tmate info
         run: |
@@ -108,4 +110,4 @@ jobs:
           retention-days: 30
 
 # Username = not
-# Pass = fleppy
+# Password = fleppy
