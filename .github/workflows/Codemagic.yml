@@ -7,7 +7,7 @@ on:
 
 jobs:
   vps-session:
-    runs-on: 22.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 350
 
     steps:
@@ -17,7 +17,7 @@ jobs:
       - name: Display startup info
         run: |
           echo "Creating hostname root@notfleppy"
-          echo "Creating username "not" and pass "fleppy"
+          echo "Creating username 'not' and pass 'fleppy'"
 
       - name: Set hostname
         run: |
@@ -71,21 +71,18 @@ jobs:
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
 
-      - name: Show Tailscale IP and tmate info
+      - name: Show Tailscale IP
         run: |
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
-          echo ""
-          echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
 
       - name: Sleep to keep VPS alive
-        run: sleep 21600
+        run: sleep 21500
 
       - name: Backup VPS data and tailscale state
         run: |
           sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || true
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
 
@@ -94,5 +91,3 @@ jobs:
         with:
           name: vps-backup
           path: backup.zip
-# Username = not
-# Pass = fleppy
