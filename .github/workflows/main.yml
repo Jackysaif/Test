@@ -76,21 +76,21 @@ jobs:
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
 
-      - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
-        with:
-          github-ssh-keys: false   # prevents SSH key spam looping
-
-      - name: Show Tailscale IP and tmate info
+      - name: Start manual tmate session
         run: |
+          # Install tmate
+          sudo apt-get install -y tmate
+          # Create socket
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
-          echo "🔑 tmate SSH session:"
-          tmate display -p '#{tmate_ssh}'
+          echo "🔑 SSH:"
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
           echo ""
-          echo "🌐 tmate Web session:"
-          tmate display -p '#{tmate_web}'
+          echo "🌐 Web:"
+          tmate -S /tmp/tmate.sock display -p '#{tmate_web}'
 
       - name: Sleep to keep VPS alive
         run: sleep 21600
