@@ -14,15 +14,23 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Download VPS backup artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+
       - name: Display startup info
         run: |
-          echo "Creating hostname root@notfleppy"
-          echo "Creating username "not" and pass "fleppy"
+          echo "🔑 VPS starting with hostname 'notfleppy'"
+          echo "Creating username 'not' and password 'fleppy'"
+          echo "Root password = fleppy"
 
       - name: Set hostname
         run: |
-          sudo hostnamectl set-hostname root@notfleppy
-          echo "127.0.0.1 root@notfleppy" | sudo tee -a /etc/hosts
+          sudo hostnamectl set-hostname notfleppy
+          echo "127.0.0.1 notfleppy" | sudo tee -a /etc/hosts
 
       - name: Set root password
         run: |
@@ -66,7 +74,7 @@ jobs:
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root@notfleppy || echo "Tailscale already up"
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
 
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
@@ -77,7 +85,10 @@ jobs:
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
+          tmate display -p '#{tmate_ssh}'
+          echo ""
+          echo "🌐 tmate Web session:"
+          tmate display -p '#{tmate_web}'
 
       - name: Sleep to keep VPS alive
         run: sleep 21600
@@ -94,5 +105,7 @@ jobs:
         with:
           name: vps-backup
           path: backup.zip
+          retention-days: 30
+
 # Username = not
 # Pass = fleppy
