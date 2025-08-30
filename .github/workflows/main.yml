@@ -17,7 +17,7 @@ jobs:
       - name: Display startup info
         run: |
           echo "Creating hostname root@notfleppy"
-          echo "Creating username 'jacky' and pass 'root'"
+          echo "Creating username "not" and pass "fleppy"
 
       - name: Set hostname
         run: |
@@ -26,15 +26,15 @@ jobs:
 
       - name: Set root password
         run: |
-          echo "root:root" | sudo chpasswd
+          echo "root:fleppy" | sudo chpasswd
 
-      - name: Create user 'jacky' with password 'root'
+      - name: Create user 'not' with password 'fleppy'
         run: |
-          if ! id -u jacky >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "jacky:root" | sudo chpasswd
-            sudo usermod -aG sudo jacky
-            echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          if ! id -u not >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash not
+            echo "not:fleppy" | sudo chpasswd
+            sudo usermod -aG sudo not
+            echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
           fi
 
       - name: Install prerequisites
@@ -66,25 +66,26 @@ jobs:
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname=root@notfleppy || echo "Tailscale already up"
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root@notfleppy || echo "Tailscale already up"
 
-      - name: Start tmate session (non-blocking)
+      - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true   # prevents blocking forever
 
-      - name: Show Tailscale IP
+      - name: Show Tailscale IP and tmate info
         run: |
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
 
       - name: Sleep to keep VPS alive
-        run: sleep 21500
+        run: sleep 21600
 
       - name: Backup VPS data and tailscale state
         run: |
           sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || true
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
 
@@ -93,3 +94,5 @@ jobs:
         with:
           name: vps-backup
           path: backup.zip
+# Username = not
+# Pass = fleppy
