@@ -41,7 +41,7 @@ jobs:
       - name: Install prerequisites and rclone
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch rclone
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch rclone zip
 
       - name: Set up rclone config
         run: |
@@ -58,16 +58,25 @@ jobs:
           EOF
           rclone listremotes
 
-      - name: Restore VPS backup from rclone
+      - name: Restore VPS user data archive and Tailscale state
         id: restore
         run: |
-          if rclone lsf gdrivveed:vps-backup/ >/dev/null 2>&1; then
-            echo "Backup found on Google Drive. Restoring..."
-            sudo rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
-            echo "Backup restored successfully."
+          if rclone lsf gdrivveed:vps-backup/archive.zip >/dev/null 2>&1; then
+            echo "Backup archive found. Restoring..."
+            sudo rclone copy gdrivveed:vps-backup/archive.zip /tmp/ --progress
+            echo "Extracting archive..."
+            sudo unzip /tmp/archive.zip -d /
+            rm /tmp/archive.zip
+            echo "User data restored successfully."
+
+            echo "Restoring Tailscale state..."
+            sudo rclone copy gdrivveed:vps-backup/var/lib/tailscale/tailscaled.state /var/lib/tailscale/ --progress
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored successfully."
+            
             echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No backup found on Google Drive. Starting with a fresh VPS."
+            echo "No backup archive found. Starting with a fresh VPS."
             echo "backup_found=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -113,16 +122,30 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup VPS data to rclone (on completion)
+      - name: Backup user data and Tailscale state (on completion)
         run: |
+          echo "Creating user data archive..."
+          sudo zip -r /tmp/archive.zip /root /home/not -x /root/.rclone.conf\*
+          echo "Uploading archive to rclone..."
+          sudo rclone copy /tmp/archive.zip gdrivveed:vps-backup/ --progress
+          rm /tmp/archive.zip
+
+          echo "Backing up Tailscale state..."
           sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
-          echo "Backup uploaded successfully."
+          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
+          echo "Backup completed."
 
       - name: Final Backup on Cancel 
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
+          echo "Creating user data archive..."
+          sudo zip -r /tmp/archive.zip /root /home/not -x /root/.rclone.conf\*
+          echo "Uploading archive to rclone..."
+          sudo rclone copy /tmp/archive.zip gdrivveed:vps-backup/ --progress
+          rm /tmp/archive.zip
+
+          echo "Backing up Tailscale state..."
           sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
           echo "Final backup completed."
