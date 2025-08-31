@@ -459,7 +459,7 @@ EOF
           sudo tailscale down || true
           echo "✅ Tailscale disconnected"
 
-      - name: Backup completion notification
+            - name: Backup completion notification
         if: github.event.inputs.operation == 'backup'
         run: |
           echo ""
