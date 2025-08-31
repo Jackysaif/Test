@@ -30,22 +30,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rsync tar gzip mysql-client
 
+      - name: Setup rclone configuration
+        run: |
+          echo "⚙️ Setting up rclone configuration for full Drive access..."
+          
+          # Create rclone config directory
+          mkdir -p ~/.config/rclone
+          
+          # Create rclone configuration with your credentials for regular Drive access
+          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          [gdrivveed]
+          type = drive
+          client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
+          client_secret = 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
+          scope = drive
+          token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}
+          team_drive = 
+          EOF
+          
+          echo "✅ rclone configuration created"
+
       - name: Verify rclone access
         run: |
           echo "🔍 Verifying rclone access..."
-          # Test with a simple operation that works with appDataFolder
-          if rclone ls $GDRIVE_REMOTE: >/dev/null 2>&1; then
-            echo "✅ rclone access verified successfully"
-          elif rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
+          if rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
             echo "✅ rclone access verified successfully"
           else
             echo "❌ rclone access failed"
-            echo "🔧 Trying to create backup directory..."
-            rclone mkdir $GDRIVE_REMOTE:$BACKUP_PATH 2>/dev/null || true
-            if rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
-              echo "✅ rclone access working after directory creation"
+            echo "🔧 Attempting to refresh token..."
+            if rclone config reconnect $GDRIVE_REMOTE: --auto-confirm 2>/dev/null; then
+              echo "✅ Token refreshed, trying again..."
+              rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1 && echo "✅ Access verified" || exit 1
             else
-              echo "❌ rclone configuration issue - check your setup"
+              echo "❌ Token refresh failed"
               exit 1
             fi
           fi
