@@ -1,4 +1,4 @@
-name: Continuous Persistent VPS
+Name: Continuous Persistent VPS
 
 on:
   schedule:
@@ -13,13 +13,6 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Download VPS backup artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup
-          path: ./backup
-        continue-on-error: true
 
       - name: Display startup info
         run: |
@@ -45,36 +38,56 @@ jobs:
             echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
           fi
 
-      - name: Install prerequisites
+      - name: Install prerequisites and rclone
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch rclone
+
+      - name: Set up rclone config
+        env:
+          RCLONE_CONFIG_GDRIVEED: ${{ secrets.RCLONE_CONFIG_GDRIVEED }}
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONFIG_GDRIVEED" > ~/.config/rclone/rclone.conf
+          rclone listremotes
+
+      - name: Restore VPS backup from rclone
+        id: restore
+        run: |
+          if rclone lsf gdrivveed:vps-backup/ >/dev/null 2>&1; then
+            echo "Backup found on Google Drive. Restoring..."
+            rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+            echo "Backup restored successfully."
+            echo "backup_found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No backup found on Google Drive. Starting with a fresh VPS."
+            echo "backup_found=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Restore backup files
-        run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
-          else
-            echo "No backup found, starting fresh"
-          fi
-
-      - name: Restore Tailscale state
-        run: |
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-          fi
 
       - name: Start Tailscale
         run: |
           sudo tailscaled &
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+        if: ${{ steps.restore.outputs.backup_found == 'true' }}
+
+      - name: Start Tailscale (New IP) and immediately back up
+        run: |
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo "Backup up new Tailscale state immediately."
+          sudo chown -R $USER:$USER /var/lib/tailscale
+          rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
+        if: ${{ steps.restore.outputs.backup_found == 'false' }}
 
       - name: Start manual tmate session
         run: |
@@ -83,8 +96,6 @@ jobs:
           # Create socket
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 SSH:"
           tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
@@ -95,19 +106,8 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup VPS data and tailscale state
+      - name: Backup VPS data to rclone
         run: |
-          sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
-
-      - name: Upload VPS backup artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup
-          path: backup.zip
-          retention-days: 30
-
-# Username = not
-# Password = fleppy
+          sudo chown -R $USER:$USER /var/lib/tailscale
+          rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+          echo "Backup uploaded successfully."
