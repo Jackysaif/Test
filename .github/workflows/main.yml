@@ -331,25 +331,37 @@ jobs:
         if: github.event.inputs.operation == 'backup'
         run: |
           echo "📋 Creating backup summary..."
-          {
-            echo "=== VPS Backup Summary ==="
-            echo "Date: $(date)"
-            echo "Hostname: $(hostname)"
-            echo "OS: $(lsb_release -d | cut -f2)"
-            echo "Kernel: $(uname -r)"
-            echo ""
-            echo "=== Backup Contents ==="
-            find backup/ -type f -name "*.tar.gz" -o -name "*.sql.gz" | while read file; do
-              size=$(du -h "$file" | cut -f1)
-              echo "- $(basename "$file") ($size)"
-            done
-            echo ""
-            echo "=== System Info ==="
-            df -h | grep -E "/$|/var|/home" || true
-            free -h
-          } > backup/logs/backup-summary-$BACKUP_DATE.txt
+          SUMMARY_FILE="backup/logs/backup-summary-$BACKUP_DATE.txt"
           
-          echo "✅ Backup summary created"
+          cat > "$SUMMARY_FILE" << EOF
+=== VPS Backup Summary ===
+Date: $(date)
+Hostname: $(hostname)
+OS: $(lsb_release -d 2>/dev/null | cut -f2 || echo "Unknown")
+Kernel: $(uname -r)
+
+=== Backup Contents ===
+EOF
+          
+          # List backup files
+          find backup/ -type f \( -name "*.tar.gz" -o -name "*.sql.gz" \) 2>/dev/null | while read file; do
+            if [ -f "$file" ]; then
+              size=$(du -h "$file" 2>/dev/null | cut -f1 || echo "Unknown")
+              echo "- $(basename "$file") ($size)" >> "$SUMMARY_FILE"
+            fi
+          done
+          
+          cat >> "$SUMMARY_FILE" << EOF
+
+=== System Info ===
+EOF
+          
+          # Add system info safely
+          df -h 2>/dev/null | grep -E "/$|/var|/home" >> "$SUMMARY_FILE" 2>/dev/null || echo "Disk info unavailable" >> "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          free -h 2>/dev/null >> "$SUMMARY_FILE" 2>/dev/null || echo "Memory info unavailable" >> "$SUMMARY_FILE"
+          
+          echo "✅ Backup summary created at $SUMMARY_FILE"
 
       - name: Upload backup to Google Drive
         if: github.event.inputs.operation == 'backup'
