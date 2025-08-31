@@ -113,8 +113,16 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup VPS data to rclone
+      - name: Backup VPS data to rclone (on completion)
         run: |
           sudo chown -R $USER:$USER /var/lib/tailscale
           sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
           echo "Backup uploaded successfully."
+
+      - name: Final Backup on Cancel 
+        if: ${{ cancelled() }}
+        run: |
+          echo "Workflow canceled. Performing final backup..."
+          sudo chown -R $USER:$USER /var/lib/tailscale
+          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+          echo "Final backup completed."
