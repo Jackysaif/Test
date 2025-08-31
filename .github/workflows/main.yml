@@ -2,7 +2,7 @@ name: VPS Backup and Restore
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+    - cron: "0 */6 * * *"      # every 6 hours
   workflow_dispatch:
 
 env:
@@ -10,39 +10,33 @@ env:
   BACKUP_PATH: vps-backup
 
 jobs:
-  vps-session:
+  vps-operations:
     runs-on: ubuntu-22.04
-    timeout-minutes: 380   # 6h20m to allow backup to finish
-
+    timeout-minutes: 390       # ~6h30m to allow cleanup/backup
     steps:
-      # ============================================================
-      # 0) Checkout (optional, keeps structure like original)
-      # ============================================================
-      - name: 📥 Checkout repository
+
+      - name: "Checkout repository"
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 1) Install required packages
-      # ============================================================
-      - name: ⚙️ Install dependencies
+      # -----------------------------
+      # Install required packages
+      # -----------------------------
+      - name: "Install required packages"
         run: |
           set -e
-          echo "🔄 Updating apt & installing packages..."
           sudo apt-get update
-          sudo apt-get install -y curl unzip zip rclone tar gzip coreutils \
-                                  tmate net-tools neofetch figlet toilet \
-                                  jq lsb-release gnupg ca-certificates \
-                                  apt-transport-https git build-essential \
-                                  wget nano htop sudo
+          sudo apt-get install -y \
+            curl unzip zip rclone tar gzip coreutils \
+            tmate net-tools neofetch jq lsb-release gnupg ca-certificates \
+            apt-transport-https git build-essential wget nano htop sudo
 
-      # ============================================================
-      # 2) Configure rclone (NO heredoc → safe YAML)
-      # ============================================================
-      - name: ☁️ Configure rclone (remote: ${{ env.GDRIVE_REMOTE }})
+      # -----------------------------
+      # Configure rclone (no heredocs)
+      # -----------------------------
+      - name: "Configure rclone"
         run: |
           set -e
-          echo "⚙️ Writing rclone.conf..."
-          mkdir -p ~/.config/rclone
+          mkdir -p "$HOME/.config/rclone"
           CFG="$HOME/.config/rclone/rclone.conf"
           : > "$CFG"
           printf '%s\n' "[${GDRIVE_REMOTE}]" >> "$CFG"
@@ -50,26 +44,32 @@ jobs:
           printf '%s\n' 'client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com' >> "$CFG"
           printf '%s\n' 'client_secret = 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' >> "$CFG"
           printf '%s\n' 'scope = drive' >> "$CFG"
-          # Do NOT set root_folder_id=appDataFolder; that causes insufficientScopes for normal Drive access
           printf '%s\n' 'token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}' >> "$CFG"
           printf '%s\n' 'team_drive =' >> "$CFG"
-          echo "✅ rclone configured."
-          echo "🔎 Verifying Drive access..."
-          rclone about ${GDRIVE_REMOTE}: || (echo "❌ rclone cannot access ${GDRIVE_REMOTE}"; exit 1)
 
-      # ============================================================
-      # 3) Set session timestamps and backup date
-      # ============================================================
-      - name: 🕒 Set timestamps
+          # allow sudo/root to use the same rclone config
+          sudo mkdir -p /root/.config/rclone
+          sudo cp "$CFG" /root/.config/rclone/rclone.conf
+          sudo chown -R root:root /root/.config/rclone
+
+          echo "Verifying access to Drive (user)…"
+          rclone about "${GDRIVE_REMOTE}:" 1>/dev/null
+          echo "Verifying access to Drive (root via sudo)…"
+          sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone about "${GDRIVE_REMOTE}:" 1>/dev/null
+          echo "rclone OK."
+
+      # -----------------------------
+      # Set timestamps
+      # -----------------------------
+      - name: "Set timestamps"
         run: |
-          echo "START_TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
-          echo "BACKUP_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
-          echo "✅ Timestamps prepared."
+          echo "START_TS=$(date +%Y%m%d_%H%M%S)" >> "$GITHUB_ENV"
+          echo "BACKUP_DATE=$(date +%Y%m%d_%H%M%S)" >> "$GITHUB_ENV"
 
-      # ============================================================
-      # 4) Create user & password (jacky/root) + sudo
-      # ============================================================
-      - name: 👤 Create user 'jacky'
+      # -----------------------------
+      # Create user & password
+      # -----------------------------
+      - name: "Create user jacky"
         run: |
           set -e
           if ! id jacky >/dev/null 2>&1; then
@@ -77,143 +77,154 @@ jobs:
           fi
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
-          echo "✅ User jacky ready."
+          echo "User 'jacky' ready."
 
-      # ============================================================
-      # 5) Restore Tailscale state from Drive (before install)
-      # ============================================================
-      - name: 🔄 Restore Tailscale state (separate file)
+      # -----------------------------
+      # Restore Tailscale state (before install)
+      # -----------------------------
+      - name: "Restore Tailscale state if present"
         run: |
           set -e
-          echo "📁 Checking for Tailscale state on Drive..."
           sudo mkdir -p /var/lib/tailscale
-          if rclone ls ${GDRIVE_REMOTE}:${BACKUP_PATH}/system/tailscaled.state >/dev/null 2>&1; then
-            echo "🔥 Found state; restoring to /var/lib/tailscale/tailscaled.state"
-            sudo rclone copy ${GDRIVE_REMOTE}:${BACKUP_PATH}/system/tailscaled.state /var/lib/tailscale/ --progress || true
+          if rclone ls "${GDRIVE_REMOTE}:${BACKUP_PATH}/system/tailscaled.state" >/dev/null 2>&1; then
+            echo "Found state on Drive. Restoring…"
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/system/tailscaled.state" \
+              /var/lib/tailscale/ --progress || true
             sudo chown root:root /var/lib/tailscale/tailscaled.state || true
             sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
-            echo "TS_STATE_RESTORED=true" >> $GITHUB_ENV
+            echo "TS_STATE_RESTORED=true" >> "$GITHUB_ENV"
           else
-            echo "ℹ️ No previous Tailscale state found."
-            echo "TS_STATE_RESTORED=false" >> $GITHUB_ENV
+            echo "No previous state."
+            echo "TS_STATE_RESTORED=false" >> "$GITHUB_ENV"
           fi
 
-      # ============================================================
-      # 6) Install & connect Tailscale
-      # ============================================================
-      - name: 🌐 Install & Start Tailscale
+      # -----------------------------
+      # Install & start Tailscale
+      # -----------------------------
+      - name: "Install and start Tailscale"
         run: |
           set -e
-          echo "⬇️ Installing Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
           if [ "${TS_STATE_RESTORED}" = "true" ]; then
-            echo "🔁 Using restored state..."
+            echo "Using restored state…"
             sudo tailscale up --reset --accept-routes --accept-dns || true
           else
-            echo "🆕 Authenticating new connection..."
-            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTH }}" --hostname "github-vps-$(date +%s)" --accept-routes --accept-dns || true
-            echo "💾 Backing up newly-created state..."
-            sudo rclone copy /var/lib/tailscale/tailscaled.state ${GDRIVE_REMOTE}:${BACKUP_PATH}/system/ --progress || true
+            echo "Logging in with new identity…"
+            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTH }}" \
+              --hostname "github-vps-$(date +%s)" --accept-routes --accept-dns || true
+            echo "Backing up new tailscaled.state…"
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              /var/lib/tailscale/tailscaled.state \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/system/" --progress || true
           fi
-          echo "🌍 Tailscale IPs:"
           sudo tailscale ip -4 || true
           sudo tailscale ip -6 || true
 
-      # ============================================================
-      # 7) Auto-restore VPS data (if Drive has it)
-      # ============================================================
-      - name: 📥 Restore VPS data (home, etc, www)
+      # -----------------------------
+      # Auto-restore VPS data if present
+      # -----------------------------
+      - name: "Restore VPS data (home/etc/www) if available"
         run: |
           set -e
-          echo "🔎 Checking for previous VPS data on Drive..."
-          if rclone lsf ${GDRIVE_REMOTE}:${BACKUP_PATH}/home/ >/dev/null 2>&1; then
-            echo "📦 Restoring /home/jacky ..."
-            sudo rclone copy ${GDRIVE_REMOTE}:${BACKUP_PATH}/home/ /home/jacky/ --progress || true
+          if rclone lsf "${GDRIVE_REMOTE}:${BACKUP_PATH}/home/" >/dev/null 2>&1; then
+            echo "Restoring /home/jacky …"
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/home/" /home/jacky/ --progress || true
             sudo chown -R jacky:jacky /home/jacky || true
           fi
-          if rclone lsf ${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/ >/dev/null 2>&1; then
-            echo "📦 Restoring /etc ..."
-            sudo rclone copy ${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/ /etc/ --progress || true
+          if rclone lsf "${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/" >/dev/null 2>&1; then
+            echo "Restoring /etc …"
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/" /etc/ --progress || true
           fi
-          if rclone lsf ${GDRIVE_REMOTE}:${BACKUP_PATH}/www/ >/dev/null 2>&1; then
-            echo "📦 Restoring /var/www ..."
-            sudo rclone copy ${GDRIVE_REMOTE}:${BACKUP_PATH}/www/ /var/www/ --progress || true
+          if rclone lsf "${GDRIVE_REMOTE}:${BACKUP_PATH}/www/" >/dev/null 2>&1; then
+            echo "Restoring /var/www …"
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/www/" /var/www/ --progress || true
           fi
-          echo "✅ Restore phase finished."
 
-      # ============================================================
-      # 8) Keep the session alive for ~6h
-      # ============================================================
-      - name: ⏳ Keep session alive (~6h)
+      # -----------------------------
+      # Keep session alive 6h with cancel trap backup
+      # -----------------------------
+      - name: "Keep session alive (~6h) with cancel-backup trap"
         run: |
           set -e
-          echo "🕒 Session active from ${START_TS}; sleeping for 6 hours..."
+          echo "Session started at ${START_TS}. Sleeping for 6 hours…"
+
+          do_backup() {
+            echo "Cancellation or finish signal caught — running trap backup…"
+            # home
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              /home/jacky "${GDRIVE_REMOTE}:${BACKUP_PATH}/home/" --progress || true
+            # etc
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              /etc "${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/" --progress || true
+            # www
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              /var/www "${GDRIVE_REMOTE}:${BACKUP_PATH}/www/" --progress || true
+            # tailscale state
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+                /var/lib/tailscale/tailscaled.state \
+                "${GDRIVE_REMOTE}:${BACKUP_PATH}/system/" --progress || true
+            fi
+          }
+
+          trap 'do_backup' TERM INT
+
+          # normal wait
           sleep 21600
 
-      # ============================================================
-      # 9) Backup: data + Tailscale (runs even if earlier steps fail)
-      #    Note: GitHub cannot run steps *after* a manual cancel.
-      # ============================================================
-      - name: 💾 Backup VPS data to Drive
+          # after normal sleep, no need to run trap here; next step will back up again
+
+      # -----------------------------
+      # Backup (always) at the end
+      # -----------------------------
+      - name: "Backup VPS data to Drive (always)"
         if: always()
         run: |
           set -e
-          echo "📦 Preparing backup at date ${BACKUP_DATE}..."
+          echo "Running final backup for ${BACKUP_DATE} …"
           HOST_TAG="$(hostname)"
-          SNAP_DIR="/tmp/vps-snap-${BACKUP_DATE}"
-          sudo mkdir -p "${SNAP_DIR}"
-          echo "☁️ Uploading /home/jacky ..."
-          sudo rclone copy /home/jacky ${GDRIVE_REMOTE}:${BACKUP_PATH}/home/ --progress || true
-          echo "☁️ Uploading /etc ..."
-          sudo rclone copy /etc ${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/ --progress || true
-          echo "☁️ Uploading /var/www ..."
-          sudo rclone copy /var/www ${GDRIVE_REMOTE}:${BACKUP_PATH}/www/ --progress || true
-
-          echo "🔐 Uploading Tailscale state..."
+          # home
+          sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+            /home/jacky "${GDRIVE_REMOTE}:${BACKUP_PATH}/home/" --progress || true
+          # etc
+          sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+            /etc "${GDRIVE_REMOTE}:${BACKUP_PATH}/etc/" --progress || true
+          # www
+          sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+            /var/www "${GDRIVE_REMOTE}:${BACKUP_PATH}/www/" --progress || true
+          # tailscale state
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            sudo rclone copy /var/lib/tailscale/tailscaled.state ${GDRIVE_REMOTE}:${BACKUP_PATH}/system/ --progress || true
+            sudo RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone copy \
+              /var/lib/tailscale/tailscaled.state \
+              "${GDRIVE_REMOTE}:${BACKUP_PATH}/system/" --progress || true
           fi
+          # create a dated marker folder (kept last 5 below)
+          rclone mkdir "${GDRIVE_REMOTE}:${BACKUP_PATH}/${HOST_TAG}-${BACKUP_DATE}" || true
+          echo "Backup finished."
 
-          echo "🏷️ Creating dated marker folder for this run..."
-          rclone mkdir ${GDRIVE_REMOTE}:${BACKUP_PATH}/${HOST_TAG}-${BACKUP_DATE} || true
-          echo "✅ Backup complete."
-
-      # ============================================================
-      # 10) Clean old dated markers (keep last 5)
-      # ============================================================
-      - name: 🧹 Clean old dated markers on Drive
+      # -----------------------------
+      # Keep only 5 dated markers
+      # -----------------------------
+      - name: "Clean old dated markers (keep last 5)"
         if: always()
         run: |
           set -e
           HOST_TAG="$(hostname)"
-          echo "🧾 Existing dated entries:"
-          rclone lsf ${GDRIVE_REMOTE}:${BACKUP_PATH}/ | grep "^${HOST_TAG}-" | sort -r || true
-          rclone lsf ${GDRIVE_REMOTE}:${BACKUP_PATH}/ | grep "^${HOST_TAG}-" | sort -r | tail -n +6 | while read -r old; do
-            echo "🗑️ Removing ${old} ..."
-            rclone purge ${GDRIVE_REMOTE}:${BACKUP_PATH}/${old} || true
+          rclone lsf "${GDRIVE_REMOTE}:${BACKUP_PATH}/" | grep "^${HOST_TAG}-" | sort -r | tail -n +6 | \
+          while read -r old; do
+            rclone purge "${GDRIVE_REMOTE}:${BACKUP_PATH}/${old}" || true
           done
-          echo "✅ Cleanup complete."
 
-      # ============================================================
-      # 11) Disconnect Tailscale gracefully
-      # ============================================================
-      - name: 🔌 Disconnect Tailscale
+      # -----------------------------
+      # Disconnect Tailscale
+      # -----------------------------
+      - name: "Disconnect Tailscale"
         if: always()
         run: |
           sudo tailscale down || true
-          echo "✅ Tailscale disconnected."
-
-      # ============================================================
-      # 12) Final message
-      # ============================================================
-      - name: 🎉 Backup completion notification
-        if: always()
-        run: |
-          echo ""
-          echo "🎉 ================================="
-          echo "✅ VPS SESSION COMPLETED"
-          echo "🎉 ================================="
-          echo "Start: ${START_TS}"
-          echo "End  : $(date +%Y%m%d_%H%M%S)"
-          echo "Drive: ${GDRIVE_REMOTE}:${BACKUP_PATH}"
+          echo "Tailscale disconnected."
