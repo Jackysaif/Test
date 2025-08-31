@@ -122,13 +122,12 @@ jobs:
             /root/ \
             /var/www/ \
             /var/lib/mysql/ \
-            /var/lib/tailscale/ \
             /www/wwwroot/ \
             /www/server/ \
-            --exclude=/var/www/html/wp-content/cache \
-            --exclude=/www/wwwroot/*/cache \
             --exclude=/var/lib/mysql/mysql \
             --exclude=/var/lib/mysql/performance_schema \
+            --exclude=/var/www/html/wp-content/cache \
+            --exclude=/www/wwwroot/*/cache \
             --exclude=/www/server/panel/logs
           echo "Uploading backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
@@ -144,7 +143,6 @@ jobs:
             /root/ \
             /var/www/ \
             /var/lib/mysql/ \
-            /var/lib/tailscale/ \
             /www/wwwroot/ \
             /www/server/ \
             --exclude=/var/lib/mysql/mysql \
