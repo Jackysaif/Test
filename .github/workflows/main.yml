@@ -125,23 +125,26 @@ jobs:
           # Start Tailscale daemon
           sudo systemctl enable --now tailscaled
           
-          # Connect to Tailscale network
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔌 Starting with restored state..."
-            sudo tailscale up --reset
+          # Connect to Tailscale network (only if auth key is provided)
+          if [ -n "${{ secrets.TAILSCLALE_AUTH }}" ]; then
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              echo "🔌 Starting with restored state..."
+              sudo tailscale up --reset
+            else
+              echo "🔌 Authenticating new connection..."
+              sudo tailscale up --authkey="${{ secrets.TAILSCLALE_AUTH }}" --hostname="github-runner-$(date +%s)"
+            fi
+            
+            # Verify connection
+            sleep 10
+            if sudo tailscale status | grep -q "logged in"; then
+              echo "✅ Tailscale connected successfully"
+              sudo tailscale status
+            else
+              echo "⚠️ Tailscale connection failed, continuing without VPN"
+            fi
           else
-            echo "🔌 Authenticating new connection..."
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname="github-runner-$(date +%s)"
-          fi
-          
-          # Verify connection
-          sleep 10
-          if sudo tailscale status | grep -q "logged in"; then
-            echo "✅ Tailscale connected successfully"
-            sudo tailscale status
-          else
-            echo "❌ Tailscale connection failed"
-            exit 1
+            echo "ℹ️ No Tailscale auth key provided, skipping Tailscale setup"
           fi
 
       - name: Create backup directories
