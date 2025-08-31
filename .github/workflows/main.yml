@@ -26,7 +26,7 @@ jobs:
       run: |
         echo "⚙️ Setting up rclone configuration..."
         mkdir -p ~/.config/rclone
-        cat <<'EOF' > ~/.config/rclone/rclone.conf
+        cat > ~/.config/rclone/rclone.conf <<EOF
 [gdrivveed]
 type = drive
 client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
