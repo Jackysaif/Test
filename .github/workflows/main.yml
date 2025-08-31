@@ -2,7 +2,7 @@ name: Continuous Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'   # Every 6h
   workflow_dispatch:
 
 jobs:
@@ -17,116 +17,78 @@ jobs:
       - name: "🚀 Installing Dependencies"
         run: |
           set -e
-          echo "========================================="
-          echo "📦 Installing system dependencies..."
-          echo "========================================="
           sudo apt update
           sudo apt install -y sudo curl unzip zip tmate net-tools neofetch rclone
-          echo "✅ Dependencies installed."
+
+      - name: "⚙️ Setup rclone"
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+[gdrivveed]
+type = drive
+client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
+client_secret = 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
+scope = drive
+root_folder_id = appDataFolder
+token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}
+team_drive =
+EOF
 
       - name: "👤 Create user jacky"
         run: |
-          set -e
           if ! id "jacky" &>/dev/null; then
-            echo "👤 Creating user jacky..."
             sudo useradd -m -s /bin/bash jacky
             echo "jacky:root" | sudo chpasswd
             sudo usermod -aG sudo jacky
-          else
-            echo "ℹ️ User jacky already exists."
           fi
-          echo "✅ User setup complete."
-
-      - name: "⬇️ Install latest Rclone"
-        run: |
-          set -e
-          echo "========================================="
-          echo "⬇️ Installing Rclone..."
-          echo "========================================="
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-current-linux-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo cp rclone /usr/bin/
-          sudo chmod 755 /usr/bin/rclone
-          echo "✅ Rclone Installed"
-          rclone version
 
       - name: "📂 Restore Tailscale state"
         run: |
-          set -e
-          echo "========================================="
-          echo "📂 Checking for existing Tailscale state..."
-          echo "========================================="
           sudo mkdir -p /var/lib/tailscale
-          if rclone ls gdrive:vps-backup/system/tailscaled.state >/dev/null 2>&1; then
-            echo "🔥 Found previous Tailscale state. Restoring..."
-            sudo rclone copy gdrive:vps-backup/system/tailscaled.state /var/lib/tailscale/ --progress || true
+          if rclone ls gdrivveed:vps-backup/system/tailscaled.state >/dev/null 2>&1; then
+            sudo rclone copy gdrivveed:vps-backup/system/tailscaled.state /var/lib/tailscale/ --progress || true
             sudo chown root:root /var/lib/tailscale/tailscaled.state || true
             sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
             echo "TS_STATE_RESTORED=true" >> $GITHUB_ENV
           else
-            echo "ℹ️ No previous Tailscale state found."
             echo "TS_STATE_RESTORED=false" >> $GITHUB_ENV
           fi
 
       - name: "🌐 Install & Start Tailscale"
         run: |
-          set -e
-          echo "========================================="
-          echo "🌐 Installing Tailscale..."
-          echo "========================================="
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl stop tailscaled || true
           sudo systemctl start tailscaled
           sudo systemctl enable tailscaled
           
           if [ "$TS_STATE_RESTORED" = "false" ]; then
-            echo "⚡ No old state, logging into Tailscale..."
-            sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname github-vps || true
-            echo "📦 Backing up new Tailscale state..."
-            sudo rclone copy /var/lib/tailscale/tailscaled.state gdrive:vps-backup/system/ --progress || true
-          else
-            echo "✅ Using restored Tailscale state."
+            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps || true
+            sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/system/ --progress || true
           fi
 
       - name: "💾 Restore VPS Data"
         run: |
-          set -e
-          echo "========================================="
-          echo "💾 Restoring VPS data from backup..."
-          echo "========================================="
-          sudo rclone copy gdrive:vps-backup/home/ /home/jacky/ --progress || true
+          sudo rclone copy gdrivveed:vps-backup/home/ /home/jacky/ --progress || true
           sudo chown -R jacky:jacky /home/jacky || true
-          sudo rclone copy gdrive:vps-backup/etc/ /etc/ --progress || true
-          sudo rclone copy gdrive:vps-backup/www/ /var/www/ --progress || true
-          echo "✅ Restore complete."
+          sudo rclone copy gdrivveed:vps-backup/etc/ /etc/ --progress || true
+          sudo rclone copy gdrivveed:vps-backup/www/ /var/www/ --progress || true
+
+      - name: "🔑 Show Tailscale IP"
+        run: |
+          sudo tailscale ip -4
+          sudo tailscale ip -6
 
       - name: "⏳ Keep Session Alive"
-        run: |
-          set -e
-          echo "========================================="
-          echo "⏳ VPS Session is active for ~6h..."
-          echo "========================================="
-          sleep 21600
+        run: sleep 21600   # 6h
 
       - name: "📦 Backup VPS Data"
         if: always()
         run: |
-          set -e
-          echo "========================================="
-          echo "📦 Starting VPS backup process..."
-          echo "========================================="
-          sudo rclone copy /home/jacky gdrive:vps-backup/home/ --progress || true
-          sudo rclone copy /etc gdrive:vps-backup/etc/ --progress || true
-          sudo rclone copy /var/www gdrive:vps-backup/www/ --progress || true
-          echo "✅ Backup complete."
+          sudo rclone copy /home/jacky gdrivveed:vps-backup/home/ --progress || true
+          sudo rclone copy /etc gdrivveed:vps-backup/etc/ --progress || true
+          sudo rclone copy /var/www gdrivveed:vps-backup/www/ --progress || true
 
       - name: "📂 Backup Tailscale state"
         if: always()
         run: |
-          set -e
-          echo "========================================="
-          echo "📂 Saving Tailscale state..."
-          echo "========================================="
-          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrive:vps-backup/system/ --progress || true
-          echo "✅ Tailscale state saved."
+          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/system/ --progress || true
