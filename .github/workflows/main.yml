@@ -28,7 +28,14 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y rsync tar gzip mysql-client
+          sudo apt-get install -y rsync tar gzip mysql-client curl unzip
+
+      - name: Install rclone
+        run: |
+          echo "📦 Installing rclone..."
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+          echo "✅ rclone installed successfully"
 
       - name: Setup rclone configuration
         run: |
