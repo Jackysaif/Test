@@ -41,7 +41,7 @@ jobs:
       - name: Install prerequisites and rclone
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch rclone zip
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch rclone tar
 
       - name: Set up rclone config
         run: |
@@ -51,36 +51,21 @@ jobs:
           type = drive
           client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
           client_secret = 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
-          scope = drive.appfolder
-          root_folder_id = appDataFolder
+          scope = drive
+          root_folder_id = 
           token = {"access_token":"ya29.A0AS3H6Nzwim-1TEvkN3nVfRGSdWwIMFqMote2k5sALdNknVC7AJfpI7ZBThjQMC9pc4MU4FUopSyTYItIDf6cGLk2ICZxCuYwXkfv0-zSeRFcCSimdBeQaioIO_HU-BBNcVjNOkS0VUZQNJKbmByA6RE_l-yq-qYmEKrfTnBic1fmElS9BABnm7PROKcBK9YkJ99r4rMaCgYKAVUSARQSFQHGX2Mie4AeWO1kmPiOezxMExxkPw0206","token_type":"Bearer","refresh_token":"1//0gTA-49Cokc9pCgYIARAAGBASNwF-L9IrMXcOxDQi4ZO_l0F8H4atiKYtcPJ04imdqKqhiRPcDpwmRPeyna34BIS44P6TjU70n3o","expiry":"2025-08-30T04:25:26.737745722Z","expires_in":3599}
-          team_drive = 
           EOF
           rclone listremotes
 
-      - name: Restore VPS user data archive and Tailscale state
+      - name: Restore VPS from backup archive
         id: restore
         run: |
-          if rclone lsf gdrivveed:vps-backup/archive.zip >/dev/null 2>&1; then
-            echo "Backup archive found. Restoring..."
-            
-            # Clean up old user directories before restoring
-            sudo rm -rf /root/*
-            sudo rm -rf /root/.*
-            sudo rm -rf /home/not/*
-            sudo rm -rf /home/not/.*
-            
-            sudo rclone copy gdrivveed:vps-backup/archive.zip /tmp/ --progress
-            echo "Extracting archive..."
-            sudo unzip /tmp/archive.zip -d /
-            sudo rm /tmp/archive.zip
-            echo "User data restored successfully."
-
-            echo "Restoring Tailscale state..."
-            sudo rclone copy gdrivveed:vps-backup/var/lib/tailscale/tailscaled.state /var/lib/tailscale/ --progress
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            echo "Tailscale state restored successfully."
-            
+          if rclone lsf gdrivveed:vps-backup/backup.tar.gz >/dev/null 2>&1; then
+            echo "Backup archive found on Google Drive. Restoring..."
+            sudo rclone copy gdrivveed:vps-backup/backup.tar.gz /tmp/backup.tar.gz --progress
+            echo "Restoring from archive..."
+            sudo tar -xzpvf /tmp/backup.tar.gz -C /
+            echo "Backup restored successfully."
             echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
             echo "No backup archive found. Starting with a fresh VPS."
@@ -91,26 +76,26 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
 
+      - name: Restore Tailscale state
+        run: |
+          echo "Restoring Tailscale state..."
+          sudo mkdir -p /var/lib/tailscale
+          if rclone lsf gdrivveed:vps-backup/tailscaled.state >/dev/null 2>&1; then
+            sudo rclone copy gdrivveed:vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state --progress
+            echo "Tailscale state restored successfully."
+          else
+            echo "No previous Tailscale state found. A new one will be created."
+          fi
+
       - name: Start Tailscale
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || true
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
-        if: ${{ steps.restore.outputs.backup_found == 'true' }}
-
-      - name: Start Tailscale (New IP) and immediately back up
-        run: |
-          sudo tailscaled &
-          sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
-          echo "Backup up new Tailscale state immediately."
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
-        if: ${{ steps.restore.outputs.backup_found == 'false' }}
+          echo "Backing up new Tailscale state file..."
+          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/ --progress
 
       - name: Start manual tmate session
         run: |
@@ -129,30 +114,19 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup user data and Tailscale state (on completion)
+      - name: Backup essential data to archive (on completion)
         run: |
-          echo "Creating user data archive..."
-          sudo zip -r /tmp/archive.zip /root /home/not -x /root/.rclone.conf\*
-          echo "Uploading archive to rclone..."
-          sudo rclone copy /tmp/archive.zip gdrivveed:vps-backup/ --progress
-          sudo rm /tmp/archive.zip
-
-          echo "Backing up Tailscale state..."
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
-          echo "Backup completed."
+          echo "Creating essential data backup archive..."
+          sudo tar -czpvf /tmp/backup.tar.gz /etc /home /root /var/www /var/lib/tailscale
+          echo "Uploading backup archive to Google Drive..."
+          sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
+          echo "Backup uploaded successfully."
 
       - name: Final Backup on Cancel 
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
-          echo "Creating user data archive..."
-          sudo zip -r /tmp/archive.zip /root /home/not -x /root/.rclone.conf\*
-          echo "Uploading archive to rclone..."
-          sudo rclone copy /tmp/archive.zip gdrivveed:vps-backup/ --progress
-          sudo rm /tmp/archive.zip
-
-          echo "Backing up Tailscale state..."
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
+          sudo tar -czpvf /tmp/backup.tar.gz /etc /home /root /var/www /var/lib/tailscale
+          echo "Uploading final backup archive to Google Drive..."
+          sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Final backup completed."
