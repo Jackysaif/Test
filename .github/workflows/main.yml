@@ -1,466 +1,85 @@
-name: VPS Backup and Restore
+name: VPS Backup & Restore
 
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: 'Choose operation'
+        description: "Choose backup or restore"
         required: true
-        default: 'backup'
+        default: "backup"
         type: choice
         options:
-        - backup
-        - restore
-
-env:
-  GDRIVE_REMOTE: gdrivveed
-  BACKUP_PATH: vps-backup
-  BACKUP_DATE: $(date +%Y%m%d_%H%M%S)
+          - backup
+          - restore
 
 jobs:
-  vps-operations:
+  backup-job:
     runs-on: ubuntu-latest
-    
+    if: github.event.inputs.operation == 'backup'
+
+    env:
+      BACKUP_DIR: backup
+
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install required packages
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y rsync tar gzip mysql-client curl unzip
-
-      - name: Install rclone
-        run: |
-          echo "📦 Installing rclone..."
-          curl https://rclone.org/install.sh | sudo bash
-          rclone version
-          echo "✅ rclone installed successfully"
-
-      - name: Setup rclone configuration
-        run: |
-          echo "⚙️ Setting up rclone configuration for full Drive access..."
-          
-          # Create rclone config directory
-          mkdir -p ~/.config/rclone
-          
-          # Create rclone configuration with your credentials for regular Drive access
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
-          [gdrivveed]
-          type = drive
-          client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
-          client_secret = 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
-          scope = drive
-          token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}
-          team_drive = 
-          EOF
-          
-          echo "✅ rclone configuration created"
-
-      - name: Verify rclone access
-        run: |
-          echo "🔍 Verifying rclone access..."
-          echo "📝 Testing rclone configuration..."
-          
-          # Show rclone version and config
-          rclone version
-          echo ""
-          echo "📂 Testing basic access..."
-          
-          # Try different commands to debug the issue
-          echo "🔸 Trying rclone lsf..."
-          if rclone lsf $GDRIVE_REMOTE: -v 2>&1; then
-            echo "✅ rclone lsf successful"
-          else
-            echo "❌ rclone lsf failed"
-            echo ""
-            echo "🔸 Trying rclone ls..."
-            if rclone ls $GDRIVE_REMOTE: -v 2>&1; then
-              echo "✅ rclone ls successful"
-            else
-              echo "❌ rclone ls failed"
-              echo ""
-              echo "🔸 Trying rclone about..."
-              if rclone about $GDRIVE_REMOTE: -v 2>&1; then
-                echo "✅ rclone about successful"
-              else
-                echo "❌ All rclone commands failed"
-                echo "🔧 Showing detailed error..."
-                rclone lsf $GDRIVE_REMOTE: -vv 2>&1 || true
-                exit 1
-              fi
-            fi
-          fi
-          
-          echo "✅ rclone access verified successfully"
+          sudo apt update
+          sudo apt install -y unzip zip curl tar mysql-client neofetch
 
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          if [ $? -ne 0 ]; then
-            echo "❌ Failed to install Tailscale"
-            exit 1
-          fi
-          echo "✅ Tailscale installed successfully"
-
-      - name: Setup Tailscale with state restoration
-        run: |
-          echo "🔄 Setting up Tailscale..."
-          sudo mkdir -p /var/lib/tailscale
-          
-          # Try to restore previous Tailscale state
-          if rclone lsf $GDRIVE_REMOTE:$BACKUP_PATH/system/tailscaled.state >/dev/null 2>&1; then
-            echo "📥 Restoring Tailscale state..."
-            if sudo rclone copy $GDRIVE_REMOTE:$BACKUP_PATH/system/tailscaled.state /var/lib/tailscale/ --progress; then
-              sudo chown root:root /var/lib/tailscale/tailscaled.state
-              sudo chmod 600 /var/lib/tailscale/tailscaled.state
-              echo "✅ Tailscale state restored successfully"
-            else
-              echo "⚠️ Failed to restore Tailscale state, will create new connection"
-            fi
-          else
-            echo "ℹ️ No previous Tailscale state found, will create new connection"
-          fi
-          
-          # Start Tailscale daemon
           sudo systemctl enable --now tailscaled
-          
-          # Connect to Tailscale network (only if auth key is provided)
-          if [ -n "${{ secrets.TAILSCLALE_AUTH }}" ]; then
-            if [ -f /var/lib/tailscale/tailscaled.state ]; then
-              echo "🔌 Starting with restored state..."
-              sudo tailscale up --reset
-            else
-              echo "🔌 Authenticating new connection..."
-              sudo tailscale up --authkey="${{ secrets.TAILSCLALE_AUTH }}" --hostname="github-runner-$(date +%s)"
-            fi
-            
-            # Verify connection
-            sleep 10
-            if sudo tailscale status | grep -q "logged in"; then
-              echo "✅ Tailscale connected successfully"
-              sudo tailscale status
-            else
-              echo "⚠️ Tailscale connection failed, continuing without VPN"
-            fi
-          else
-            echo "ℹ️ No Tailscale auth key provided, skipping Tailscale setup"
-          fi
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH }} --hostname="github-runner-$(date +%s)"
 
-      - name: Create backup directories
-        if: github.event.inputs.operation == 'backup'
+      - name: Set backup date
+        run: echo "BACKUP_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+
+      - name: Prepare backup directories
         run: |
-          mkdir -p backup/{websites,databases,aapanel,user-data,system,logs}
-          echo "📁 Backup directories created"
+          mkdir -p $BACKUP_DIR/{home,etc,logs,db}
 
-      - name: Backup user data and home directories
-        if: github.event.inputs.operation == 'backup'
+      - name: Backup critical directories
         run: |
-          echo "👤 Backing up user data..."
-          
-          # Backup root user data (excluding system files)
-          sudo tar -czf backup/user-data/root-data-$BACKUP_DATE.tar.gz \
-            --exclude='/root/.cache' \
-            --exclude='/root/.npm' \
-            --exclude='/root/.docker' \
-            --exclude='/root/snap' \
-            -C /root . 2>/dev/null || echo "⚠️ Some root files skipped"
-          
-          # Backup other user home directories
-          for user_home in /home/*; do
-            if [ -d "$user_home" ]; then
-              username=$(basename "$user_home")
-              echo "📦 Backing up user: $username"
-              sudo tar -czf backup/user-data/${username}-data-$BACKUP_DATE.tar.gz \
-                --exclude="$user_home/.cache" \
-                --exclude="$user_home/.npm" \
-                --exclude="$user_home/.docker" \
-                -C "$user_home" . 2>/dev/null || echo "⚠️ Some $username files skipped"
-            fi
-          done
-          
-          echo "✅ User data backup completed"
+          tar -czf $BACKUP_DIR/home_${BACKUP_DATE}.tar.gz /home || true
+          tar -czf $BACKUP_DIR/etc_${BACKUP_DATE}.tar.gz /etc || true
+          tar -czf $BACKUP_DIR/logs_${BACKUP_DATE}.tar.gz /var/log || true
 
-      - name: Backup websites and web server data
-        if: github.event.inputs.operation == 'backup'
+      - name: Backup MySQL databases
         run: |
-          echo "🌐 Backing up websites..."
-          
-          # Common web directories
-          WEB_DIRS="/var/www /usr/share/nginx/html /opt/lampp/htdocs"
-          
-          for dir in $WEB_DIRS; do
-            if [ -d "$dir" ]; then
-              dir_name=$(basename "$dir")
-              parent_dir=$(dirname "$dir" | sed 's/\//_/g')
-              echo "📦 Backing up: $dir"
-              if sudo tar -czf backup/websites/${parent_dir}_${dir_name}-$BACKUP_DATE.tar.gz -C "$dir" . 2>/dev/null; then
-                echo "✅ Successfully backed up $dir"
-              else
-                echo "⚠️ Directory $dir not accessible or empty, skipping"
-              fi
-            else
-              echo "ℹ️ Directory $dir does not exist, skipping"
-            fi
-          done
-          
-          # Nginx configuration
-          if [ -d "/etc/nginx" ]; then
-            echo "📦 Backing up Nginx configuration..."
-            if sudo tar -czf backup/websites/nginx-config-$BACKUP_DATE.tar.gz -C /etc/nginx . 2>/dev/null; then
-              echo "✅ Nginx config backed up successfully"
-            else
-              echo "⚠️ Nginx config backup failed, skipping"
-            fi
-          fi
-          
-          # Apache configuration
-          if [ -d "/etc/apache2" ]; then
-            echo "📦 Backing up Apache configuration..."
-            if sudo tar -czf backup/websites/apache2-config-$BACKUP_DATE.tar.gz -C /etc/apache2 . 2>/dev/null; then
-              echo "✅ Apache config backed up successfully"
-            else
-              echo "⚠️ Apache config backup failed, skipping"
-            fi
-          fi
-          
-          # SSL certificates
-          if [ -d "/etc/letsencrypt" ]; then
-            echo "📦 Backing up SSL certificates..."
-            if sudo tar -czf backup/websites/letsencrypt-$BACKUP_DATE.tar.gz -C /etc/letsencrypt . 2>/dev/null; then
-              echo "✅ SSL certificates backed up successfully"
-            else
-              echo "⚠️ SSL certificates backup failed, skipping"
-            fi
-          fi
-          
-          echo "✅ Websites backup completed (with any accessible directories)"
+          mysqldump -u root --all-databases > $BACKUP_DIR/db/all_databases_${BACKUP_DATE}.sql || true
+          tar -czf $BACKUP_DIR/db_${BACKUP_DATE}.tar.gz $BACKUP_DIR/db
 
-      - name: Backup MySQL/MariaDB databases
-        if: github.event.inputs.operation == 'backup'
+      - name: Install rclone
         run: |
-          echo "🗄️ Backing up MySQL databases..."
-          
-          # Check if MySQL/MariaDB is running
-          if sudo systemctl is-active --quiet mysql || sudo systemctl is-active --quiet mariadb; then
-            # Get all databases except system ones
-            DATABASES=$(sudo mysql -e "SHOW DATABASES;" | grep -v -E "Database|information_schema|performance_schema|mysql|sys")
-            
-            for db in $DATABASES; do
-              if [ -n "$db" ]; then
-                echo "💾 Backing up database: $db"
-                sudo mysqldump --single-transaction --routines --triggers "$db" | gzip > backup/databases/${db}-$BACKUP_DATE.sql.gz
-              fi
-            done
-            
-            # Backup MySQL configuration
-            if [ -f "/etc/mysql/my.cnf" ]; then
-              sudo cp /etc/mysql/my.cnf backup/databases/my.cnf
-            fi
-            
-            echo "✅ MySQL backup completed"
-          else
-            echo "ℹ️ MySQL/MariaDB not running, skipping database backup"
-          fi
+          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -o rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          rclone version
 
-      - name: Backup aaPanel data
-        if: github.event.inputs.operation == 'backup'
+      - name: Configure rclone
         run: |
-          echo "🎛️ Backing up aaPanel..."
-          
-          AAPANEL_DIRS="/www /usr/local/bt"
-          
-          for dir in $AAPANEL_DIRS; do
-            if [ -d "$dir" ]; then
-              dir_name=$(basename "$dir")
-              parent_dir=$(dirname "$dir" | sed 's/\//_/g')
-              echo "📦 Backing up aaPanel directory: $dir"
-              sudo tar -czf backup/aapanel/${parent_dir}_${dir_name}-$BACKUP_DATE.tar.gz \
-                --exclude="$dir/backup" \
-                --exclude="$dir/wwwlogs" \
-                --exclude="$dir/tmp" \
-                -C "$dir" . 2>/dev/null || echo "⚠️ Directory $dir not fully accessible"
-            fi
-          done
-          
-          # aaPanel configuration
-          if [ -d "/etc/bt" ]; then
-            sudo tar -czf backup/aapanel/bt-config-$BACKUP_DATE.tar.gz -C /etc/bt . 2>/dev/null
-          fi
-          
-          echo "✅ aaPanel backup completed"
+          cat > rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive
+          token = {"access_token":"ya29.a0AbVbYXX-EXAMPLE","token_type":"Bearer","refresh_token":"1//0gEXAMPLEqwertyuiopasdfghjkl","expiry":"2025-09-01T09:45:22.582329Z"}
+          client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
+          client_secret = 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
+          EOF
 
-      - name: Backup PHP configurations
-        if: github.event.inputs.operation == 'backup'
+      - name: Upload backups to Google Drive
         run: |
-          echo "🐘 Backing up PHP configurations..."
-          
-          # Find all PHP versions
-          PHP_FOUND=false
-          for php_dir in /etc/php*; do
-            if [ -d "$php_dir" ]; then
-              PHP_FOUND=true
-              php_version=$(basename "$php_dir")
-              echo "📦 Backing up $php_version..."
-              if sudo tar -czf backup/websites/${php_version}-config-$BACKUP_DATE.tar.gz -C "$php_dir" . 2>/dev/null; then
-                echo "✅ Successfully backed up $php_version"
-              else
-                echo "⚠️ Failed to backup $php_version, skipping"
-              fi
-            fi
-          done
-          
-          if [ "$PHP_FOUND" = false ]; then
-            echo "ℹ️ No PHP installations found, skipping PHP backup"
-          else
-            echo "✅ PHP configurations backup completed"
-          fi
+          rclone --config=rclone.conf copy $BACKUP_DIR gdrive:VPS_Backups/${BACKUP_DATE} -v
 
-      - name: Backup Tailscale state
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          echo "🔗 Backing up Tailscale state..."
-          if [ -f "/var/lib/tailscale/tailscaled.state" ]; then
-            sudo cp /var/lib/tailscale/tailscaled.state backup/system/tailscaled.state
-            echo "✅ Tailscale state backed up"
-          else
-            echo "⚠️ No Tailscale state found to backup"
-          fi
+      - name: Cleanup local backups
+        run: rm -rf $BACKUP_DIR rclone.conf rclone-*-linux-amd64*
 
-      - name: Create backup summary
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          echo "📋 Creating backup summary..."
-          SUMMARY_FILE="backup/logs/backup-summary-$BACKUP_DATE.txt"
-          
-          cat > "$SUMMARY_FILE" << EOF
-=== VPS Backup Summary ===
-Date: $(date)
-Hostname: $(hostname)
-OS: $(lsb_release -d 2>/dev/null | cut -f2 || echo "Unknown")
-Kernel: $(uname -r)
-
-=== Backup Contents ===
-EOF
-          
-          # List backup files
-          find backup/ -type f \( -name "*.tar.gz" -o -name "*.sql.gz" \) 2>/dev/null | while read file; do
-            if [ -f "$file" ]; then
-              size=$(du -h "$file" 2>/dev/null | cut -f1 || echo "Unknown")
-              echo "- $(basename "$file") ($size)" >> "$SUMMARY_FILE"
-            fi
-          done
-          
-          cat >> "$SUMMARY_FILE" << EOF
-
-=== System Info ===
-EOF
-          
-          # Add system info safely
-          df -h 2>/dev/null | grep -E "/$|/var|/home" >> "$SUMMARY_FILE" 2>/dev/null || echo "Disk info unavailable" >> "$SUMMARY_FILE"
-          echo "" >> "$SUMMARY_FILE"
-          free -h 2>/dev/null >> "$SUMMARY_FILE" 2>/dev/null || echo "Memory info unavailable" >> "$SUMMARY_FILE"
-          
-          echo "✅ Backup summary created at $SUMMARY_FILE"
-
-      - name: Upload backup to Google Drive
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          echo "☁️ Uploading backup to Google Drive..."
-          
-          # Create dated backup folder
-          BACKUP_FOLDER="$BACKUP_PATH/$(hostname)-$BACKUP_DATE"
-          
-          # Upload with progress and verification
-          rclone copy backup/ $GDRIVE_REMOTE:$BACKUP_FOLDER/ \
-            --progress \
-            --transfers 4 \
-            --checkers 8 \
-            --retries 3 \
-            --stats 30s \
-            --stats-one-line
-          
-          if [ $? -eq 0 ]; then
-            echo "✅ Backup uploaded successfully to $BACKUP_FOLDER"
-            
-            # Create latest backup link
-            rclone copy backup/ $GDRIVE_REMOTE:$BACKUP_PATH/latest/ \
-              --progress
-            
-            echo "✅ Latest backup link updated"
-          else
-            echo "❌ Backup upload failed"
-            exit 1
-          fi
-
-      - name: Clean old backups
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          echo "🧹 Cleaning old backups (keeping last 5)..."
-          
-          # List and clean old backups
-          rclone lsf $GDRIVE_REMOTE:$BACKUP_PATH/ | grep "$(hostname)-" | sort -r | tail -n +6 | while read old_backup; do
-            if [ -n "$old_backup" ]; then
-              echo "🗑️ Removing old backup: $old_backup"
-              rclone purge $GDRIVE_REMOTE:$BACKUP_PATH/$old_backup
-            fi
-          done
-          
-          echo "✅ Old backups cleaned"
-
-      - name: Download and restore backup
-        if: github.event.inputs.operation == 'restore'
-        run: |
-          echo "📥 Downloading backup from Google Drive..."
-          
-          # Download latest backup
-          mkdir -p restore/
-          rclone copy $GDRIVE_REMOTE:$BACKUP_PATH/latest/ restore/ \
-            --progress \
-            --transfers 4
-          
-          if [ $? -ne 0 ]; then
-            echo "❌ Failed to download backup"
-            exit 1
-          fi
-          
-          echo "✅ Backup downloaded successfully"
-          
-          # Show restore menu
-          echo ""
-          echo "=== Available Restore Options ==="
-          echo "📁 Found backup files:"
-          find restore/ -type f \( -name "*.tar.gz" -o -name "*.sql.gz" \) | sort
-          
-          echo ""
-          echo "🔧 Run the following commands manually on your VPS to restore:"
-          echo ""
-          echo "# Restore websites:"
-          find restore/websites/ -name "*.tar.gz" -exec basename {} \; 2>/dev/null | while read file; do
-            echo "sudo tar -xzf restore/websites/$file -C /target/directory/"
-          done
-          
-          echo ""
-          echo "# Restore databases:"
-          find restore/databases/ -name "*.sql.gz" -exec basename {} .sql.gz \; 2>/dev/null | while read db; do
-            echo "gunzip < restore/databases/${db}.sql.gz | mysql $db"
-          done
-          
-          echo ""
-          echo "# Restore user data:"
-          find restore/user-data/ -name "*.tar.gz" -exec basename {} \; 2>/dev/null | while read file; do
-            echo "sudo tar -xzf restore/user-data/$file -C /target/user/home/"
-          done
-
-      - name: Disconnect Tailscale
-        if: always()
-        run: |
-          echo "🔌 Disconnecting Tailscale..."
-          sudo tailscale down || true
-          echo "✅ Tailscale disconnected"
-
-            - name: Backup completion notification
-        if: github.event.inputs.operation == 'backup'
+      - name: Backup completion notification
         run: |
           echo ""
           echo "🎉 ================================="
@@ -468,9 +87,65 @@ EOF
           echo "🎉 ================================="
           echo ""
           echo "📊 Backup Statistics:"
-          du -sh backup/ 2>/dev/null || echo "Backup size calculation failed"
+          du -sh $BACKUP_DIR 2>/dev/null || echo "Backup size calculation failed"
           echo ""
-          echo "☁️ Uploaded to: $GDRIVE_REMOTE:$BACKUP_PATH/$(hostname)-$BACKUP_DATE"
-          echo "🔗 Latest backup link: $GDRIVE_REMOTE:$BACKUP_PATH/latest"
+          echo "☁️ Uploaded to: Google Drive /VPS_Backups/${BACKUP_DATE}"
+
+  restore-job:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.operation == 'restore'
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y unzip zip curl tar mysql-client
+
+      - name: Install rclone
+        run: |
+          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -o rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          rclone version
+
+      - name: Configure rclone
+        run: |
+          cat > rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive
+          token = {"access_token":"ya29.a0AbVbYXX-EXAMPLE","token_type":"Bearer","refresh_token":"1//0gEXAMPLEqwertyuiopasdfghjkl","expiry":"2025-09-01T09:45:22.582329Z"}
+          client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
+          client_secret = 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
+          EOF
+
+      - name: Download latest backup
+        run: |
+          LATEST=$(rclone --config=rclone.conf lsd gdrive:VPS_Backups | sort | tail -n1 | awk '{print $5}')
+          echo "Restoring backup: $LATEST"
+          rclone --config=rclone.conf copy gdrive:VPS_Backups/$LATEST ./restore -v
+          echo "LATEST=$LATEST" >> $GITHUB_ENV
+
+      - name: Extract and restore backups
+        run: |
+          echo "🔄 Extracting and restoring system files..."
+          sudo tar -xzf restore/home_*.tar.gz -C / || true
+          sudo tar -xzf restore/etc_*.tar.gz -C / || true
+          sudo tar -xzf restore/logs_*.tar.gz -C / || true
+
+          echo "🔄 Restoring MySQL databases..."
+          if ls restore/db/all_databases_*.sql 1> /dev/null 2>&1; then
+            sudo mysql -u root < restore/db/all_databases_*.sql || true
+          else
+            echo "⚠️ No SQL dump found in backup"
+          fi
+
+      - name: Restore completion notification
+        run: |
           echo ""
-          echo "📋 Check backup logs for detailed information"
+          echo "====================================="
+          echo "✅ AUTO RESTORE COMPLETED SUCCESSFULLY"
+          echo "====================================="
+          echo ""
+          echo "📂 Restored from: Google Drive /VPS_Backups/${LATEST}"
