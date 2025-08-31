@@ -1,258 +1,132 @@
-name: VPS Backup and Restore (6h session)
+name: Continuous Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # every 6h
+    - cron: '0 */6 * * *'
   workflow_dispatch:
-
-env:
-  # ---- Google Drive remote ----
-  GDRIVE_REMOTE: gdrivveed
-  BACKUP_PATH: vps-backup
-  TAILSCALE_STATE_DRIVE: vps-backup/system/tailscaled.state
-  # ---- Hardcoded rclone creds (you asked to keep inline) ----
-  RCLONE_CLIENT_ID: 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
-  RCLONE_CLIENT_SECRET: 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
-  RCLONE_TOKEN: >
-    {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}
-  # ---- Tailscale ----
-  TAILSCALE_AUTH: tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7
 
 jobs:
   vps-session:
-    runs-on: ubuntu-latest
-    timeout-minutes: 390   # 6.5h to be safe
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set timestamps
+      - name: "🚀 Installing Dependencies"
         run: |
-          echo "START_TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
-          echo "BACKUP_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+          set -e
+          echo "========================================="
+          echo "📦 Installing system dependencies..."
+          echo "========================================="
+          sudo apt update
+          sudo apt install -y sudo curl unzip zip tmate net-tools neofetch rclone
+          echo "✅ Dependencies installed."
 
-      - name: Create/ensure user and password
+      - name: "👤 Create user jacky"
         run: |
-          # You asked to make the user/password; using jacky/root (change if needed)
-          sudo useradd -m -s /bin/bash jacky 2>/dev/null || true
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky || true
-          echo "✅ User 'jacky' ensured with password."
+          set -e
+          if ! id "jacky" &>/dev/null; then
+            echo "👤 Creating user jacky..."
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+            sudo usermod -aG sudo jacky
+          else
+            echo "ℹ️ User jacky already exists."
+          fi
+          echo "✅ User setup complete."
 
-      - name: Install base tools
+      - name: "⬇️ Install latest Rclone"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl unzip zip rsync tar gzip mysql-client neofetch
-
-      - name: Install rclone (first)
-        run: |
-          echo "📦 Installing rclone..."
-          curl https://rclone.org/install.sh | sudo bash
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [${{ env.GDRIVE_REMOTE }}]
-          type = drive
-          client_id = $RCLONE_CLIENT_ID
-          client_secret = $RCLONE_CLIENT_SECRET
-          scope = drive
-          token = $RCLONE_TOKEN
-          EOF
+          set -e
+          echo "========================================="
+          echo "⬇️ Installing Rclone..."
+          echo "========================================="
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          sudo chmod 755 /usr/bin/rclone
+          echo "✅ Rclone Installed"
           rclone version
-          echo "✅ rclone ready"
 
-      - name: Try restoring Tailscale state from Drive (separate file)
+      - name: "📂 Restore Tailscale state"
         run: |
-          echo "🔎 Check for Tailscale state on Drive..."
-          mkdir -p /var/lib/tailscale
-          if rclone lsf $GDRIVE_REMOTE:${{ env.TAILSCALE_STATE_DRIVE }} >/dev/null 2>&1; then
-            echo "📥 Found Tailscale state. Restoring to /var/lib/tailscale/tailscaled.state"
-            sudo rclone copy $GDRIVE_REMOTE:${{ env.TAILSCALE_STATE_DRIVE }} /var/lib/tailscale/ --progress || true
+          set -e
+          echo "========================================="
+          echo "📂 Checking for existing Tailscale state..."
+          echo "========================================="
+          sudo mkdir -p /var/lib/tailscale
+          if rclone ls gdrive:vps-backup/system/tailscaled.state >/dev/null 2>&1; then
+            echo "🔥 Found previous Tailscale state. Restoring..."
+            sudo rclone copy gdrive:vps-backup/system/tailscaled.state /var/lib/tailscale/ --progress || true
             sudo chown root:root /var/lib/tailscale/tailscaled.state || true
             sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
             echo "TS_STATE_RESTORED=true" >> $GITHUB_ENV
           else
-            echo "ℹ️ No Tailscale state found on Drive."
+            echo "ℹ️ No previous Tailscale state found."
             echo "TS_STATE_RESTORED=false" >> $GITHUB_ENV
           fi
 
-      - name: Install Tailscale
+      - name: "🌐 Install & Start Tailscale"
         run: |
+          set -e
+          echo "========================================="
+          echo "🌐 Installing Tailscale..."
+          echo "========================================="
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sleep 4
-          if [ "${TS_STATE_RESTORED}" = "true" ] && [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔌 Starting Tailscale with restored state..."
-            sudo tailscale up --reset --hostname="gha-$(date +%s)"
-            echo "USED_OLD_IP=true" >> $GITHUB_ENV
+          sudo systemctl stop tailscaled || true
+          sudo systemctl start tailscaled
+          sudo systemctl enable tailscaled
+          
+          if [ "$TS_STATE_RESTORED" = "false" ]; then
+            echo "⚡ No old state, logging into Tailscale..."
+            sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname github-vps || true
+            echo "📦 Backing up new Tailscale state..."
+            sudo rclone copy /var/lib/tailscale/tailscaled.state gdrive:vps-backup/system/ --progress || true
           else
-            echo "🔌 No state found. Authenticating new connection..."
-            sudo tailscale up --authkey="$TAILSCALE_AUTH" --hostname="gha-$(date +%s)"
-            echo "USED_OLD_IP=false" >> $GITHUB_ENV
-            # Immediately back up new state to Drive
-            if [ -f /var/lib/tailscale/tailscaled.state ]; then
-              echo "☁️ Uploading newly created Tailscale state to Drive..."
-              rclone copy /var/lib/tailscale/tailscaled.state $GDRIVE_REMOTE:${{ env.TAILSCALE_STATE_DRIVE }} --progress
-              echo "✅ Tailscale state uploaded."
-            fi
-          fi
-          sudo tailscale status || true
-
-      - name: OPTIONAL - Restore latest VPS backup at session start
-        run: |
-          echo "🔄 Attempting to restore latest VPS backup into runner (ephemeral)..."
-          mkdir -p restore
-          if rclone lsd $GDRIVE_REMOTE:${BACKUP_PATH} >/dev/null 2>&1; then
-            LATEST_DIR=$(rclone lsf $GDRIVE_REMOTE:${BACKUP_PATH}/ | grep -E "^$(hostname)-|^latest/" | sort | tail -n1)
-            if [ -n "$LATEST_DIR" ]; then
-              echo "📥 Downloading $LATEST_DIR"
-              rclone copy $GDRIVE_REMOTE:${BACKUP_PATH}/${LATEST_DIR} restore/ --progress || true
-              # Extract what we can (ignore protected read errors)
-              sudo tar --ignore-failed-read -xzf restore/websites/*.tar.gz -C / 2>/dev/null || true
-              sudo tar --ignore-failed-read -xzf restore/aapanel/*.tar.gz -C / 2>/dev/null || true
-              sudo tar --ignore-failed-read -xzf restore/user-data/*.tar.gz -C / 2>/dev/null || true
-              # MySQL import if any dump exists
-              if ls restore/databases/*.sql.gz 1>/dev/null 2>&1; then
-                for f in restore/databases/*.sql.gz; do
-                  echo "🗄️ Importing $f"
-                  gunzip -c "$f" | sudo mysql || true
-                done
-              fi
-              rm -rf restore || true
-              echo "✅ Initial restore (best-effort) finished."
-            else
-              echo "ℹ️ No previous backup directories found."
-            fi
-          else
-            echo "ℹ️ No backup root path on Drive yet."
+            echo "✅ Using restored Tailscale state."
           fi
 
-      - name: Keep session alive for ~6 hours
+      - name: "💾 Restore VPS Data"
         run: |
-          echo "🕒 Keeping session alive for 6h..."
-          DURATION=$((6*60))   # minutes
-          for i in $(seq 1 $DURATION); do
-            printf "."
-            sleep 60
-          done
-          echo ""
-          echo "⏰ 6h reached. Proceeding to backup..."
+          set -e
+          echo "========================================="
+          echo "💾 Restoring VPS data from backup..."
+          echo "========================================="
+          sudo rclone copy gdrive:vps-backup/home/ /home/jacky/ --progress || true
+          sudo chown -R jacky:jacky /home/jacky || true
+          sudo rclone copy gdrive:vps-backup/etc/ /etc/ --progress || true
+          sudo rclone copy gdrive:vps-backup/www/ /var/www/ --progress || true
+          echo "✅ Restore complete."
 
-      - name: Prepare backup directories
+      - name: "⏳ Keep Session Alive"
         run: |
-          mkdir -p backup/{websites,databases,aapanel,user-data,system,logs}
-          echo "📁 Backup dirs ready."
+          set -e
+          echo "========================================="
+          echo "⏳ VPS Session is active for ~6h..."
+          echo "========================================="
+          sleep 21600
 
-      - name: Backup user data and home directories
+      - name: "📦 Backup VPS Data"
+        if: always()
         run: |
-          echo "👤 Backing up user data..."
-          sudo tar --ignore-failed-read -czf backup/user-data/root-data-${BACKUP_DATE}.tar.gz \
-            --exclude='/root/.cache' --exclude='/root/.npm' --exclude='/root/.docker' --exclude='/root/snap' \
-            -C /root . 2>/dev/null || true
-          for user_home in /home/*; do
-            [ -d "$user_home" ] || continue
-            username=$(basename "$user_home")
-            sudo tar --ignore-failed-read -czf backup/user-data/${username}-data-${BACKUP_DATE}.tar.gz \
-              --exclude="$user_home/.cache" --exclude="$user_home/.npm" --exclude="$user_home/.docker" \
-              -C "$user_home" . 2>/dev/null || true
-          done
-          echo "✅ User data backup done."
+          set -e
+          echo "========================================="
+          echo "📦 Starting VPS backup process..."
+          echo "========================================="
+          sudo rclone copy /home/jacky gdrive:vps-backup/home/ --progress || true
+          sudo rclone copy /etc gdrive:vps-backup/etc/ --progress || true
+          sudo rclone copy /var/www gdrive:vps-backup/www/ --progress || true
+          echo "✅ Backup complete."
 
-      - name: Backup websites/configs/SSL
+      - name: "📂 Backup Tailscale state"
+        if: always()
         run: |
-          echo "🌐 Backing up websites/configs..."
-          for dir in /var/www /usr/share/nginx/html /opt/lampp/htdocs; do
-            if [ -d "$dir" ]; then
-              parent=$(dirname "$dir" | sed 's#/#_#g'); base=$(basename "$dir")
-              sudo tar --ignore-failed-read -czf backup/websites/${parent}_${base}-${BACKUP_DATE}.tar.gz -C "$dir" . 2>/dev/null || true
-            fi
-          done
-          [ -d /etc/nginx ] && sudo tar --ignore-failed-read -czf backup/websites/nginx-config-${BACKUP_DATE}.tar.gz -C /etc/nginx . || true
-          [ -d /etc/apache2 ] && sudo tar --ignore-failed-read -czf backup/websites/apache2-config-${BACKUP_DATE}.tar.gz -C /etc/apache2 . || true
-          [ -d /etc/letsencrypt ] && sudo tar --ignore-failed-read -czf backup/websites/letsencrypt-${BACKUP_DATE}.tar.gz -C /etc/letsencrypt . || true
-          echo "✅ Websites/config backup done."
-
-      - name: Backup PHP configurations
-        run: |
-          FOUND=false
-          for php_dir in /etc/php*; do
-            [ -d "$php_dir" ] || continue
-            FOUND=true
-            base=$(basename "$php_dir")
-            sudo tar --ignore-failed-read -czf backup/websites/${base}-config-${BACKUP_DATE}.tar.gz -C "$php_dir" . || true
-          done
-          [ "$FOUND" = false ] && echo "ℹ️ No PHP directories found."
-
-      - name: Backup MySQL/MariaDB databases
-        run: |
-          echo "🗄️ Backing up MySQL..."
-          if sudo systemctl is-active --quiet mysql || sudo systemctl is-active --quiet mariadb; then
-            DBS=$(sudo mysql -N -e "SHOW DATABASES;" | grep -v -E "information_schema|performance_schema|mysql|sys" || true)
-            for db in $DBS; do
-              sudo mysqldump --single-transaction --routines --triggers "$db" | gzip > backup/databases/${db}-${BACKUP_DATE}.sql.gz || true
-            done
-            [ -f /etc/mysql/my.cnf ] && sudo cp /etc/mysql/my.cnf backup/databases/my.cnf || true
-            echo "✅ MySQL backup done."
-          else
-            echo "ℹ️ MySQL not running; skipping DB backup."
-          fi
-
-      - name: Backup Tailscale state (separate file)
-        run: |
-          echo "🔗 Backing up Tailscale state separately..."
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            mkdir -p backup/system
-            sudo cp /var/lib/tailscale/tailscaled.state backup/system/tailscaled.state
-            echo "✅ Local Tailscale state copied."
-          else
-            echo "⚠️ No local Tailscale state file."
-          fi
-
-      - name: Create backup summary
-        run: |
-          SUMMARY_FILE="backup/logs/backup-summary-${BACKUP_DATE}.txt"
-          mkdir -p backup/logs
-          {
-            echo "=== VPS Backup Summary ==="
-            echo "Date: $(date)"
-            echo "Hostname: $(hostname)"
-            echo "Kernel: $(uname -r)"
-            echo
-            echo "=== Backup Contents ==="
-            find backup/ -type f \( -name "*.tar.gz" -o -name "*.sql.gz" -o -name "tailscaled.state" \) -printf "- %P (%k KB)\n" 2>/dev/null || true
-            echo
-            echo "=== System Info ==="
-            df -h 2>/dev/null | grep -E "/$|/var|/home" || true
-            echo
-            free -h 2>/dev/null || true
-          } > "$SUMMARY_FILE"
-          echo "✅ Summary written: $SUMMARY_FILE"
-
-      - name: Upload backup to Drive (including separate Tailscale state)
-        run: |
-          BACKUP_FOLDER="${BACKUP_PATH}/$(hostname)-${BACKUP_DATE}"
-          echo "☁️ Uploading to: $BACKUP_FOLDER"
-          rclone copy backup/ $GDRIVE_REMOTE:${BACKUP_FOLDER}/ --progress --transfers 4 --checkers 8 --retries 3 --stats 30s --stats-one-line
-          echo "✅ Upload complete."
-          echo "☁️ Updating latest link..."
-          rclone copy backup/ $GDRIVE_REMOTE:${BACKUP_PATH}/latest/ --progress || true
-          # Also ensure standalone Tailscale state path is updated:
-          if [ -f backup/system/tailscaled.state ]; then
-            rclone copy backup/system/tailscaled.state $GDRIVE_REMOTE:${{ env.TAILSCALE_STATE_DRIVE }} --progress || true
-          fi
-
-      - name: Clean local artifacts
-        run: |
-          rm -rf backup || true
-
-      - name: Final notes
-        run: |
-          echo ""
-          echo "🎉 ========================================"
-          echo "✅ SESSION DONE: Restore/Keepalive/Backup OK"
-          echo "🎉 ========================================"
-          echo ""
-          echo "Used old Tailscale IP: ${USED_OLD_IP}"
-          echo "Backups at: $GDRIVE_REMOTE:${BACKUP_PATH}/$(hostname)-${BACKUP_DATE}"
-          echo "Latest link: $GDRIVE_REMOTE:${BACKUP_PATH}/latest"
-          echo "Tailscale state: $GDRIVE_REMOTE:${{ env.TAILSCALE_STATE_DRIVE }}"
+          set -e
+          echo "========================================="
+          echo "📂 Saving Tailscale state..."
+          echo "========================================="
+          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrive:vps-backup/system/ --progress || true
+          echo "✅ Tailscale state saved."
