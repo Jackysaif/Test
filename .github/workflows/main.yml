@@ -53,19 +53,39 @@ jobs:
       - name: Verify rclone access
         run: |
           echo "🔍 Verifying rclone access..."
-          if rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
-            echo "✅ rclone access verified successfully"
+          echo "📝 Testing rclone configuration..."
+          
+          # Show rclone version and config
+          rclone version
+          echo ""
+          echo "📂 Testing basic access..."
+          
+          # Try different commands to debug the issue
+          echo "🔸 Trying rclone lsf..."
+          if rclone lsf $GDRIVE_REMOTE: -v 2>&1; then
+            echo "✅ rclone lsf successful"
           else
-            echo "❌ rclone access failed"
-            echo "🔧 Attempting to refresh token..."
-            if rclone config reconnect $GDRIVE_REMOTE: --auto-confirm 2>/dev/null; then
-              echo "✅ Token refreshed, trying again..."
-              rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1 && echo "✅ Access verified" || exit 1
+            echo "❌ rclone lsf failed"
+            echo ""
+            echo "🔸 Trying rclone ls..."
+            if rclone ls $GDRIVE_REMOTE: -v 2>&1; then
+              echo "✅ rclone ls successful"
             else
-              echo "❌ Token refresh failed"
-              exit 1
+              echo "❌ rclone ls failed"
+              echo ""
+              echo "🔸 Trying rclone about..."
+              if rclone about $GDRIVE_REMOTE: -v 2>&1; then
+                echo "✅ rclone about successful"
+              else
+                echo "❌ All rclone commands failed"
+                echo "🔧 Showing detailed error..."
+                rclone lsf $GDRIVE_REMOTE: -vv 2>&1 || true
+                exit 1
+              fi
             fi
           fi
+          
+          echo "✅ rclone access verified successfully"
 
       - name: Install Tailscale
         run: |
