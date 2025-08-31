@@ -1,127 +1,105 @@
-name: Continuous Persistent VPS
+name: VPS Backup and Restore
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # Run every 6 hours
+    - cron: "0 */6 * * *"  # every 6 hours
 
 jobs:
   vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 380  # 6h20m to allow backup before job ends
+    timeout-minutes: 380  # 6h20m to allow backups to finish
 
     steps:
-    # ============================================================
-    # 0. Prep Environment
-    # ============================================================
-    - name: ⚡ Update & Install Essentials
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y sudo curl unzip zip tmate neofetch net-tools rclone
+      # ============================================================
+      # 0) Prep: packages
+      # ============================================================
+      - name: "🚀 Install dependencies"
+        run: |
+          set -e
+          echo "🔄 Updating apt & installing required tools..."
+          sudo apt-get update
+          sudo apt-get install -y sudo curl unzip zip tmate neofetch net-tools rclone tar gzip coreutils
 
-    # ============================================================
-    # 1. Configure rclone
-    # ============================================================
-    - name: ☁️ Configure rclone
-      run: |
-        echo "⚙️ Setting up rclone configuration..."
-        mkdir -p ~/.config/rclone
-        cat > ~/.config/rclone/rclone.conf <<EOF
-[gdrivveed]
-type = drive
-client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
-client_secret = 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
-scope = drive
-root_folder_id = appDataFolder
-token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}
-team_drive =
-EOF
+      # ============================================================
+      # 1) Configure rclone (REMOTE: gdrivveed)
+      #    (use printf lines to avoid YAML heredoc parsing issues)
+      # ============================================================
+      - name: "☁️ Configure rclone (gdrivveed)"
+        run: |
+          set -e
+          echo "⚙️ Writing rclone.conf for remote 'gdrivveed'..."
+          mkdir -p ~/.config/rclone
+          cfg="$HOME/.config/rclone/rclone.conf"
+          : > "$cfg"
+          printf '%s\n' '[gdrivveed]'                                  >> "$cfg"
+          printf '%s\n' 'type = drive'                                 >> "$cfg"
+          printf '%s\n' 'client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com' >> "$cfg"
+          printf '%s\n' 'client_secret = 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' >> "$cfg"
+          printf '%s\n' 'scope = drive'                                >> "$cfg"
+          printf '%s\n' 'root_folder_id = appDataFolder'               >> "$cfg"
+          printf '%s\n' 'token = {"access_token":"ya29.A0AS3H6Ny6o1OvniaMus3wYXmmqBbanb_MNJmGTEfrQoBCbR_qTGcDCyGrObAOymSrxJ1Nq3g9Rd7JYyvPyD6L4vmgOwuJxEuePxz7--w3-Rl18LBNve5-1s8UVy0T_0VZOnn8TNqVdvScS9atFE8lUu4uPZxwb1ditSB3f9mqzZZOJAiKIXG31PHH9wu8XVdaLSq40pcaCgYKAbcSARQSFQHGX2MizZMgdAx4L1I4h9UJZKs6AQ0206","token_type":"Bearer","refresh_token":"1//0g1VFlKVUuwKlCgYIARAAGBASNwF-L9IrGhVBSYCiWVLzMiBL5VSP4_neIDcsmPELBjeHMIYSmA057I-AxPy2SAXr0nm-6vRRhUQ","expiry":"2025-08-31T15:42:32.953801261Z","expires_in":3599}' >> "$cfg"
+          printf '%s\n' 'team_drive ='                                 >> "$cfg"
+          echo "✅ rclone configured. Testing remote listing..."
+          rclone lsd gdrivveed: || (echo "❌ rclone cannot access Drive remote 'gdrivveed'"; exit 1)
 
-    # ============================================================
-    # 2. Create User & Password
-    # ============================================================
-    - name: 👤 Create User
-      run: |
-        sudo useradd -m -s /bin/bash jacky
-        echo "jacky:root" | sudo chpasswd
-        sudo usermod -aG sudo jacky
-        echo "✅ User 'jacky' created with password 'root'"
+      # ============================================================
+      # 2) Create user & password
+      # ============================================================
+      - name: "👤 Create local user"
+        run: |
+          set -e
+          if ! id "jacky" >/dev/null 2>&1; then
+            echo "👤 Creating user 'jacky'..."
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+            sudo usermod -aG sudo jacky
+          else
+            echo "ℹ️ User 'jacky' already exists, skipping."
+          fi
+          echo "✅ User ready."
 
-    # ============================================================
-    # 3. Restore Tailscale State
-    # ============================================================
-    - name: 🔑 Restore Tailscale state if exists
-      run: |
-        sudo mkdir -p /var/lib/tailscale
-        if rclone ls gdrivveed:vps-backup/system/tailscaled.state >/dev/null 2>&1; then
-          echo "🔥 Found Tailscale state. Restoring..."
-          sudo rclone copy gdrivveed:vps-backup/system/tailscaled.state /var/lib/tailscale/ --progress || true
-          sudo chown root:root /var/lib/tailscale/tailscaled.state
-          sudo chmod 600 /var/lib/tailscale/tailscaled.state
-          echo "TS_STATE_RESTORED=true" >> $GITHUB_ENV
-        else
-          echo "ℹ️ No Tailscale state found."
-          echo "TS_STATE_RESTORED=false" >> $GITHUB_ENV
-        fi
+      # ============================================================
+      # 3) Restore Tailscale state if present
+      # ============================================================
+      - name: "🔄 Restore Tailscale state (if exists)"
+        run: |
+          set -e
+          echo "📂 Checking Drive for /vps-backup/system/tailscaled.state ..."
+          sudo mkdir -p /var/lib/tailscale
+          if rclone ls gdrivveed:vps-backup/system/tailscaled.state >/dev/null 2>&1; then
+            echo "🔥 Found tailscaled.state in Drive. Restoring..."
+            sudo rclone copy gdrivveed:vps-backup/system/tailscaled.state /var/lib/tailscale/ --progress
+            sudo chown root:root /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "TS_STATE_RESTORED=true" >> "$GITHUB_ENV"
+          else
+            echo "ℹ️ No previous tailscaled.state found. Will create new identity."
+            echo "TS_STATE_RESTORED=false" >> "$GITHUB_ENV"
+          fi
 
-    # ============================================================
-    # 4. Install & Connect Tailscale
-    # ============================================================
-    - name: 🌐 Install & Start Tailscale
-      run: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-        if [ "$TS_STATE_RESTORED" = "true" ]; then
-          echo "🔄 Reusing old Tailscale state..."
-          sudo systemctl restart tailscaled
-          sudo tailscale up --reset --accept-routes --accept-dns
-        else
-          echo "🆕 No state found. Logging in fresh..."
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname "github-vps" --accept-routes --accept-dns
-          echo "📂 Backing up new Tailscale state"
-          sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/system/ --progress
-        fi
-        echo "🌍 VPS IP:" $(tailscale ip -4)
+      # ============================================================
+      # 4) Install & connect Tailscale
+      #    - If state restored: reuse it
+      #    - If no state: login with auth key (from GitHub Secret) and back up state immediately
+      # ============================================================
+      - name: "🌐 Install & Start Tailscale"
+        run: |
+          set -e
+          echo "⬇️ Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          if [ "${TS_STATE_RESTORED:-false}" = "true" ]; then
+            echo "🔁 Reusing restored Tailscale state..."
+            sudo tailscale up --reset --accept-routes --accept-dns || true
+          else
+            echo "🆕 No state restored. Logging in with new identity..."
+            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname "github-vps-$(date +%s)" --accept-routes --accept-dns || true
+            echo "💾 Backing up newly created tailscaled.state..."
+            sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/system/ --progress || true
+          fi
+          echo "🔑 Tailscale IPs:"
+          sudo tailscale ip -4 || true
+          sudo tailscale ip -6 || true
 
-    # ============================================================
-    # 5. Restore VPS Backup
-    # ============================================================
-    - name: 📦 Restore VPS Backup
-      run: |
-        mkdir -p restore
-        LATEST_BACKUP=$(rclone lsf gdrivveed:vps-backup/data/ | sort | tail -n 1 || true)
-        if [ -n "$LATEST_BACKUP" ]; then
-          echo "📂 Found VPS backup: $LATEST_BACKUP"
-          rclone copy gdrivveed:vps-backup/data/$LATEST_BACKUP ./restore/
-          for archive in ./restore/*.tar.gz; do
-            echo "📦 Extracting $archive ..."
-            sudo tar --ignore-failed-read -xzf "$archive" -C /
-          done
-        else
-          echo "ℹ️ No VPS backup found."
-        fi
-
-    # ============================================================
-    # 6. Keep Session Alive
-    # ============================================================
-    - name: ⏳ Keep Session Alive for 6h
-      run: |
-        echo "🔒 VPS Session active for 6h..."
-        sleep 21600  # 6h
-
-    # ============================================================
-    # 7. Backup VPS on Finish or Cancel
-    # ============================================================
-    - name: 💾 Backup VPS
-      if: always()
-      run: |
-        BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
-        mkdir -p $BACKUP_DIR
-        echo "📦 Creating VPS backup..."
-        sudo tar --ignore-failed-read -czf $BACKUP_DIR/home.tar.gz /home || true
-        sudo tar --ignore-failed-read -czf $BACKUP_DIR/etc.tar.gz /etc || true
-        sudo tar --ignore-failed-read -czf $BACKUP_DIR/logs.tar.gz /var/log || true
-        echo "☁️ Uploading VPS backup to gdrivveed..."
-        rclone copy $BACKUP_DIR gdrivveed:vps-backup/data/ --progress
-        echo "☁️ Uploading Tailscale state..."
-        sudo rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/system/ --progress || true
-        echo "✅ Backup complete!"
+      # ======================================
