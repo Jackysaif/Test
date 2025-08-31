@@ -63,6 +63,13 @@ jobs:
         run: |
           if rclone lsf gdrivveed:vps-backup/archive.zip >/dev/null 2>&1; then
             echo "Backup archive found. Restoring..."
+            
+            # Clean up old user directories before restoring
+            sudo rm -rf /root/*
+            sudo rm -rf /root/.*
+            sudo rm -rf /home/not/*
+            sudo rm -rf /home/not/.*
+            
             sudo rclone copy gdrivveed:vps-backup/archive.zip /tmp/ --progress
             echo "Extracting archive..."
             sudo unzip /tmp/archive.zip -d /
