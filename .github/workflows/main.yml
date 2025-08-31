@@ -32,12 +32,22 @@ jobs:
 
       - name: Verify rclone access
         run: |
-          echo "🔍 Verifying rclone access to Google Drive..."
-          if rclone lsd $GDRIVE_REMOTE: >/dev/null 2>&1; then
+          echo "🔍 Verifying rclone access..."
+          # Test with a simple operation that works with appDataFolder
+          if rclone ls $GDRIVE_REMOTE: >/dev/null 2>&1; then
+            echo "✅ rclone access verified successfully"
+          elif rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
             echo "✅ rclone access verified successfully"
           else
-            echo "❌ rclone access failed - check your existing configuration"
-            exit 1
+            echo "❌ rclone access failed"
+            echo "🔧 Trying to create backup directory..."
+            rclone mkdir $GDRIVE_REMOTE:$BACKUP_PATH 2>/dev/null || true
+            if rclone lsf $GDRIVE_REMOTE: >/dev/null 2>&1; then
+              echo "✅ rclone access working after directory creation"
+            else
+              echo "❌ rclone configuration issue - check your setup"
+              exit 1
+            fi
           fi
 
       - name: Install Tailscale
