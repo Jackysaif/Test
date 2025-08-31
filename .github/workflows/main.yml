@@ -194,26 +194,47 @@ jobs:
               dir_name=$(basename "$dir")
               parent_dir=$(dirname "$dir" | sed 's/\//_/g')
               echo "📦 Backing up: $dir"
-              sudo tar -czf backup/websites/${parent_dir}_${dir_name}-$BACKUP_DATE.tar.gz -C "$dir" . 2>/dev/null || echo "⚠️ Directory $dir not accessible"
+              if sudo tar -czf backup/websites/${parent_dir}_${dir_name}-$BACKUP_DATE.tar.gz -C "$dir" . 2>/dev/null; then
+                echo "✅ Successfully backed up $dir"
+              else
+                echo "⚠️ Directory $dir not accessible or empty, skipping"
+              fi
+            else
+              echo "ℹ️ Directory $dir does not exist, skipping"
             fi
           done
           
           # Nginx configuration
           if [ -d "/etc/nginx" ]; then
-            sudo tar -czf backup/websites/nginx-config-$BACKUP_DATE.tar.gz -C /etc/nginx . 2>/dev/null
+            echo "📦 Backing up Nginx configuration..."
+            if sudo tar -czf backup/websites/nginx-config-$BACKUP_DATE.tar.gz -C /etc/nginx . 2>/dev/null; then
+              echo "✅ Nginx config backed up successfully"
+            else
+              echo "⚠️ Nginx config backup failed, skipping"
+            fi
           fi
           
           # Apache configuration
           if [ -d "/etc/apache2" ]; then
-            sudo tar -czf backup/websites/apache2-config-$BACKUP_DATE.tar.gz -C /etc/apache2 . 2>/dev/null
+            echo "📦 Backing up Apache configuration..."
+            if sudo tar -czf backup/websites/apache2-config-$BACKUP_DATE.tar.gz -C /etc/apache2 . 2>/dev/null; then
+              echo "✅ Apache config backed up successfully"
+            else
+              echo "⚠️ Apache config backup failed, skipping"
+            fi
           fi
           
           # SSL certificates
           if [ -d "/etc/letsencrypt" ]; then
-            sudo tar -czf backup/websites/letsencrypt-$BACKUP_DATE.tar.gz -C /etc/letsencrypt . 2>/dev/null
+            echo "📦 Backing up SSL certificates..."
+            if sudo tar -czf backup/websites/letsencrypt-$BACKUP_DATE.tar.gz -C /etc/letsencrypt . 2>/dev/null; then
+              echo "✅ SSL certificates backed up successfully"
+            else
+              echo "⚠️ SSL certificates backup failed, skipping"
+            fi
           fi
           
-          echo "✅ Websites backup completed"
+          echo "✅ Websites backup completed (with any accessible directories)"
 
       - name: Backup MySQL/MariaDB databases
         if: github.event.inputs.operation == 'backup'
