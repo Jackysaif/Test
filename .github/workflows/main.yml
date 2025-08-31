@@ -63,7 +63,7 @@ jobs:
         run: |
           if rclone lsf gdrivveed:vps-backup/ >/dev/null 2>&1; then
             echo "Backup found on Google Drive. Restoring..."
-            sudo rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --progress
+            sudo rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --progress
             echo "Backup restored successfully."
             echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
@@ -116,7 +116,7 @@ jobs:
       - name: Backup VPS data to rclone (on completion)
         run: |
           sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --progress
+          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --progress
           echo "Backup uploaded successfully."
 
       - name: Final Backup on Cancel 
@@ -124,5 +124,5 @@ jobs:
         run: |
           echo "Workflow canceled. Performing final backup..."
           sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --progress
+          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --progress
           echo "Final backup completed."
