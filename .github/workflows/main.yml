@@ -58,16 +58,18 @@ jobs:
           EOF
           rclone listremotes
 
-      - name: Restore VPS backup from rclone
+      - name: Restore VPS from backup archive
         id: restore
         run: |
-          if rclone lsf gdrivveed:vps-backup/ >/dev/null 2>&1; then
-            echo "Backup found on Google Drive. Restoring..."
-            sudo rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --drive-pacer-min-sleep 10ms --retries 3 --retries-sleep 3s --progress
+          if rclone lsf gdrivveed:vps-backup/backup.tar.gz >/dev/null 2>&1; then
+            echo "Backup archive found on Google Drive. Restoring..."
+            rclone copy gdrivveed:vps-backup/backup.tar.gz /tmp/backup.tar.gz --progress
+            echo "Restoring from archive..."
+            sudo tar -xzpvf /tmp/backup.tar.gz -C / --exclude='_vps_backup_work_dir' --exclude='_work'
             echo "Backup restored successfully."
             echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No backup found on Google Drive. Starting with a fresh VPS."
+            echo "No backup archive found. Starting with a fresh VPS."
             echo "backup_found=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -82,19 +84,6 @@ jobs:
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
-        if: ${{ steps.restore.outputs.backup_found == 'true' }}
-
-      - name: Start Tailscale (New IP) and immediately back up
-        run: |
-          sudo tailscaled &
-          sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
-          echo "Backup up new Tailscale state immediately."
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          rclone copy /var/lib/tailscale/tailscaled.state gdrivveed:vps-backup/var/lib/tailscale/ --progress
-        if: ${{ steps.restore.outputs.backup_found == 'false' }}
 
       - name: Start manual tmate session
         run: |
@@ -113,16 +102,19 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup VPS data to rclone (on completion)
+      - name: Backup VPS data to archive (on completion)
         run: |
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --drive-pacer-min-sleep 10ms --retries 3 --retries-sleep 3s --progress
+          echo "Creating full system backup archive..."
+          sudo tar -czpvf /tmp/backup.tar.gz --one-file-system --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' --exclude='tmp/*' --exclude='run/*' --exclude='mnt/*' --exclude='media/*' --exclude='lost+found' --exclude='_vps_backup_work_dir' --exclude='_work' --exclude='var/cache/*' --exclude='var/run/*' /
+          echo "Uploading backup archive to Google Drive..."
+          sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Backup uploaded successfully."
 
       - name: Final Backup on Cancel 
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
-          sudo chown -R $USER:$USER /var/lib/tailscale
-          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --exclude '/dev/**' --exclude '/proc/**' --exclude '/sys/**' --exclude '/tmp/**' --exclude '/run/**' --exclude '/var/run/**' --exclude '/var/cache/**' --exclude '/snap/**' --exclude '/root/.dotnet/**' --exclude '/etc/apache2/**' --exclude '/usr/sbin/**' --skip-links --drive-pacer-min-sleep 10ms --retries 3 --retries-sleep 3s --progress
+          sudo tar -czpvf /tmp/backup.tar.gz --one-file-system --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' --exclude='tmp/*' --exclude='run/*' --exclude='mnt/*' --exclude='media/*' --exclude='lost+found' --exclude='_vps_backup_work_dir' --exclude='_work' --exclude='var/cache/*' --exclude='var/run/*' /
+          echo "Uploading final backup archive to Google Drive..."
+          sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Final backup completed."
