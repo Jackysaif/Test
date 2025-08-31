@@ -23,7 +23,7 @@ jobs:
       - name: Set hostname
         run: |
           sudo hostnamectl set-hostname notfleppy
-          echo "127.00.1 notfleppy" | sudo tee -a /etc/hosts
+          echo "127.0.0.1 notfleppy" | sudo tee -a /etc/hosts
 
       - name: Set root password
         run: |
@@ -58,8 +58,7 @@ jobs:
           EOF
           rclone listremotes
 
-      - name: Restore VPS from backup archive
-        id: restore
+      - name: Restore essential data from backup archive
         run: |
           if rclone lsf gdrivveed:vps-backup/backup.tar.gz >/dev/null 2>&1; then
             echo "Backup archive found on Google Drive. Restoring..."
@@ -67,10 +66,8 @@ jobs:
             echo "Restoring from archive..."
             sudo tar -xzpvf /tmp/backup.tar.gz -C /
             echo "Backup restored successfully."
-            echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
             echo "No backup archive found. Starting with a fresh VPS."
-            echo "backup_found=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install Tailscale
@@ -102,10 +99,10 @@ jobs:
       - name: Sleep to keep VPS alive
         run: sleep 21600
 
-      - name: Backup VPS data to archive (on completion)
+      - name: Backup essential data to archive (on completion)
         run: |
-          echo "Creating full system backup archive..."
-          sudo tar -czpvf /tmp/backup.tar.gz --one-file-system --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' --exclude='tmp/*' --exclude='run/*' --exclude='mnt/*' --exclude='media/*' --exclude='lost+found' --exclude='/snap/*' --exclude='/opt/*' --exclude='/home/runner/*' --exclude='/var/cache/*' --exclude='/var/run/*' --exclude='_vps_backup_work_dir' --exclude='_work' /
+          echo "Creating essential data backup archive..."
+          sudo tar -czpvf /tmp/backup.tar.gz /home /etc /usr/local /var/lib/tailscale /var/www
           echo "Uploading backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Backup uploaded successfully."
@@ -114,7 +111,7 @@ jobs:
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
-          sudo tar -czpvf /tmp/backup.tar.gz --one-file-system --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' --exclude='tmp/*' --exclude='run/*' --exclude='mnt/*' --exclude='media/*' --exclude='lost+found' --exclude='/snap/*' --exclude='/opt/*' --exclude='/home/runner/*' --exclude='/var/cache/*' --exclude='/var/run/*' --exclude='_vps_backup_work_dir' --exclude='_work' /
+          sudo tar -czpvf /tmp/backup.tar.gz /home /etc /usr/local /var/lib/tailscale /var/www
           echo "Uploading final backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Final backup completed."
