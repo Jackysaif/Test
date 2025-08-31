@@ -1,9 +1,3 @@
-Your current script is already configured to back up the entire VPS, including all installed apps and user data. The command rclone copy / gdrivveed:vps-backup/ is designed to copy the entire root filesystem (/), which contains all your installed programs, configuration files, and user data (like the aapanel and website files).
-The reason you might think it's not working is likely the same permission issue you faced with the restore. The backup process needs sudo to access and copy files from system-protected directories. The last rclone copy command in your script also needs to be run with sudo.
-Here is the complete, corrected code with sudo added to both the restore and backup steps to ensure the full system is backed up and restored correctly.
-⚠️ Security Warning ⚠️
-This code includes hardcoded sensitive information, such as the rclone token. This is a major security risk. Anyone with access to your GitHub repository will be able to see and use these credentials. The recommended best practice is to always use GitHub Secrets to store sensitive data securely.
-Full Corrected Workflow File
 name: Continuous Persistent VPS
 
 on:
@@ -124,4 +118,3 @@ jobs:
           sudo chown -R $USER:$USER /var/lib/tailscale
           sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
           echo "Backup uploaded successfully."
-
