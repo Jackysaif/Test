@@ -28,34 +28,16 @@ jobs:
       - name: Install required packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y rsync tar gzip mysql-client curl unzip
+          sudo apt-get install -y rsync tar gzip mysql-client
 
-      - name: Setup rclone
+      - name: Verify rclone access
         run: |
-          echo "⚙️ Installing and configuring rclone..."
-          curl https://rclone.org/install.sh | sudo bash
-          
-          # Create rclone config directory
-          mkdir -p ~/.config/rclone
-          
-          # Create rclone configuration with hardcoded keys
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
-          [gdrivveed]
-          type = drive
-          client_id = ${{ secrets.GOOGLE_DRIVE_CLIENT_ID }}
-          client_secret = ${{ secrets.GOOGLE_DRIVE_CLIENT_SECRET }}
-          scope = drive
-          token = {"access_token":"${{ secrets.GOOGLE_DRIVE_ACCESS_TOKEN }}","token_type":"Bearer","refresh_token":"${{ secrets.GOOGLE_DRIVE_REFRESH_TOKEN }}","expiry":"2024-12-31T23:59:59Z"}
-          team_drive = 
-          EOF
-          
-          # Test rclone configuration
-          if rclone lsd gdrivveed: >/dev/null 2>&1; then
-            echo "✅ rclone configured successfully"
+          echo "🔍 Verifying rclone access to Google Drive..."
+          if rclone lsd $GDRIVE_REMOTE: >/dev/null 2>&1; then
+            echo "✅ rclone access verified successfully"
           else
-            echo "❌ rclone configuration failed"
-            echo "🔧 Attempting token refresh..."
-            rclone config reconnect gdrivveed: || exit 1
+            echo "❌ rclone access failed - check your existing configuration"
+            exit 1
           fi
 
       - name: Install Tailscale
