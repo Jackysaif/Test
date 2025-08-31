@@ -53,7 +53,8 @@ jobs:
           client_secret = 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
           scope = drive
           root_folder_id = appDataFolder
-          token = {"access_token":"ya29.A0AS3H6Nw_-M7Fn89Slgd6Qr2X_1uz9rvqqnN_FI2auXhTgWO4OAJJGBjR97kdm2xP8FAWcU-ZSX_nZ52E1JMAUzndf2JnNBrk-VBDq1IpZcIM2ZoJmQPMyEhvSwYNAE3uXrioyN35CXp67qkKxM75atvCT7FJdciRG2fQV2mx3uUmE_brcZzVZTeu3J7aElcK2wzAAzIaCgYKAZcSARQSFQHGX2MiIEMzw9B7TjqTc0zDR5oQSw0206","token_type":"Bearer","refresh_token":"1//0gj7FH2qSfLPGCgYIARAAGBASNwF-L9Ir8UTc2ZBaElk1x6Vd7sVujW1X3k5220XOsOFpmf4tgMGjAxkCSzmbDvsPs-9646QalzQ"
+          token = {"access_token":"ya29.A0AS3H6Nw_-M7Fn89Slgd6Qr2X_1uz9rvqqnN_FI2auXhTgWO4OAJJGBjR97kdm2xP8FAWcU-ZSX_nZ52E1JMAUzndf2JnNBrk-VBDq1IpZcIM2ZoJmQPMyEhvSwYNAE3uXrioyN35CXp67qkKxM75atvCT7FJdciRG2fQV2mx3uUmE_brcZzVZTeu3J7aElcK2wzAAzIaCgYKAZcSARQSFQHGX2MiIEMzw9B7TjqTc0zDR5oQSw0206","token_type":"Bearer","refresh_token":"1//0gj7FH2qSfLPGCgYIARAAGBASNwF-L9Ir8UTc2ZBaElk1x6Vd7sVujW1X3k5220XOsOFpmf4tgMGjAxkCSzmbDvsPs-9646QalzQ","expiry":"2025-08-31T10:52:03.015014454Z","expires_in":3599}
+          team_drive =
           rclone listremotes
 
       - name: Restore VPS from backup archive
