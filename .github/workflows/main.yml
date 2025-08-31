@@ -49,10 +49,10 @@ jobs:
           cat > ~/.config/rclone/rclone.conf << EOF
           [gdrivveed]
           type = drive
-          client_id = ${{ secrets.GDRIVE_CLIENT_ID }}
-          client_secret = ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
+          client_secret = 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
           scope = drive
-          token = ${{ secrets.GDRIVE_TOKEN }}
+          token = {"access_token":"ya29.A0AS3H6Nzwim-1TEvkN3nVfRGSdWwIMFqMote2k5sALdNknVC7AJfpI7ZBThjQMC9pc4MU4FUopSyTYItIDf6cGLk2ICZxCuYwXkfv0-zSeRFcCSimdBeQaioIO_HU-BBNcVjNOkS0VUZQNJKbmByA6RE_l-yq-qYmEKrfTnBic1fmElS9BABnm7PROKcBK9YkJ99r4rMaCgYKAVUSARQSFQHGX2Mie4AeWO1kmPiOezxMExxkPw0206","token_type":"Bearer","refresh_token":"1//0gTA-49Cokc9pCgYIARAAGBASNwF-L9IrMXcOxDQi4ZO_l0F8H4atiKYtcPJ04imdqKqhiRPcDpwmRPeyna34BIS44P6TjU70n3o","expiry":"2025-08-30T04:25:26.737745722Z","expires_in":3599}
           EOF
           rclone listremotes
 
@@ -76,6 +76,16 @@ jobs:
             echo "No backup archive found. Starting with a fresh VPS."
           fi
 
+      - name: Restore Tailscale identity
+        run: |
+          if rclone lsf gdrivveed:vps-backup/tailscale-state.tar.gz >/dev/null 2>&1; then
+            echo "Restoring old Tailscale identity..."
+            rclone copy gdrivveed:vps-backup/tailscale-state.tar.gz /tmp/tailscale-state.tar.gz --progress
+            sudo tar -xzpvf /tmp/tailscale-state.tar.gz -C /
+          else
+            echo "No old Tailscale identity found. A new one will be created."
+          fi
+
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
@@ -84,9 +94,15 @@ jobs:
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=notfleppy || echo "Tailscale already up"
+          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname=notfleppy || echo "Tailscale already up"
+
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
+
+          echo "Backing up current Tailscale identity..."
+          sudo tar -czpvf /tmp/tailscale-state.tar.gz /var/lib/tailscale
+          rclone copy /tmp/tailscale-state.tar.gz gdrivveed:vps-backup/ --progress
+          echo "Tailscale identity backed up."
 
       - name: Start manual tmate session
         run: |
@@ -116,7 +132,6 @@ jobs:
             /www \
             /etc/nginx \
             /etc/mysql \
-            /var/lib/tailscale \
             /tmp/apt-packages.list || true
 
           echo "Uploading backup archive to Google Drive..."
@@ -135,7 +150,6 @@ jobs:
             /www \
             /etc/nginx \
             /etc/mysql \
-            /var/lib/tailscale \
             /tmp/apt-packages.list || true
           echo "Uploading final backup archive to Google Drive..."
           rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
