@@ -296,16 +296,25 @@ jobs:
           echo "🐘 Backing up PHP configurations..."
           
           # Find all PHP versions
-          PHP_DIRS="/etc/php*"
-          for php_dir in $PHP_DIRS; do
+          PHP_FOUND=false
+          for php_dir in /etc/php*; do
             if [ -d "$php_dir" ]; then
+              PHP_FOUND=true
               php_version=$(basename "$php_dir")
-              echo "📦 Backing up $php_version"
-              sudo tar -czf backup/websites/${php_version}-config-$BACKUP_DATE.tar.gz -C "$php_dir" . 2>/dev/null
+              echo "📦 Backing up $php_version..."
+              if sudo tar -czf backup/websites/${php_version}-config-$BACKUP_DATE.tar.gz -C "$php_dir" . 2>/dev/null; then
+                echo "✅ Successfully backed up $php_version"
+              else
+                echo "⚠️ Failed to backup $php_version, skipping"
+              fi
             fi
           done
           
-          echo "✅ PHP configurations backup completed"
+          if [ "$PHP_FOUND" = false ]; then
+            echo "ℹ️ No PHP installations found, skipping PHP backup"
+          else
+            echo "✅ PHP configurations backup completed"
+          fi
 
       - name: Backup Tailscale state
         if: github.event.inputs.operation == 'backup'
