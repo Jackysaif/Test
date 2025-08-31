@@ -115,22 +115,25 @@ jobs:
 
       - name: Backup essential data to archive (on completion)
         run: |
-          echo "Deleting old backup archive on Google Drive..."
-          rclone delete gdrivveed:vps-backup/backup.tar.gz || true
-          
           echo "Creating essential data backup archive..."
+          # Build a list of directories to backup based on what exists
+          BACKUP_DIRS=""
+          for dir in /etc /home /root /var/www /var/lib/mysql /var/lib/tailscale /www/wwwroot /www/server; do
+              if [ -d "$dir" ]; then
+                  BACKUP_DIRS+="$dir "
+              else
+                  echo "Skipping non-existent directory: $dir"
+              fi
+          done
+
+          # Create the backup archive with explicit exclusions
           sudo tar -czpvf /tmp/backup.tar.gz \
             --exclude=/var/lib/mysql/mysql \
             --exclude=/var/lib/mysql/performance_schema \
+            --exclude=/var/www/html/wp-content/cache \
             --exclude=/www/wwwroot/*/cache \
-            /etc \
-            /home \
-            /root \
-            /var/www/ \
-            /var/lib/mysql/ \
-            /var/lib/tailscale/ \
-            /www/wwwroot/ \
-            /www/server/
+            $BACKUP_DIRS
+          
           echo "Uploading backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Backup uploaded successfully."
@@ -139,18 +142,21 @@ jobs:
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
+          # Build a list of directories to backup based on what exists
+          BACKUP_DIRS=""
+          for dir in /etc /home /root /var/www /var/lib/mysql /var/lib/tailscale /www/wwwroot /www/server; do
+              if [ -d "$dir" ]; then
+                  BACKUP_DIRS+="$dir "
+              fi
+          done
+          
+          # Create the backup archive with explicit exclusions
           sudo tar -czpvf /tmp/backup.tar.gz \
             --exclude=/var/lib/mysql/mysql \
             --exclude=/var/lib/mysql/performance_schema \
+            --exclude=/var/www/html/wp-content/cache \
             --exclude=/www/wwwroot/*/cache \
-            /etc \
-            /home \
-            /root \
-            /var/www/ \
-            /var/lib/mysql/ \
-            /var/lib/tailscale/ \
-            /www/wwwroot/ \
-            /www/server/
+            $BACKUP_DIRS
           echo "Uploading final backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Final backup completed."
