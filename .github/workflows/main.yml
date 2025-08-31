@@ -63,7 +63,7 @@ jobs:
         run: |
           if rclone lsf gdrivveed:vps-backup/ >/dev/null 2>&1; then
             echo "Backup found on Google Drive. Restoring..."
-            rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+            sudo rclone copy gdrivveed:vps-backup/ / --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
             echo "Backup restored successfully."
             echo "backup_found=true" >> "$GITHUB_OUTPUT"
           else
@@ -116,5 +116,5 @@ jobs:
       - name: Backup VPS data to rclone
         run: |
           sudo chown -R $USER:$USER /var/lib/tailscale
-          rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
+          sudo rclone copy / gdrivveed:vps-backup/ --exclude '*/.git/*' --exclude '/.rclone.conf' --progress
           echo "Backup uploaded successfully."
