@@ -115,10 +115,10 @@ jobs:
 
       - name: Backup essential data to archive (on completion)
         run: |
+          echo "Deleting old backup archive on Google Drive..."
+          rclone delete gdrivveed:vps-backup/backup.tar.gz || true
+          
           echo "Creating essential data backup archive..."
-          # The command below targets specific directories for a lean backup.
-          # You may need to add the specific path to your telegram bot.
-          # For example: --exclude /var/www/bot/logs /var/www/bot
           sudo tar -czpvf /tmp/backup.tar.gz \
             --exclude=/var/lib/mysql/mysql \
             --exclude=/var/lib/mysql/performance_schema \
