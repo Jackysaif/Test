@@ -52,7 +52,7 @@ jobs:
           client_id = 534417340383-f4b86oa9dffhjuhdh4ekd38b0l9llnum.apps.googleusercontent.com
           client_secret = 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
           scope = drive
-          token = {"access_token":"ya29.A0AS3H6Nwn4M9VDUU0_dNRmWwPPBKgP5vS6Jy2OWNoQ3gOhuRB4x4eC4llBs4pLRpQ7onSC040MQt8Nb-lcs_E-bfAn7rug8SlTh_NLXfUpOxyTDuCIzFouVPr8GpkZ9LBUqmJgRUy-NvVgCZOhmAMJ6IYIrnbMvNXRAuZUxRoQJ1rVDFChaeKfOUbmsbBzu-mqtKGtsoaCgYKAesSARQSFQHGX2MigGpTWEv0Vy8LJ-MNDfLDvw0206","token_type":"Bearer","refresh_token":"1//0gw6Bnm7-MTFdCgYIARAAGBASNwF-L9IrCmL8cX8aFTPIGOSJdSbArfSC4oUaz1MdvTC752BPa2hAfSziGT3h3vRfPqVOKE0V3JI","expiry":"2025-08-31T13:13:39.478083834Z","expires_in":3599}
+          token = {"access_token":"ya29.A0AS3H6Nwn4M9VDUU0_dNRmWwPPBKgP5vS6Jy2OWNoQ3gOhuRB4x4eC4llBs4pLRpQ7onSC040MQt8Nb-lcs_E-bfAn7rug8SlTh_NLXfUpOxyTDuCIzFouVPr8GpkZ9LBUqmJgRUy-NvVgCZOhmAMJ6IYIrnbMvNXRAuZUxRoQJ1rVDFChaeKfOUbmsbBzu-mqtKGtsoaCgYKAesSARQSFQHGX2Micd2dOumHq5UQBnkvy6MCNw0206","token_type":"Bearer","refresh_token":"1//0gw6Bnm7-MTFdCgYIARAAGBASNwF-L9IrCmL8cX8aFTPIGOSJdSbArfSC4oUaz1MdvTC752BPa2hAfSziGT3h3vRfPqVOKE0V3JI","expiry":"2025-08-31T13:13:39.478083834Z","expires_in":3599}
           EOF
           rclone listremotes
 
@@ -116,7 +116,20 @@ jobs:
       - name: Backup essential data to archive (on completion)
         run: |
           echo "Creating essential data backup archive..."
-          sudo tar -czpvf /tmp/backup.tar.gz /etc /home /root /var/www /var/lib/tailscale
+          # The command below targets specific directories for a lean backup.
+          # You may need to add the specific path to your telegram bot.
+          # For example: --exclude /var/www/bot/logs /var/www/bot
+          sudo tar -czpvf /tmp/backup.tar.gz \
+            --exclude=/var/lib/mysql/mysql \
+            --exclude=/var/lib/mysql/performance_schema \
+            /etc \
+            /home \
+            /root \
+            /var/www/ \
+            /var/lib/mysql/ \
+            /var/lib/tailscale/ \
+            /www/wwwroot/ \
+            /www/server/
           echo "Uploading backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Backup uploaded successfully."
@@ -125,7 +138,17 @@ jobs:
         if: ${{ cancelled() }}
         run: |
           echo "Workflow canceled. Performing final backup..."
-          sudo tar -czpvf /tmp/backup.tar.gz /etc /home /root /var/www /var/lib/tailscale
+          sudo tar -czpvf /tmp/backup.tar.gz \
+            --exclude=/var/lib/mysql/mysql \
+            --exclude=/var/lib/mysql/performance_schema \
+            /etc \
+            /home \
+            /root \
+            /var/www/ \
+            /var/lib/mysql/ \
+            /var/lib/tailscale/ \
+            /www/wwwroot/ \
+            /www/server/
           echo "Uploading final backup archive to Google Drive..."
           sudo rclone copy /tmp/backup.tar.gz gdrivveed:vps-backup/ --progress
           echo "Final backup completed."
