@@ -205,7 +205,7 @@ jobs:
           echo "📝 Session started at: $(date)"
           
           # Calculate timeout in seconds
-          TIMEOUT_SECONDS=$(( {{ env.SESSION_TIMEOUT_MINUTES }} * 60 ))
+          TIMEOUT_SECONDS=$(( ${{ env.SESSION_TIMEOUT_MINUTES }} * 60 ))
           echo "⏳ Session will timeout in $TIMEOUT_SECONDS seconds"
           
           # Keep session alive
@@ -321,7 +321,8 @@ EOF
           
           # Delete backups older than retention period
           CURRENT_TIME=$(date +%s)
-          RETENTION_SECONDS=$((${{ env.BACKUP_RETENTION_DAYS }} * 24 * 60 * 60))
+          RETENTION_DAYS=${{ env.BACKUP_RETENTION_DAYS }}
+          RETENTION_SECONDS=$((RETENTION_DAYS * 24 * 60 * 60))
           
           echo "$OLD_BACKUPS" | while read -r tag date; do
             BACKUP_TIME=$(date -d "$date" +%s 2>/dev/null || echo "0")
