@@ -158,19 +158,28 @@ jobs:
             /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
             /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
           
-          echo "📦 Creating full backup archive..."
-          tar -czf backup/latest.tar.gz -C backup .
+          echo "📦 Creating final backup archive for upload..."
+          # Create a temporary directory for the final upload
+          mkdir -p upload
+          cp backup/*.tar.gz backup/*.list upload/ 2>/dev/null || true
           echo "Backup contents:"
-          ls -lh backup/
+          ls -lh upload/
 
       # 9. Create GitHub Release with backup
       - name: Create GitHub Release with backup
         if: always() && !cancelled()
         run: |
+          # Install GitHub CLI
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install -y gh
+          
           # Create a new release with the backup
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          cd upload
           gh release create "vps-backup-$TIMESTAMP" \
-            backup/latest.tar.gz \
+            *.tar.gz *.list \
             --title "VPS Backup $TIMESTAMP" \
             --notes "Automated VPS backup created on $(date)" \
             --repo "${{ github.repository }}"
@@ -209,16 +218,24 @@ jobs:
             /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
             /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
           
-          echo "📦 Creating backup archive..."
-          tar -czf backup/latest.tar.gz -C backup .
+          echo "📦 Preparing backup for upload..."
+          mkdir -p upload
+          cp backup/*.tar.gz backup/*.list upload/ 2>/dev/null || true
 
       # 11. Create release for cancelled backup
       - name: Create release for cancelled backup
         if: cancelled()
         run: |
+          # Install GitHub CLI
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install -y gh
+          
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          cd upload
           gh release create "vps-backup-cancelled-$TIMESTAMP" \
-            backup/latest.tar.gz \
+            *.tar.gz *.list \
             --title "VPS Backup (Cancelled) $TIMESTAMP" \
             --notes "Automated VPS backup created after cancellation on $(date)" \
             --repo "${{ github.repository }}"
