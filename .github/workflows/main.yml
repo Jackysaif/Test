@@ -39,15 +39,18 @@ jobs:
           echo "🔑 MEGA configured successfully!"
           rclone ls mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
 
-      # 3. Create jacky:root
-      - name: Create restricted user
+      # 3. Create jacky:root WITH SUDO PRIVILEGES - FIXED
+      - name: Create restricted user with sudo access
         run: |
           if ! id -u jacky >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash jacky
             echo "jacky:root" | sudo chpasswd
-            echo "User jacky created with password root"
+            # Add jacky to sudo group
+            sudo usermod -aG sudo jacky
+            echo "User jacky created with password root and sudo privileges"
           else
-            echo "User jacky already exists"
+            echo "User jacky already exists, ensuring sudo privileges..."
+            sudo usermod -aG sudo jacky
           fi
 
       # 4. Set hostname
@@ -90,7 +93,7 @@ jobs:
             echo "⚠️ No previous Tailscale state found, will get new IP"
           fi
 
-      # 6. Setup Tailscale with state restoration - FIXED: No removal attempt
+      # 6. Setup Tailscale with state restoration
       - name: Setup Tailscale
         run: |
           # Install using official script (don't try to remove non-existent packages)
@@ -112,6 +115,7 @@ jobs:
           echo "IP Address: $(tailscale ip -4 || echo 'Not available yet')"
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
+          echo "✅ Sudo access: Enabled (use 'sudo su' to become root)"
           echo "Tailscale status:"
           tailscale status || echo "Status check failed - may need more time to initialize"
 
@@ -119,6 +123,8 @@ jobs:
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
+          echo "✅ User jacky has sudo privileges (password: root)"
+          echo "Use 'sudo su' to become root user"
           # Create a persistent socket and display connection info
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
