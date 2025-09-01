@@ -76,29 +76,38 @@ jobs:
         run: |
           set -x
           curl -fsSL https://tailscale.com/install.sh | sh
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔄 Restored tailscaled.state, starting Tailscale..."
-            sudo systemctl stop tailscaled || true
+          
+          # Try to restore previous state from MEGA
+          mkdir -p backup
+          rclone copy mega:/vps-backup/tailscale-initial.tar.gz backup/ || true
+          
+          if [ -f backup/tailscale-initial.tar.gz ]; then
+            echo "🔄 Found previous Tailscale state, restoring..."
+            tar -xzf backup/tailscale-initial.tar.gz -C backup
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp backup/tailscaled.state /var/lib/tailscale/tailscaled.state
             sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
             sleep 5
-            sudo tailscale up --ssh
-            echo "✅ Tailscale started with restored state"
+            sudo tailscale up --ssh --hostname github-vps
+            echo "✅ Restored Tailscale state and started"
           else
             echo "🆕 No previous Tailscale state, setting up fresh..."
             sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
             sleep 5
-            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --ssh --hostname github-vps
             echo "✅ Fresh Tailscale setup complete"
+            
             # Backup new state immediately
-            mkdir -p backup
             sudo cp /var/lib/tailscale/tailscaled.state backup/
-            tar -czf tailscale-initial.tar.gz -C backup .
-            rclone copy tailscale-initial.tar.gz mega:/vps-backup --progress
+            sudo tar -czf backup/tailscale-initial.tar.gz -C backup tailscaled.state
+            rclone copy backup/tailscale-initial.tar.gz mega:/vps-backup --progress
             echo "☁️ New Tailscale state backed up"
           fi
+          
           echo "🌐 Tailscale IP: $(tailscale ip -4)"
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
+
 
       # === Tmate Session ===
       - name: Start Tmate session (keep VPS alive)
