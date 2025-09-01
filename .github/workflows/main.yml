@@ -1,4 +1,76 @@
-      # 5. Restore backup if exists
+name: Persistent VPS with GitHub Release Backup
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  vps:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1. Install dependencies
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y curl tmate
+
+      # 2. Create jacky:root WITH SUDO PRIVILEGES
+      - name: Create restricted user with sudo access
+        run: |
+          if ! id -u jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+            # Add jacky to sudo group
+            sudo usermod -aG sudo jacky
+            echo "User jacky created with password root and sudo privileges"
+          else
+            echo "User jacky already exists, ensuring sudo privileges..."
+            sudo usermod -aG sudo jacky
+          fi
+
+      # 3. Set hostname
+      - name: Set hostname
+        run: |
+          sudo hostnamectl set-hostname github-vps
+          echo "Hostname set to $(hostname)"
+
+      # 4. Download latest backup from GitHub Releases with authentication
+      - name: Download latest backup
+        run: |
+          mkdir -p restore
+          # Get the latest release with authentication
+          LATEST_RELEASE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" | \
+            grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          
+          if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "null" ]; then
+            echo "📦 Downloading backup from release: $LATEST_RELEASE"
+            # Download with authentication
+            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              -o restore/latest.tar.gz \
+              "https://api.github.com/repos/${{ github.repository }}/releases/assets/$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_RELEASE" | \
+                grep -A 10 '"assets":' | grep '"id":' | head -1 | cut -d':' -f2 | tr -d ' ,')" \
+              || echo "⚠️ Could not download backup from release"
+            
+            # Check if download was successful
+            if [ -f "restore/latest.tar.gz" ] && file restore/latest.tar.gz | grep -q "gzip compressed data"; then
+              echo "✅ Backup downloaded successfully"
+            else
+              echo "⚠️ Download failed or file is not a valid backup"
+              rm -f restore/latest.tar.gz
+            fi
+          else
+            echo "⚠️ No releases found, starting fresh"
+          fi
+
+            # 5. Restore backup if exists
       - name: Restore backup if exists
         run: |
           # Download each backup file individually
@@ -71,3 +143,172 @@
           fi
           
           echo "✅ Restoration completed"
+
+      # 6. Setup Tailscale
+      - name: Setup Tailscale
+        run: |
+          # Install using official script
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Check if we have a restored state
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            echo "🔄 Using existing Tailscale state with existing IP"
+            sudo systemctl start tailscaled
+            # Wait a moment for tailscale to initialize
+            sleep 3
+            echo "🎉 Connected to Tailscale with existing state!"
+          else
+            echo "🆕 Setting up new Tailscale connection (new IP)"
+            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+            echo "🎉 Connected to Tailscale with new IP!"
+          fi
+          
+          echo "IP Address: $(tailscale ip -4 || echo 'Not available yet')"
+          echo "👤 Username: jacky"
+          echo "🔑 Password: root"
+          echo "✅ Sudo access: Enabled (use 'sudo su' to become root)"
+          echo "Tailscale status:"
+          tailscale status || echo "Status check failed - may need more time to initialize"
+
+      # 7. Start tmate session
+      - name: Start tmate session
+        run: |
+          echo "🔗 Starting tmate session..."
+          echo "✅ User jacky has sudo privileges (password: root)"
+          echo "Use 'sudo su' to become root user"
+          echo "Connect with: ssh $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Session will remain active for up to 6 hours"
+          # Start tmate in foreground mode to keep the workflow running
+          tmate -F -S /tmp/tmate.sock
+
+      # 8. Backup ALL user data when session ends
+      - name: Backup VPS data on session end
+        if: always() && !cancelled()
+        run: |
+          mkdir -p backup
+          
+          echo "📦 Backing up ALL jacky user data (including hidden files)..."
+          # Use --warning=no-file-changed to ignore files that change during backup
+          sudo tar -czf backup/jacky-home-full.tar.gz \
+            -C /home jacky \
+            --exclude='*.tar.gz' \
+            --exclude='.cache' \
+            --warning=no-file-changed \
+            . 2>/dev/null || echo "Home directory backup completed (some files may have changed)"
+          
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          
+          echo "📦 Backing up system services (Apache, MySQL, PHP, aapanel)..."
+          # Backup common web service directories with ignore-failed-read
+          sudo tar -czf backup/services-backup.tar.gz \
+            --ignore-failed-read \
+            /etc/apache2 /etc/nginx /etc/mysql /etc/php \
+            /var/www /var/lib/mysql \
+            /usr/local/aapanel /opt/aapanel \
+            /root/.aapanel 2>/dev/null || echo "Services backup completed"
+          
+          echo "📦 Backing up system configurations..."
+          sudo tar -czf backup/system-config.tar.gz \
+            --ignore-failed-read \
+            /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
+            /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
+          
+          echo "📦 Creating final backup archive for upload..."
+          # Create a temporary directory for the final upload
+          mkdir -p upload
+          cp backup/*.tar.gz backup/*.list upload/ 2>/dev/null || true
+          echo "Backup contents:"
+          ls -lh upload/
+
+      # 9. Create GitHub Release with backup
+      - name: Create GitHub Release with backup
+        if: always() && !cancelled()
+        run: |
+          # Install GitHub CLI
+          type -p gh >/dev/null || {
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update
+            sudo apt install -y gh
+          }
+          
+          # Create a new release with the backup
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          cd upload
+          gh release create "vps-backup-$TIMESTAMP" \
+            *.tar.gz *.list \
+            --title "VPS Backup $TIMESTAMP" \
+            --notes "Automated VPS backup created on $(date)" \
+            --repo "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 10. Backup on workflow cancellation
+      - name: Backup on workflow cancellation
+        if: cancelled()
+        run: |
+          mkdir -p backup
+          echo "⚠️ Workflow cancelled, backing up data..."
+          
+          echo "📦 Backing up ALL jacky user data (including hidden files)..."
+          sudo tar -czf backup/jacky-home-full.tar.gz \
+            -C /home jacky \
+            --exclude='*.tar.gz' \
+            --exclude='.cache' \
+            --warning=no-file-changed \
+            . 2>/dev/null || echo "Home directory backup completed (some files may have changed)"
+          
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          
+          echo "📦 Backing up system services (Apache, MySQL, PHP, aapanel)..."
+          sudo tar -czf backup/services-backup.tar.gz \
+            --ignore-failed-read \
+            /etc/apache2 /etc/nginx /etc/mysql /etc/php \
+            /var/www /var/lib/mysql \
+            /usr/local/aapanel /opt/aapanel \
+            /root/.aapanel 2>/dev/null || echo "Services backup completed"
+          
+          echo "📦 Backing up system configurations..."
+          sudo tar -czf backup/system-config.tar.gz \
+            --ignore-failed-read \
+            /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
+            /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
+          
+          echo "📦 Preparing backup for upload..."
+          mkdir -p upload
+          cp backup/*.tar.gz backup/*.list upload/ 2>/dev/null || true
+
+      # 11. Create release for cancelled backup
+      - name: Create release for cancelled backup
+        if: cancelled()
+        run: |
+          # Install GitHub CLI if not already installed
+          type -p gh >/dev/null || {
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update
+            sudo apt install -y gh
+          }
+          
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          cd upload
+          gh release create "vps-backup-cancelled-$TIMESTAMP" \
+            *.tar.gz *.list \
+            --title "VPS Backup (Cancelled) $TIMESTAMP" \
+            --notes "Automated VPS backup created after cancellation on $(date)" \
+            --repo "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 12. Display session results
+      - name: Display session results
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "cancelled" ]; then
+            echo "🏁 Session was cancelled - backup uploaded to GitHub Releases"
+          else
+            echo "🏁 Session ended normally - backup uploaded to GitHub Releases"
+          fi
+          echo "📦 Next session will restore from the latest release"
