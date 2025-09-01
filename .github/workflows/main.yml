@@ -12,11 +12,42 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # =========================
+      # Checkout
+      # =========================
       - name: Checkout repo
         uses: actions/checkout@v4
 
       # =========================
-      # Setup Rclone with MEGA
+      # Install dependencies + rclone
+      # =========================
+      - name: Install dependencies and rclone
+        run: |
+          sudo apt update
+          sudo apt install -y unzip curl
+          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -a rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          sudo chown root:root /usr/bin/rclone
+          sudo chmod 755 /usr/bin/rclone
+          rclone version
+
+      # =========================
+      # Create restricted user
+      # =========================
+      - name: Create user jacky
+        run: |
+          if ! id -u jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+            echo "✅ User jacky created (password: root)"
+          else
+            echo "ℹ️ User jacky already exists"
+          fi
+
+      # =========================
+      # Setup rclone with MEGA (Secrets)
       # =========================
       - name: Setup rclone with MEGA
         env:
@@ -32,8 +63,6 @@ jobs:
           EOF
 
           echo "🔑 MEGA rclone configured successfully!"
-          echo "📂 Listing configured remotes:"
-          rclone listremotes
           echo "📂 Testing MEGA access:"
           rclone lsd mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
 
@@ -41,15 +70,13 @@ jobs:
       # Restore Backup (if exists)
       # =========================
       - name: Restore VPS backup from MEGA
-        continue-on-error: true
         run: |
-          echo "📦 Checking for existing backup on MEGA..."
-          rclone ls mega:vps-backup/ || echo "⚠️ No backup found"
-          rclone copy mega:vps-backup/ ./backup --progress || echo "⚠️ No restore performed"
-          if [ -d ./backup ]; then
-            echo "✅ Restore completed from MEGA"
+          mkdir -p restore
+          if rclone copy mega:/vps-backup/latest.tar.gz restore/ --progress; then
+            echo "✅ Backup found, restoring..."
+            sudo tar -xzf restore/latest.tar.gz -C /
           else
-            echo "⚠️ No previous backup found, starting fresh"
+            echo "ℹ️ No previous backup found"
           fi
 
       # =========================
@@ -66,6 +93,8 @@ jobs:
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
           echo "✅ Tailscale started"
           tailscale ip -4
+          echo "👤 Username: jacky"
+          echo "🔑 Password: root"
 
       # =========================
       # Start tmate session
@@ -82,16 +111,17 @@ jobs:
         run: sleep 3600
 
       # =========================
-      # Backup VPS state to MEGA
+      # Backup VPS data to MEGA
       # =========================
       - name: Backup VPS data to MEGA (on completion)
         if: always()
         run: |
-          echo "📦 Creating backup archive..."
-          mkdir -p backup/var/lib/tailscale
-          sudo cp -r /var/lib/tailscale backup/ || true
+          mkdir -p backup
+          echo "📦 Backing up /home/jacky directory..."
+          sudo tar --exclude='*.tar.gz' -czf backup/latest.tar.gz /home/jacky
           echo "☁️ Uploading to MEGA..."
-          rclone copy ./backup mega:vps-backup/ --progress
+          rclone mkdir mega:/vps-backup || true
+          rclone copy backup/latest.tar.gz mega:/vps-backup --progress
           echo "✅ Backup completed to MEGA"
 
       # =========================
@@ -101,4 +131,4 @@ jobs:
         if: cancelled()
         run: |
           echo "⚠️ Job cancelled, performing final backup..."
-          rclone copy ./backup mega:vps-backup/ --progress || true
+          rclone copy backup/latest.tar.gz mega:/vps-backup --progress || true
