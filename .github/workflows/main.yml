@@ -1,4 +1,4 @@
-name: Persistent VPS with GitHub Artifact Backup
+name: Persistent VPS with GitHub Release Backup
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq
+          sudo apt install -y curl tmate
 
       # 2. Create jacky:root WITH SUDO PRIVILEGES
       - name: Create restricted user with sudo access
@@ -39,45 +39,23 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "Hostname set to $(hostname)"
 
-      # 4. Find and download latest backup artifact from any workflow run
-      - name: Find latest backup artifact
-        id: find-artifact
+      # 4. Download latest backup from GitHub Releases
+      - name: Download latest backup
         run: |
-          # Try to find vps-backup first, then vps-backup-cancelled
-          ARTIFACT_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts")
+          mkdir -p restore
+          # Try to download the latest backup from releases
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | grep tag_name | cut -d'"' -f4)
           
-          # Look for vps-backup first
-          ARTIFACT_ID=$(echo "$ARTIFACT_RESPONSE" | jq '.artifacts[] | select(.name == "vps-backup") | .id' 2>/dev/null | head -1)
-          
-          # If not found, look for vps-backup-cancelled
-          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
-            ARTIFACT_ID=$(echo "$ARTIFACT_RESPONSE" | jq '.artifacts[] | select(.name == "vps-backup-cancelled") | .id' 2>/dev/null | head -1)
-            if [ -n "$ARTIFACT_ID" ] && [ "$ARTIFACT_ID" != "null" ]; then
-              echo "artifact_name=vps-backup-cancelled" >> $GITHUB_OUTPUT
-              echo "📦 Found cancelled backup artifact ID: $ARTIFACT_ID"
-            fi
+          if [ -n "$LATEST_RELEASE" ]; then
+            echo "📦 Downloading backup from release: $LATEST_RELEASE"
+            curl -L -o restore/latest.tar.gz \
+              "https://github.com/${{ github.repository }}/releases/download/$LATEST_RELEASE/vps-backup.tar.gz" \
+              || echo "⚠️ Could not download backup from release"
           else
-            echo "artifact_name=vps-backup" >> $GITHUB_OUTPUT
-            echo "📦 Found normal backup artifact ID: $ARTIFACT_ID"
-          fi
-          
-          if [ -n "$ARTIFACT_ID" ] && [ "$ARTIFACT_ID" != "null" ]; then
-            echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ No previous backup artifact found"
+            echo "⚠️ No releases found, starting fresh"
           fi
 
-      # 5. Download the latest backup artifact
-      - name: Download latest backup artifact
-        if: steps.find-artifact.outputs.artifact_id != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.find-artifact.outputs.artifact_name }}
-          path: restore/
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 6. Restore backup if exists
+      # 5. Restore backup if exists
       - name: Restore backup if exists
         run: |
           if [ -f "restore/latest.tar.gz" ]; then
@@ -110,7 +88,7 @@ jobs:
             echo "⚠️ No previous backup found, starting fresh"
           fi
 
-      # 7. Setup Tailscale
+      # 6. Setup Tailscale
       - name: Setup Tailscale
         run: |
           # Install using official script
@@ -136,7 +114,7 @@ jobs:
           echo "Tailscale status:"
           tailscale status || echo "Status check failed - may need more time to initialize"
 
-      # 8. Start tmate session
+      # 7. Start tmate session
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
@@ -147,7 +125,7 @@ jobs:
           # Start tmate in foreground mode to keep the workflow running
           tmate -F -S /tmp/tmate.sock
 
-      # 9. Backup ALL user data when session ends
+      # 8. Backup ALL user data when session ends
       - name: Backup VPS data on session end
         if: always() && !cancelled()
         run: |
@@ -185,17 +163,21 @@ jobs:
           echo "Backup contents:"
           ls -lh backup/
 
-      # 10. Upload backup as GitHub artifact when session ends
-      - name: Upload backup as GitHub artifact
+      # 9. Create GitHub Release with backup
+      - name: Create GitHub Release with backup
         if: always() && !cancelled()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup
-          path: backup/
-          retention-days: 90
-          if-no-files-found: warn
+        run: |
+          # Create a new release with the backup
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          gh release create "vps-backup-$TIMESTAMP" \
+            backup/latest.tar.gz \
+            --title "VPS Backup $TIMESTAMP" \
+            --notes "Automated VPS backup created on $(date)" \
+            --repo "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 11. Backup on workflow cancellation
+      # 10. Backup on workflow cancellation
       - name: Backup on workflow cancellation
         if: cancelled()
         run: |
@@ -230,23 +212,26 @@ jobs:
           echo "📦 Creating backup archive..."
           tar -czf backup/latest.tar.gz -C backup .
 
-      # 12. Upload final backup on cancellation
-      - name: Upload final backup on cancellation
+      # 11. Create release for cancelled backup
+      - name: Create release for cancelled backup
         if: cancelled()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup-cancelled
-          path: backup/
-          retention-days: 90
-          if-no-files-found: warn
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          gh release create "vps-backup-cancelled-$TIMESTAMP" \
+            backup/latest.tar.gz \
+            --title "VPS Backup (Cancelled) $TIMESTAMP" \
+            --notes "Automated VPS backup created after cancellation on $(date)" \
+            --repo "${{ github.repository }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 13. Display session results
+      # 12. Display session results
       - name: Display session results
         if: always()
         run: |
           if [ "${{ job.status }}" = "cancelled" ]; then
-            echo "🏁 Session was cancelled - backup available as 'vps-backup-cancelled'"
+            echo "🏁 Session was cancelled - backup uploaded to GitHub Releases"
           else
-            echo "🏁 Session ended normally - backup available as 'vps-backup'"
+            echo "🏁 Session ended normally - backup uploaded to GitHub Releases"
           fi
-          echo "📦 Next session will restore from this backup"
+          echo "📦 Next session will restore from the latest release"
