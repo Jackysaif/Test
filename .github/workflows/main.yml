@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   workflow_call:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+    - cron: "0 */6 * * *"
 
 jobs:
   vps:
@@ -15,13 +15,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create user jacky
+      - name: Create restricted user
         run: |
-          sudo useradd -m -s /bin/bash jacky || true
-          echo "jacky:root" | sudo chpasswd
-          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          if ! id -u jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:$(openssl rand -base64 12)" | sudo chpasswd
+            echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          fi
 
-      - name: Download VPS backup if exists
+      - name: Download latest backups
         uses: actions/download-artifact@v4
         with:
           name: vps-backup-latest
@@ -30,35 +32,36 @@ jobs:
 
       - name: Restore VPS files
         run: |
-          if [ -f backup/vps-backup.tar.gz ]; then
+          if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
             echo "📦 Restoring VPS files..."
-            sudo tar -xzf backup/vps-backup.tar.gz -C /
+            # Restore with better error handling
+            for backup_file in backup/vps-backup-*.tar.gz; do
+              if [ -f "$backup_file" ]; then
+                echo "Restoring from: $backup_file"
+                if gzip -t "$backup_file" 2>/dev/null; then
+                  sudo tar -xzf "$backup_file" -C / 2>/dev/null || echo "⚠️ Some files couldn't be restored"
+                else
+                  echo "⚠️ Backup file corrupted: $backup_file"
+                fi
+              fi
+            done
           else
             echo "ℹ️ No previous VPS backup found."
           fi
 
-      - name: Download Tailscale state if exists
-        uses: actions/download-artifact@v4
-        with:
-          name: ts-backup
-          path: ts-backup
-        continue-on-error: true
-
-      - name: Restore Tailscale state
-        run: |
-          if [ -d ts-backup ]; then
-            echo "📦 Restoring Tailscale state..."
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp -r ts-backup/* /var/lib/tailscale/ || true
-          else
-            echo "ℹ️ No previous Tailscale state found."
-          fi
-
+      # --- Tailscale section ---
       - name: Install & Start Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscaled & sleep 5
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+          sudo systemctl enable tailscaled
+          sudo tailscaled &
+          for i in {1..10}; do
+            if tailscale status 2>/dev/null | grep -q "Connected"; then
+              break
+            fi
+            sleep 5
+          done
+          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
 
       - name: System Info
         run: |
@@ -68,55 +71,261 @@ jobs:
           df -h
           free -m
 
-      - name: Keep VPS alive (tmate session)
+      - name: Keep VPS alive
         uses: mxschmitt/action-tmate@v3
         timeout-minutes: 300
 
-      # ===== BACKUP SECTION =====
-      - name: Backup VPS files
+      - name: Pre-backup cleanup
         if: always()
         run: |
-          echo "📦 Creating VPS backup..."
-          mkdir -p backup
-          # Exclude backup itself, ignore file-changed errors
-          sudo tar --warning=no-file-changed \
-                   --ignore-failed-read \
-                   --exclude=./backup/vps-backup.tar.gz \
-                   -czf backup/vps-backup.tar.gz /etc /home /var || true
+          echo "🧹 Cleaning up before backup..."
+          # Clean package manager cache
+          sudo apt-get clean 2>/dev/null || true
+          # Clean journal logs older than 1 day
+          sudo journalctl --vacuum-time=1d 2>/dev/null || true
+          # Clean temporary files
+          sudo find /tmp -type f -atime +1 -delete 2>/dev/null || true
+          sudo find /var/tmp -type f -atime +1 -delete 2>/dev/null || true
+          # Remove old log files
+          sudo find /var/log -name "*.gz" -type f -delete 2>/dev/null || true
+          sudo find /var/log -name "*.old" -type f -delete 2>/dev/null || true
 
+      - name: Create versioned backup
+        if: always()
+        run: |
+          mkdir -p backup
+          BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+          echo "📦 Creating VPS backup at $BACKUP_FILE"
+          
+          # Create a list of directories to backup
+          BACKUP_DIRS="/etc /home /var/lib /opt"
+          
+          # Set up signal handling
+          trap 'echo "⚠️ Backup interrupted, finalizing..."; exit 0' TERM INT
+          
+          # Use a more robust backup approach
+          set +e  # Don't exit on error
+          
+          # Create backup with better error handling
+          sudo tar \
+            --warning=no-file-changed \
+            --warning=no-file-removed \
+            --ignore-failed-read \
+            --exclude="$BACKUP_FILE" \
+            --exclude=/proc \
+            --exclude=/sys \
+            --exclude=/dev \
+            --exclude=/run \
+            --exclude=/tmp \
+            --exclude=/var/run \
+            --exclude=/var/lock \
+            --exclude=/var/cache/apt \
+            --exclude=/var/lib/docker \
+            --exclude=/var/lib/containerd \
+            --exclude=/var/log \
+            --exclude='*.sock' \
+            --exclude='*.pid' \
+            --exclude='*.lock' \
+            --exclude='/var/lib/tailscale/*.sock' \
+            -czf "$BACKUP_FILE" $BACKUP_DIRS 2>/dev/null
+          
+          TAR_EXIT_CODE=$?
+          
+          # Handle specific tar exit codes
+          case $TAR_EXIT_CODE in
+            0)
+              echo "✅ Backup completed successfully"
+              ;;
+            1)
+              echo "⚠️ Backup completed with warnings (some files changed during backup)"
+              ;;
+            2)
+              echo "❌ Fatal error during backup"
+              # Try alternative backup method
+              ;;
+            *)
+              echo "⚠️ Backup completed with exit code: $TAR_EXIT_CODE"
+              ;;
+          esac
+          
+          # Verify backup was created and has content
+          if [ -f "$BACKUP_FILE" ]; then
+            BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+            echo "📊 Backup size: $BACKUP_SIZE"
+            
+            # Test backup integrity
+            if gzip -t "$BACKUP_FILE" 2>/dev/null; then
+              echo "✅ Backup integrity verified"
+            else
+              echo "❌ Backup corrupted, attempting incremental backup..."
+              
+              # Method 2: Incremental backup approach
+              rm -f "$BACKUP_FILE"
+              TEMP_DIR=$(mktemp -d)
+              
+              for dir in $BACKUP_DIRS; do
+                if [ -d "$dir" ]; then
+                  echo "Backing up $dir..."
+                  sudo tar -rf "$TEMP_DIR/backup.tar" "$dir" \
+                    --exclude=/var/run \
+                    --exclude=/var/lock \
+                    --exclude='*.sock' \
+                    --exclude='*.pid' \
+                    2>/dev/null || true
+                fi
+              done
+              
+              # Compress the final archive
+              if [ -f "$TEMP_DIR/backup.tar" ]; then
+                gzip -c "$TEMP_DIR/backup.tar" > "$BACKUP_FILE"
+                rm -rf "$TEMP_DIR"
+                echo "✅ Incremental backup completed"
+              fi
+            fi
+          else
+            echo "❌ Primary backup failed, trying alternative method..."
+          fi
+
+      - name: Alternative backup method (if main fails)
+        if: always()
+        run: |
+          # Check if primary backup exists and is valid
+          PRIMARY_BACKUP=$(ls -t backup/vps-backup-*.tar.gz 2>/dev/null | head -1)
+          
+          if [ -z "$PRIMARY_BACKUP" ] || ! gzip -t "$PRIMARY_BACKUP" 2>/dev/null; then
+            echo "🔄 Using rsync-based backup as fallback..."
+            
+            mkdir -p backup
+            BACKUP_DIR="backup/vps-files-$(date +%Y%m%d-%H%M%S)"
+            
+            # Copy important directories with rsync
+            for dir in /etc /home /var/lib /opt; do
+              if [ -d "$dir" ]; then
+                echo "Syncing $dir..."
+                sudo rsync -a \
+                  --exclude='*.sock' \
+                  --exclude='*.pid' \
+                  --exclude='*.lock' \
+                  --exclude='/var/lib/docker' \
+                  --exclude='/var/lib/containerd' \
+                  "$dir" "$BACKUP_DIR/" 2>/dev/null || true
+              fi
+            done
+            
+            # Create compressed archive
+            if [ -d "$BACKUP_DIR" ]; then
+              tar -czf "$BACKUP_DIR.tar.gz" -C backup "$(basename $BACKUP_DIR)" 2>/dev/null || true
+              rm -rf "$BACKUP_DIR"
+              echo "✅ Alternative backup completed"
+            fi
+          fi
 
       - name: Backup Tailscale state
         if: always()
         run: |
-          echo "🔒 Backing up Tailscale state..."
+          echo "💾 Backing up Tailscale state..."
+          sudo systemctl stop tailscaled 2>/dev/null || true
+          sleep 2
+          
           mkdir -p ts-backup
-          sudo cp -r /var/lib/tailscale/* ts-backup/ || true
+          if [ -d /var/lib/tailscale ]; then
+            sudo rsync -a \
+              --exclude='*.sock' \
+              --exclude='*.lock' \
+              /var/lib/tailscale/ ts-backup/ 2>/dev/null || true
+          fi
+          
+          sudo systemctl start tailscaled 2>/dev/null || true
 
-      - name: Upload VPS backup
+      - name: Split large backups
+        if: always()
+        run: |
+          echo "📦 Checking for large backups to split..."
+          for backup in backup/vps-backup-*.tar.gz backup/vps-files-*.tar.gz; do
+            if [ -f "$backup" ]; then
+              SIZE=$(stat -c%s "$backup" 2>/dev/null || stat -f%z "$backup" 2>/dev/null || echo "0")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              if [ "$SIZE" -gt 1073741824 ]; then
+                echo "Splitting large backup: $backup (${SIZE_MB}MB)"
+                split -b 500M "$backup" "$backup.part-"
+                rm "$backup"
+                echo "✅ Split into parts"
+              else
+                echo "Backup $backup size: ${SIZE_MB}MB (no split needed)"
+              fi
+            fi
+          done
+
+      - name: Create backup manifest
+        if: always()
+        run: |
+          echo "📋 Creating backup manifest..."
+          cat > backup/manifest.txt << EOF
+          Backup Date: $(date)
+          Hostname: $(hostname)
+          User: $(whoami)
+          
+          Backup Contents:
+          EOF
+          
+          for backup in backup/*.tar.gz backup/*.tar.gz.part-*; do
+            if [ -f "$backup" ]; then
+              echo "- $(basename $backup): $(du -h $backup | cut -f1)" >> backup/manifest.txt
+            fi
+          done
+          
+          echo "" >> backup/manifest.txt
+          echo "System Info:" >> backup/manifest.txt
+          df -h >> backup/manifest.txt
+
+      - name: Upload versioned backups
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup-${{ github.run_id }}
+          path: |
+            backup/vps-backup-*.tar.gz*
+            backup/vps-files-*.tar.gz*
+            backup/manifest.txt
+            ts-backup/
+          retention-days: 7
+          compression-level: 0  # Already compressed
+
+      - name: Upload latest backup marker
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup-latest
-          path: backup/vps-backup.tar.gz
-          retention-days: 3
+          path: |
+            backup/vps-backup-*.tar.gz*
+            backup/vps-files-*.tar.gz*
+            backup/manifest.txt
+            ts-backup/
+          retention-days: 1
+          compression-level: 0
 
-      - name: Upload Tailscale state
+      - name: Cleanup old backups
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ts-backup
-          path: ts-backup
-          retention-days: 3
+        run: |
+          echo "🧹 Cleaning up old local backups..."
+          find backup/ -name "vps-backup-*.tar.gz*" -mtime +7 -delete 2>/dev/null || true
+          find backup/ -name "vps-files-*.tar.gz*" -mtime +7 -delete 2>/dev/null || true
 
       - name: Completion summary
         if: always()
         run: |
+          echo "🎉 VPS Maintenance Completed"
           echo ""
-          echo "🎉 ================================="
-          echo "✅ VPS BACKUP & RESTORE COMPLETED"
-          echo "🎉 ================================="
+          echo "📊 Backup Summary:"
+          if [ -f backup/manifest.txt ]; then
+            cat backup/manifest.txt
+          else
+            du -sh backup/* 2>/dev/null || echo "No backups found"
+          fi
           echo ""
-          echo "📊 Backup Statistics:"
-          du -sh backup/* || true
+          echo "💾 Disk Usage:"
+          df -h
           echo ""
-          echo "☁️ Stored as GitHub Artifacts"
+          echo "🧮 Memory Usage:"
+          free -m
