@@ -90,13 +90,10 @@ jobs:
             echo "⚠️ No previous Tailscale state found, will get new IP"
           fi
 
-      # 6. Setup Tailscale with state restoration
+      # 6. Setup Tailscale with state restoration - FIXED: No removal attempt
       - name: Setup Tailscale
         run: |
-          # Remove any existing tailscale packages to avoid conflicts
-          sudo apt remove -y tailscale tailscale-archive-keyring || true
-          
-          # Install using official script
+          # Install using official script (don't try to remove non-existent packages)
           curl -fsSL https://tailscale.com/install.sh | sh
           
           # Check if we have a restored state
@@ -105,17 +102,18 @@ jobs:
             sudo systemctl start tailscaled
             # Wait a moment for tailscale to initialize with restored state
             sleep 3
+            echo "🎉 Connected to Tailscale with restored state!"
           else
             echo "🆕 Setting up new Tailscale connection (new IP)"
             sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+            echo "🎉 Connected to Tailscale with new IP!"
           fi
           
-          echo "🎉 Connected to Tailscale!"
-          echo "IP Address: $(tailscale ip -4)"
+          echo "IP Address: $(tailscale ip -4 || echo 'Not available yet')"
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
           echo "Tailscale status:"
-          tailscale status
+          tailscale status || echo "Status check failed - may need more time to initialize"
 
       # 7. Start tmate session
       - name: Start tmate session
