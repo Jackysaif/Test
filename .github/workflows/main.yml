@@ -1,24 +1,49 @@
-name: Persistent VPS with Backup & Restore
+name: Continuous Persistent VPS with Backup & Restore
 
 on:
-  workflow_dispatch:
-  workflow_call:
   schedule:
-    - cron: "0 */6 * * *"  # every 6 hours
+    - cron: '0 */6 * * *'   # Every 6 hours
+  workflow_dispatch:
 
 jobs:
-  vps:
+  vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 350
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Display startup info
+        run: |
+          echo "Creating hostname root@notfleppy"
+          echo "Creating username 'not' and password 'fleppy'"
+
+      # === Hostname and User Setup ===
+      - name: Set hostname
+        run: |
+          sudo hostnamectl set-hostname root@notfleppy
+          echo "127.0.0.1 root@notfleppy" | sudo tee -a /etc/hosts
+
+      - name: Set root password
+        run: echo "root:fleppy" | sudo chpasswd
+
+      - name: Create user 'not' with password 'fleppy'
+        run: |
+          if ! id -u not >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash not
+            echo "not:fleppy" | sudo chpasswd
+            sudo usermod -aG sudo not
+            echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
+          else
+            echo "ℹ️ User 'not' already exists"
+          fi
+
+      # === Install Dependencies ===
+      - name: Install prerequisites
         run: |
           sudo apt update
-          sudo apt install -y unzip curl tmate
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
           curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -a rclone-current-linux-amd64.zip
           cd rclone-*-linux-amd64
@@ -27,17 +52,8 @@ jobs:
           sudo chmod 755 /usr/bin/rclone
           rclone version
 
-      - name: Create restricted user
-        run: |
-          if ! id -u jacky >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "jacky:root" | sudo chpasswd
-            echo "✅ User jacky created with password 'root'"
-          else
-            echo "ℹ️ User jacky already exists"
-          fi
-
-      - name: Setup rclone with MEGA
+      # === Setup rclone with MEGA ===
+      - name: Configure MEGA remote
         run: |
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
@@ -46,91 +62,62 @@ jobs:
           user = rajeeshsksbx7@gmail.com
           pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
           EOF
+          echo "✅ MEGA remote configured"
+          rclone mkdir mega:/vps-backup || true
+          rclone ls mega:/vps-backup || echo "ℹ️ MEGA remote empty"
 
-          echo "🔑 MEGA rclone configured successfully!"
-          echo "📂 Listing MEGA remote root to confirm:"
-          rclone ls mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
-
-      # === Restore Section ===
-      - name: Download latest backup from MEGA
+      # === Restore Backup ===
+      - name: Restore backup files
         run: |
           mkdir -p restore
-          if rclone copy mega:/vps-backup/latest.tar.gz restore/ --progress; then
-            echo "✅ Backup archive found"
-          else
-            echo "ℹ️ No previous backup found"
-          fi
-
-      - name: Restore backup if exists
-        run: |
-          if [ -f restore/latest.tar.gz ]; then
-            echo "📦 Restoring backup..."
+          if rclone copy mega:/vps-backup/latest.tar.gz restore/; then
+            echo "✅ Found latest backup, extracting..."
             sudo tar -xzf restore/latest.tar.gz -C /
-            echo "✅ Restore complete."
           else
-            echo "⚠️ No backup to restore."
+            echo "ℹ️ No previous backup found, starting fresh"
           fi
 
-      # === Tailscale Section ===
-      - name: Setup Tailscale (restore state if available)
+      # === Install & Restore Tailscale ===
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Restore Tailscale state
         run: |
-          set -x
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Try to restore previous state from MEGA
           mkdir -p backup
-          rclone copy mega:/vps-backup/tailscale-initial.tar.gz backup/ || true
-          
-          if [ -f backup/tailscale-initial.tar.gz ]; then
-            echo "🔄 Found previous Tailscale state, restoring..."
+          if rclone copy mega:/vps-backup/tailscale-initial.tar.gz backup/; then
             tar -xzf backup/tailscale-initial.tar.gz -C backup
             sudo mkdir -p /var/lib/tailscale
             sudo cp backup/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
-            sleep 5
-            sudo tailscale up --ssh --hostname github-vps
-            echo "✅ Restored Tailscale state and started"
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "✅ Restored Tailscale state"
           else
-            echo "🆕 No previous Tailscale state, setting up fresh..."
-            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
-            sleep 5
-            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --ssh --hostname github-vps
-            echo "✅ Fresh Tailscale setup complete"
-            
-            # Backup new state immediately
-            sudo cp /var/lib/tailscale/tailscaled.state backup/
-            sudo tar -czf backup/tailscale-initial.tar.gz -C backup tailscaled.state
-            rclone copy backup/tailscale-initial.tar.gz mega:/vps-backup --progress
-            echo "☁️ New Tailscale state backed up"
+            echo "🆕 No previous Tailscale state found"
           fi
-          
-          echo "🌐 Tailscale IP: $(tailscale ip -4)"
-          echo "👤 Username: jacky"
-          echo "🔑 Password: root"
 
-      # === Tmate Session ===
-      - name: Start Tmate session (keep VPS alive)
+      - name: Start Tailscale
         run: |
-          echo "🔗 Starting tmate session..."
-          tmate -F -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🔑 SSH connection string:"
-          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
-          echo "🕒 VPS will stay alive for 21600s (6 hours)"
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --ssh --hostname root@notfleppy || echo "⚠️ Tailscale already up"
+          echo "🌐 Tailscale IP: $(tailscale ip -4 || echo 'N/A')"
+
+      # === Start Tmate Session ===
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      # === Keep VPS Alive ===
+      - name: Keep VPS alive
+        run: |
+          echo "🕒 VPS will stay alive for 6 hours"
           sleep 21600
 
-      # === Backup Section (Only on dispatch or cancel) ===
+      # === Backup Section (only on dispatch or cancel) ===
       - name: Backup VPS data
         if: github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p backup
-          echo "📦 Backing up user jacky home directory..."
-          sudo tar --exclude='*.tar.gz' -czf backup/jacky-home.tar.gz /home/jacky
-
-          if [ -d /www/server ]; then
-            echo "📦 Backing up aaPanel..."
-            sudo tar -czf backup/aapanel.tar.gz /www/server
-          fi
+          echo "📦 Backing up user 'not' home directory..."
+          sudo tar --exclude='*.tar.gz' -czf backup/not-home.tar.gz /home/not
 
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
             echo "📦 Backing up Tailscale state..."
@@ -144,7 +131,6 @@ jobs:
       - name: Final backup on cancel
         if: cancelled()
         run: |
-          echo "⚠️ Workflow cancelled, saving backup..."
           mkdir -p backup
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
             sudo cp /var/lib/tailscale/tailscaled.state backup/
@@ -152,3 +138,4 @@ jobs:
           BACKUP_FILE="cancelled-$(date +%s).tar.gz"
           tar -czf $BACKUP_FILE -C backup .
           rclone copy $BACKUP_FILE mega:/vps-backup --progress
+          echo "⚠️ Workflow cancelled, backup saved"
