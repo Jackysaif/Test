@@ -189,7 +189,7 @@ jobs:
             /home/${{ env.VPS_USER }}/public_html \
             2>/dev/null || echo "⚠️ Website data not found"
 
-          # 5. Backup databases (MySQL/MariaDB) - FIXED LINE
+          # 5. Backup databases (MySQL/MariaDB)
           echo "🗄️ Backing up databases..."
           if command -v mysql >/dev/null 2>&1; then
             # Backup all databases (simplified command)
@@ -228,17 +228,17 @@ jobs:
           # 9. Create backup manifest
           echo "📝 Creating backup manifest..."
           cat > backup/manifest.txt << EOF
-Backup created: $(date)
-Components backed up:
-- User home directory
-- System packages
-- Web server configurations
-- Website data
-- Databases
-- aaPanel configuration
-- PHP configuration
-- System services
-EOF
+          Backup created: $(date)
+          Components backed up:
+          - User home directory
+          - System packages
+          - Web server configurations
+          - Website data
+          - Databases
+          - aaPanel configuration
+          - PHP configuration
+          - System services
+          EOF
 
           echo "✅ Complete backup created: $(du -sh backup)"
 
