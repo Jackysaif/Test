@@ -1,10 +1,9 @@
-name: Persistent VPS with Backup & Restore
+name: Persistent VPS with Backup & Restore (Lightweight)
 
 on:
   workflow_dispatch:
-  workflow_call:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *" # Run every 6 hours
 
 jobs:
   vps:
@@ -15,259 +14,111 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # === Restore Section ===
+      - name: Download latest backup
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: backup
+        continue-on-error: true
+
+      - name: Restore VPS data & Tailscale state
+        run: |
+          if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
+            echo "📦 Restoring VPS data..."
+            sudo tar -xzf backup/vps-backup-*.tar.gz -C / || true
+            
+            # Restore ownership of /home/jacky if it exists
+            if [ -d /home/jacky ]; then
+              sudo chown -R jacky:jacky /home/jacky
+            fi
+            
+            # Restart tailscale if state was restored
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              echo "🔄 Restoring Tailscale state..."
+              sudo systemctl restart tailscaled || true
+            fi
+          else
+            echo "ℹ️ No previous backup found, starting fresh."
+          fi
+
+      # === Setup User & Tailscale ===
       - name: Create restricted user
         run: |
           if ! id -u jacky >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash jacky
-            echo "jacky:$(openssl rand -base64 12)" | sudo chpasswd
+            echo "jacky:root" | sudo chpasswd
             echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          fi
-
-      - name: Download latest backups
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup-latest
-          path: backup
-        continue-on-error: true
-
-      - name: Restore VPS files
-        run: |
-          if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
-            echo "📦 Restoring VPS files..."
-            for backup_file in backup/vps-backup-*.tar.gz; do
-              if [ -f "$backup_file" ]; then
-                echo "Restoring from: $backup_file"
-                sudo tar -xzf "$backup_file" -C / 2>/dev/null || echo "⚠️ Some files couldn't be restored"
-              fi
-            done
+            echo "✅ User 'jacky' created with password 'root'"
           else
-            echo "ℹ️ No previous VPS backup found."
+            echo "jacky:root" | sudo chpasswd
+            echo "✅ Password updated for existing user 'jacky'"
           fi
 
-      # --- Tailscale section ---
       - name: Install & Start Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable tailscaled
           sudo tailscaled &
-          for i in {1..10}; do
-            if tailscale status 2>/dev/null | grep -q "Connected"; then
-              break
-            fi
-            sleep 5
-          done
+          sleep 5
           tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
 
       - name: System Info
         run: |
+          echo "=== System Information ==="
           uname -a
-          whoami
+          echo "User: $(whoami)"
           id
           df -h
           free -m
 
+      # === Interactive Access ===
       - name: Keep VPS alive
         uses: mxschmitt/action-tmate@v3
         timeout-minutes: 300
 
-      - name: Pre-backup cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up before backup..."
-          sudo apt-get clean 2>/dev/null || true
-          sudo journalctl --vacuum-time=1d 2>/dev/null || true
-          sudo find /tmp -type f -atime +1 -delete 2>/dev/null || true
-          sudo find /var/tmp -type f -atime +1 -delete 2>/dev/null || true
-
-      - name: Create versioned backup using ZIP method
+      # === Backup Section ===
+      - name: Backup VPS data and Tailscale state
         if: always()
         run: |
           mkdir -p backup
-          BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-          echo "📦 Creating VPS backup using ZIP method..."
-          
-          # Create temporary directory for staging
-          TEMP_BACKUP_DIR=$(mktemp -d)
-          echo "Using temp directory: $TEMP_BACKUP_DIR"
-          
-          # Define what to backup
+          TEMP_BACKUP=$(mktemp -d)
+
           BACKUP_ITEMS=(
             "/etc"
             "/home"
-            "/var/lib"
+            "/var/lib/tailscale/tailscaled.state"
+            "/root/.ssh"
             "/opt"
-            "/root/.bashrc"
-            "/root/.profile"
           )
-          
-          # Copy files to temp directory first (more reliable than direct tar)
+
           for item in "${BACKUP_ITEMS[@]}"; do
             if [ -e "$item" ]; then
-              echo "📁 Copying $item..."
-              # Create parent directory structure
-              parent_dir=$(dirname "$item")
-              mkdir -p "$TEMP_BACKUP_DIR$parent_dir"
-              
-              # Use cp instead of rsync for better compatibility
-              sudo cp -a "$item" "$TEMP_BACKUP_DIR$parent_dir/" 2>/dev/null || {
-                echo "⚠️ Failed to copy $item, trying alternative method..."
-                # Try with find and cpio as fallback
-                cd /
-                sudo find ".$item" -type f ! -name "*.sock" ! -name "*.pid" ! -name "*.lock" 2>/dev/null | \
-                  sudo cpio -pdm "$TEMP_BACKUP_DIR" 2>/dev/null || true
-                cd - >/dev/null
-              }
-            fi
-          done
-          
-          # Clean up problematic files from temp directory
-          echo "🧹 Cleaning temporary backup..."
-          find "$TEMP_BACKUP_DIR" -type s -delete 2>/dev/null || true  # Remove sockets
-          find "$TEMP_BACKUP_DIR" -name "*.sock" -delete 2>/dev/null || true
-          find "$TEMP_BACKUP_DIR" -name "*.pid" -delete 2>/dev/null || true
-          find "$TEMP_BACKUP_DIR" -name "*.lock" -delete 2>/dev/null || true
-          find "$TEMP_BACKUP_DIR" -path "*/docker/*" -delete 2>/dev/null || true
-          find "$TEMP_BACKUP_DIR" -path "*/containerd/*" -delete 2>/dev/null || true
-          
-          # Create the archive from temp directory
-          echo "📦 Creating compressed archive..."
-          cd "$TEMP_BACKUP_DIR"
-          
-          # Use zip for better handling of special files
-          sudo zip -r -q backup.zip . -x "*.sock" "*.pid" "*.lock" || {
-            echo "⚠️ ZIP failed, trying tar..."
-            sudo tar -czf backup.tar.gz . 2>/dev/null || true
-          }
-          
-          # Move the archive to final location
-          if [ -f backup.zip ]; then
-            # Convert zip to tar.gz for consistency
-            sudo unzip -q backup.zip -d extracted/ 2>/dev/null || true
-            if [ -d extracted ]; then
-              cd extracted
-              sudo tar -czf "$BACKUP_FILE" . 2>/dev/null || true
-              cd ..
-            else
-              # Just rename if extraction failed
-              sudo mv backup.zip "$BACKUP_FILE"
-            fi
-          elif [ -f backup.tar.gz ]; then
-            sudo mv backup.tar.gz "$BACKUP_FILE"
-          fi
-          
-          cd - >/dev/null
-          
-          # Cleanup temp directory
-          sudo rm -rf "$TEMP_BACKUP_DIR"
-          
-          # Verify backup
-          if [ -f "$BACKUP_FILE" ]; then
-            BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-            echo "✅ Backup created successfully: $BACKUP_SIZE"
-          else
-            echo "❌ Backup creation failed"
-          fi
-
-      - name: Backup Tailscale state separately
-        if: always()
-        run: |
-          echo "💾 Backing up Tailscale state..."
-          mkdir -p ts-backup
-          
-          # Stop tailscale temporarily
-          sudo systemctl stop tailscaled 2>/dev/null || true
-          sleep 2
-          
-          # Copy tailscale data
-          if [ -d /var/lib/tailscale ]; then
-            sudo cp -a /var/lib/tailscale/* ts-backup/ 2>/dev/null || true
-            # Remove any socket files
-            find ts-backup -type s -delete 2>/dev/null || true
-            find ts-backup -name "*.sock" -delete 2>/dev/null || true
-          fi
-          
-          # Restart tailscale
-          sudo systemctl start tailscaled 2>/dev/null || true
-          
-          # Create archive of tailscale backup
-          if [ "$(ls -A ts-backup 2>/dev/null)" ]; then
-            tar -czf backup/tailscale-backup.tar.gz ts-backup/ 2>/dev/null || true
-          fi
-
-      - name: Create smaller chunked backups if needed
-        if: always()
-        run: |
-          echo "📦 Checking backup sizes..."
-          
-          for backup in backup/*.tar.gz; do
-            if [ -f "$backup" ]; then
-              SIZE=$(stat -c%s "$backup" 2>/dev/null || echo "0")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              
-              if [ "$SIZE" -gt 2147483648 ]; then  # 2GB limit for artifacts
-                echo "⚠️ Backup too large ($SIZE_MB MB), creating chunks..."
-                
-                # Split into 500MB chunks
-                split -b 500M "$backup" "$backup.part-"
-                
-                # Remove original large file
-                rm "$backup"
-                
-                # Create index file
-                echo "Original file: $(basename $backup)" > "$backup.parts.txt"
-                echo "Size: $SIZE_MB MB" >> "$backup.parts.txt"
-                echo "Parts:" >> "$backup.parts.txt"
-                ls -la "$backup.part-"* >> "$backup.parts.txt"
-              else
-                echo "✅ Backup size OK: $(basename $backup) ($SIZE_MB MB)"
-              fi
+              sudo mkdir -p "$TEMP_BACKUP$(dirname "$item")"
+              sudo cp -a "$item" "$TEMP_BACKUP$(dirname "$item")/"
             fi
           done
 
-      - name: Create backup summary
-        if: always()
-        run: |
-          cat > backup/backup-summary.txt << EOF
-          Backup Summary
-          ==============
-          Date: $(date)
-          Run ID: ${{ github.run_id }}
-          
-          Files backed up:
-          EOF
-          
-          ls -lah backup/*.tar.gz* 2>/dev/null >> backup/backup-summary.txt || echo "No backups found" >> backup/backup-summary.txt
-          
-          echo -e "\nDisk usage:" >> backup/backup-summary.txt
-          df -h >> backup/backup-summary.txt
+          BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+          sudo tar -czf "$BACKUP_FILE" -C "$TEMP_BACKUP" .
+          sudo chown $USER:$USER "$BACKUP_FILE"
+          sudo rm -rf "$TEMP_BACKUP"
 
-      - name: Upload versioned backups
+          echo "✅ Backup created: $BACKUP_FILE"
+
+      - name: Upload VPS backup artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vps-backup-${{ github.run_id }}
-          path: |
-            backup/*.tar.gz*
-            backup/*.txt
+          name: vps-backup
+          path: backup/*.tar.gz
           retention-days: 7
-          compression-level: 0  # Already compressed
-
-      - name: Upload latest backup marker
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup-latest
-          path: |
-            backup/*.tar.gz*
-            backup/*.txt
-          retention-days: 1
           compression-level: 0
 
-      - name: Completion summary
+      - name: Completion Summary
         if: always()
         run: |
-          echo "🎉 VPS Maintenance Completed"
-          echo ""
-          if [ -f backup/backup-summary.txt ]; then
-            cat backup/backup-summary.txt
+          echo "🎉 VPS Backup & Restore Workflow Completed"
+          if [ -f backup/*.tar.gz ]; then
+            du -h backup/*.tar.gz
           fi
