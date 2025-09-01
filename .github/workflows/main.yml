@@ -35,7 +35,7 @@ jobs:
         run: |
           set -x
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname github-vps --ssh
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
           echo "🎉 Connected to Tailscale!"
           echo "🌐 Tailscale IP: $(tailscale ip -4)"
           echo "👤 Username: jacky"
