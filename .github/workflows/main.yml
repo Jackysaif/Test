@@ -21,17 +21,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Install all necessary tools at once
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate
+          sudo apt install -y curl tmate tar dpkg unzip
 
       # ===== RCLONE SETUP =====
       - name: Install and configure rclone
         run: |
           # Install rclone
           curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -a rclone-current-linux-amd64.zip
+          unzip -o rclone-current-linux-amd64.zip
           cd rclone-*-linux-amd64
           sudo cp rclone /usr/bin/
           sudo chown root:root /usr/bin/rclone
@@ -61,9 +62,10 @@ jobs:
             echo "🔁 User ${{ env.VPS_USER }} already exists"
           fi
 
+      # Use the standard `hostname` command
       - name: Set hostname
         run: |
-          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
+          sudo hostname "${{ env.VPS_HOSTNAME }}"
           echo "🏷️ Hostname set to $(hostname)"
 
       # ===== BACKUP RESTORATION =====
@@ -80,19 +82,11 @@ jobs:
             echo "⚠️ No system backup found, starting fresh"
           fi
           
-          # Download user data separately
-          if rclone copy mega:${{ env.BACKUP_DIR }}/user-home.tar.gz restore/ --progress; then
-            echo "🏠 Restoring user data..."
-            sudo tar -xzf restore/user-home.tar.gz -C /
-            echo "✅ User data restored"
-          fi
-          
           # Download package list
           if rclone copy mega:${{ env.BACKUP_DIR }}/packages.list restore/ --progress; then
             echo "📦 Restoring packages..."
             sudo apt-get update
             sudo dpkg --set-selections < restore/packages.list
-            sudo apt-get upgrade -y
             sudo apt-get dselect-upgrade -y
             echo "✅ Packages restored"
           fi
@@ -100,7 +94,9 @@ jobs:
       # ===== TAILSCALE SETUP =====
       - name: Setup Tailscale
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscaled --tun=userspace-networking &
+          sleep 5
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname ${{ env.VPS_HOSTNAME }} --ssh
           
           echo "🌐 Tailscale IP: $(tailscale ip -4)"
@@ -123,7 +119,7 @@ jobs:
           echo "🔗 Connect: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           
           # Keep session alive
-          sleep 21600  # 6 hours
+          sleep 21600
 
       # ===== BACKUP CREATION =====
       - name: Create backup
@@ -132,32 +128,17 @@ jobs:
           mkdir -p backup
           echo "💾 Creating backup..."
           
-          # Backup user home directory
-          echo "📁 Backing up user data..."
-          sudo tar -czf backup/user-home.tar.gz \
-            -C /home ${{ env.VPS_USER }} \
-            --exclude='.cache' \
-            --exclude='node_modules' \
-            --exclude='*.tmp' \
-            --exclude='*.log' \
-            --warning=no-file-changed \
-            .
-          
-          # Backup system files
-          echo "⚙️ Backing up system configuration..."
-          sudo tar -czf backup/system-config.tar.gz \
+          # Backup directories with their full path, including Tailscale state
+          sudo tar -czf backup/latest.tar.gz \
             --ignore-failed-read \
+            --warning=no-file-changed \
             /etc/ssh /etc/nginx /etc/mysql /etc/apache2 \
-            /var/www /root/.ssh /home/${{ env.VPS_USER }}/.ssh \
+            /var/www /var/lib/tailscale /root/.ssh /home/${{ env.VPS_USER }} \
             2>/dev/null || true
           
           # Backup package list
           echo "📦 Backing up packages..."
           dpkg --get-selections > backup/packages.list
-          
-          # Create combined backup
-          echo "📦 Creating final backup archive..."
-          tar -czf backup/latest.tar.gz -C backup .
           
           echo "✅ Backup created: $(du -sh backup)"
 
@@ -168,13 +149,9 @@ jobs:
           echo "☁️ Uploading backup to MEGA..."
           rclone mkdir mega:${{ env.BACKUP_DIR }} || true
           
-          # Upload individual files for easy restoration
-          rclone copy backup/user-home.tar.gz mega:${{ env.BACKUP_DIR }} --progress
-          rclone copy backup/packages.list mega:${{ env.BACKUP_DIR }} --progress
-          rclone copy backup/system-config.tar.gz mega:${{ env.BACKUP_DIR }} --progress
-          
-          # Upload complete backup
+          # Upload final backup
           rclone copy backup/latest.tar.gz mega:${{ env.BACKUP_DIR }} --progress
+          rclone copy backup/packages.list mega:${{ env.BACKUP_DIR }} --progress
           
           echo "✅ Backup uploaded to MEGA"
 
