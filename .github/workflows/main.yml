@@ -64,7 +64,7 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "✅ Hostname set to $(hostname)"
 
-      # 6. RESTORE PHASE - Comprehensive restoration
+      # 6. RESTORE PHASE - Comprehensive restoration (excluding snapd)
       - name: Restore system from backup
         run: |
           set -e
@@ -86,21 +86,23 @@ jobs:
             fi
           done
 
-          # Restore packages first
+          # Restore packages first (excluding snapd)
           if [ -f "$RESTORE_DIR/installed-packages.list" ]; then
-            echo "📦 Restoring installed packages..."
+            echo "📦 Restoring installed packages (excluding snapd)..."
+            # Filter out snapd packages before restoring
+            grep -v "snapd" "$RESTORE_DIR/installed-packages.list" > "$RESTORE_DIR/filtered-packages.list"
             sudo apt-get update
-            sudo dpkg --set-selections < "$RESTORE_DIR/installed-packages.list"
+            sudo dpkg --set-selections < "$RESTORE_DIR/filtered-packages.list"
             sudo apt-get upgrade -y
             sudo apt-get dselect-upgrade -y
           fi
 
-          # Restore system services and configurations
+          # Restore system services and configurations (excluding snapd)
           for backup_file in "$RESTORE_DIR"/*.tar.gz; do
             case $(basename "$backup_file") in
               *system*|*services*|*aapanel*)
-                echo "🔄 Restoring system files from $(basename "$backup_file")..."
-                sudo tar -xzf "$backup_file" -C / --keep-newer-files
+                echo "🔄 Restoring system files from $(basename "$backup_file") (excluding snapd)..."
+                sudo tar -xzf "$backup_file" -C / --keep-newer-files --exclude="snap" --exclude="var/lib/snapd" --exclude="var/snap"
                 ;;
               *tailscale*)
                 echo "🔄 Restoring Tailscale state..."
@@ -110,7 +112,7 @@ jobs:
                 ;;
               *jacky*|*home*)
                 echo "🔄 Restoring user data..."
-                sudo tar -xzf "$backup_file" -C / --keep-newer-files --skip-old-files
+                sudo tar -xzf "$backup_file" -C / --skip-old-files --exclude="snap" --exclude=".snap"
                 ;;
             esac
           done
@@ -121,7 +123,12 @@ jobs:
           sudo chmod 700 /home/jacky/.ssh 2>/dev/null || true
           sudo chmod 600 /home/jacky/.ssh/* 2>/dev/null || true
 
-          echo "✅ Restoration completed successfully"
+          # Clean up old backups from MEGA after successful restoration
+          echo "🗑️ Cleaning up old backups from MEGA..."
+          rclone delete mega:$MEGA_BACKUP_DIR/ --include "*.tar.gz" --include "*.list" || \
+          echo "⚠️ Could not delete old backups (maybe they don't exist)"
+
+          echo "✅ Restoration and cleanup completed successfully"
 
       # 7. Setup Tailscale
       - name: Setup Tailscale
@@ -154,7 +161,7 @@ jobs:
           # Keep session alive
           sleep 21600
 
-      # 9. BACKUP PHASE - Optimized for large files
+      # 9. BACKUP PHASE - Optimized for large files (excluding snapd)
       - name: Backup complete system
         if: always()
         run: |
@@ -162,14 +169,14 @@ jobs:
           mkdir -p $BACKUP_DIR
           cd $BACKUP_DIR
           
-          echo "📦 Starting optimized system backup..."
+          echo "📦 Starting optimized system backup (excluding snapd)..."
           
-          # 1. Backup installed packages
-          echo "📦 Backing up installed packages..."
-          dpkg --get-selections > installed-packages.list
+          # 1. Backup installed packages (excluding snapd)
+          echo "📦 Backing up installed packages (excluding snapd)..."
+          dpkg --get-selections | grep -v "snapd" > installed-packages.list
 
-          # 2. Backup user data with efficient compression and exclusions
-          echo "📦 Backing up user data (optimized compression)..."
+          # 2. Backup user data with efficient compression and exclusions (including snap exclusion)
+          echo "📦 Backing up user data (optimized compression, excluding snap)..."
           sudo tar -cf - \
             -C /home jacky \
             --exclude='./backup' \
@@ -183,10 +190,12 @@ jobs:
             --exclude='Videos' \
             --exclude='Music' \
             --exclude='Pictures' \
+            --exclude='snap' \
+            --exclude='.snap' \
             . | pigz -6 > jacky-home.tar.gz
 
-          # 3. Backup system services and configurations
-          echo "📦 Backing up system services..."
+          # 3. Backup system services and configurations (excluding snapd)
+          echo "📦 Backing up system services (excluding snapd)..."
           services=(
             "/etc/apache2" "/etc/nginx" "/etc/mysql" "/etc/php"
             "/var/www" "/var/lib/mysql"
@@ -198,7 +207,8 @@ jobs:
           for service in "${services[@]}"; do
             if [ -d "$service" ] || [ -f "$service" ]; then
               echo "💾 Backing up $service"
-              sudo tar -czf "system-$(basename "$service").tar.gz" -C / "$service" 2>/dev/null || true
+              sudo tar -czf "system-$(basename "$service").tar.gz" -C / "$service" \
+                --exclude="snap" --exclude="var/lib/snapd" --exclude="var/snap" 2>/dev/null || true
             fi
           done
 
