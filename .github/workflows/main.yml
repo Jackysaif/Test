@@ -1,4 +1,6 @@
-name: Rocket-Powered Persistent VPS
+To fully fix the code, I've incorporated all the corrections and improvements identified in the previous analysis. The updated code addresses the syntax error in the tar command and makes the backup cleanup process more robust.
+Full Corrected Workflow Code
+Name: Rocket-Powered Persistent VPS
 
 on:
   workflow_dispatch:
@@ -116,7 +118,7 @@ jobs:
             if [ -f "$file" ]; then
               if gzip -t "$file"; then
                 echo "✅ $(basename $file): Valid archive ($(du -h $file | cut -f1))"
-                echo "   Contents: $(tar -tzf $file | wc -l) files"
+                echo "   Contents: $(tar -tzf "$file" | wc -l) files"
               else
                 echo "❌ $(basename $file): Corrupted, removing"
                 rm -f "$file"
@@ -221,15 +223,15 @@ jobs:
           # Backup user data (with exclusion patterns)
           echo "📁 Backing up user data..."
           sudo tar -czf backup/jacky-home-full.tar.gz \
-            -C /home ${{ env.VPS_USER }} \
-            --exclude='.cache' \
-            --exclude='.npm' \
-            --exclude='.docker' \
-            --exclude='*.tmp' \
-            --exclude='*.log' \
-            --exclude='node_modules' \
+            -C /home/ \
+            --exclude='${{ env.VPS_USER }}/.cache' \
+            --exclude='${{ env.VPS_USER }}/.npm' \
+            --exclude='${{ env.VPS_USER }}/.docker' \
+            --exclude='${{ env.VPS_USER }}/*.tmp' \
+            --exclude='${{ env.VPS_USER }}/*.log' \
+            --exclude='${{ env.VPS_USER }}/node_modules' \
             --warning=no-file-changed \
-            . 2>/dev/null || echo "⚠️ Some files changed during backup"
+            ${{ env.VPS_USER }} 2>/dev/null || echo "⚠️ Some files changed during backup"
           
           # Backup system state
           echo "⚙️ Backing up system configuration..."
@@ -315,14 +317,13 @@ jobs:
         run: |
           echo "🧹 Cleaning up old backups (retention: ${{ env.BACKUP_RETENTION_DAYS }} days)"
           
-          # Get all backup releases
+          # Get all backup releases and filter using jq for robustness
           OLD_BACKUPS=$(gh release list --limit 50 --json tagName,createdAt --repo "${{ github.repository }}" | \
-            jq -r '.[] | select(.tagName | startswith("vps-backup-")) | [.tagName, .createdAt] | @tsv' | \
-            while read -r tag date; do
-              if [ $(date -d "$date" +%s) -lt $(date -d "${{ env.BACKUP_RETENTION_DAYS }} days ago" +%s) ]; then
-                echo "$tag"
-              fi
-            done)
+            jq -r --argjson retention_days ${{ env.BACKUP_RETENTION_DAYS }} '
+              .[] | select(.tagName | startswith("vps-backup-")) |
+              (now - (.createdAt | fromdate)) / (60*60*24) as $age_days |
+              if $age_days > $retention_days then .tagName else empty end
+            ')
           
           # Delete old backups
           for backup in $OLD_BACKUPS; do
@@ -348,3 +349,4 @@ jobs:
           echo "🕒 Duration: $(($GITHUB_RUN_ATTEMPT / 60)) minutes"
           echo "💾 Disk usage: $(df -h / | awk 'NR==2{print $5}')"
           echo "=========================================="
+
