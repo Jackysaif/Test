@@ -1,36 +1,28 @@
-name: Persistent VPS (Artifacts)
+name: Persistent VPS Session
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # every 6h
+    - cron: "0 */6 * * *"
 
 jobs:
   vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 370   # ~6h + buffer
+    timeout-minutes: 360
 
     steps:
-      # ===============================
-      # Install prerequisites
-      # ===============================
-      - name: Install required packages
-        run: |
-          sudo apt update
-          sudo apt install -y sudo curl unzip zip tmate net-tools neofetch
+      # Checkout repo (required for artifacts pathing)
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # ===============================
-      # Setup user (jacky/root)
-      # ===============================
+      # Create jacky user
       - name: Create user jacky
         run: |
           sudo useradd -m -s /bin/bash jacky || true
-          echo 'jacky:root' | sudo chpasswd
+          echo "jacky:root" | sudo chpasswd
           echo "✅ User jacky created with password root"
 
-      # ===============================
-      # Restore VPS from artifact
-      # ===============================
+      # Restore VPS backup if exists
       - name: Download VPS backup if exists
         uses: actions/download-artifact@v4
         with:
@@ -39,97 +31,84 @@ jobs:
         continue-on-error: true
 
       - name: Restore VPS files
+        if: success()
         run: |
-          if [ -d restore ]; then
-            echo "♻️ Restoring VPS backup..."
-            sudo cp -r restore/etc/* /etc/ || true
-            sudo cp -r restore/home/* /home/ || true
-            sudo cp -r restore/var/www/* /var/www/ || true
+          if [ -f restore/vps-backup.tar.gz ]; then
+            echo "📦 Restoring VPS from backup..."
+            sudo tar -xzf restore/vps-backup.tar.gz -C /
           else
-            echo "⚠️ No previous VPS backup found. Fresh session."
+            echo "ℹ️ No previous backup found"
           fi
 
-      # ===============================
       # Restore Tailscale state
-      # ===============================
       - name: Download Tailscale state if exists
         uses: actions/download-artifact@v4
         with:
           name: tailscale-state
-          path: tailscale_restore
+          path: ts-restore
         continue-on-error: true
 
       - name: Restore Tailscale state
         run: |
-          sudo mkdir -p /var/lib/tailscale
-          if [ -f tailscale_restore/tailscaled.state ]; then
-            echo "♻️ Restoring Tailscale state..."
-            sudo cp tailscale_restore/tailscaled.state /var/lib/tailscale/tailscaled.state
-          else
-            echo "⚠️ No previous Tailscale state found."
+          if [ -d ts-restore ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp -r ts-restore/* /var/lib/tailscale/ || true
+            echo "🔄 Restored Tailscale state"
           fi
 
-      # ===============================
-      # Install and connect Tailscale
-      # ===============================
+      # Install Tailscale
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscaled --cleanup || true
-          sudo nohup tailscaled > /dev/null 2>&1 &
-          sleep 5
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔗 Connecting with restored Tailscale state..."
-            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname "gh-vps" || true
-          else
-            echo "🔗 New Tailscale login..."
-            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname "gh-vps"
-          fi
-          sudo tailscale ip -4
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --ssh
 
-      # ===============================
-      # Show system info
-      # ===============================
+      # System Info
       - name: System Info
         run: |
-          echo "🖥️ System Info:"
-          neofetch --stdout || true
-          echo "🌐 Network:"
-          ip addr show | grep inet || true
-          echo "💾 Disk:"
-          df -h / || true
+          uname -a
+          lsb_release -a || true
+          df -h
+          free -h
 
-      # ===============================
-      # Keep VPS alive (6h) with cancel-safe backup
-      # ===============================
+      # Keep VPS alive
       - name: Keep VPS alive
         run: |
           set -e
-          cleanup() {
-            echo "⚠️ Workflow stopped — running backup before exit..."
-            mkdir -p backup/{etc,home,var/www}
-            sudo cp -r /etc backup/etc || true
-            sudo cp -r /home backup/home || true
-            sudo cp -r /var/www backup/var/www || true
-            mkdir -p ts-backup
-            sudo cp /var/lib/tailscale/tailscaled.state ts-backup/tailscaled.state || true
-          }
-          trap cleanup EXIT
           echo "🔗 Starting tmate session..."
-          sudo tmate -F &
-          sleep 21600 &   # 6h
-          wait
+          sudo apt-get update && sudo apt-get install -y tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "ssh session: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "web session: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          echo "⚠️ Workflow stopped — running backup before exit..."
+        if: always()
 
-      # ===============================
-      # Save backups (always runs)
-      # ===============================
+      # Save VPS backup (on success or cancel)
+      - name: Create VPS backup archive
+        if: always()
+        run: |
+          echo "📦 Creating VPS backup..."
+          sudo mkdir -p backup
+          sudo tar -czf backup/vps-backup.tar.gz \
+            --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp \
+            /etc /home || true
+          ls -lh backup
+
       - name: Upload VPS backup
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup-latest
-          path: backup/
+          path: backup/vps-backup.tar.gz
           retention-days: 3
+          overwrite: true
+
+      # Save Tailscale state
+      - name: Save Tailscale state
+        if: always()
+        run: |
+          sudo mkdir -p ts-backup
+          sudo cp -r /var/lib/tailscale/* ts-backup/ || true
 
       - name: Upload Tailscale state
         if: always()
@@ -137,19 +116,15 @@ jobs:
         with:
           name: tailscale-state
           path: ts-backup/
-          retention-days: 3
 
-      # ===============================
-      # Summary
-      # ===============================
+      # Completion summary
       - name: Completion summary
         if: always()
         run: |
           echo ""
-          echo "🎉 ================================="
-          echo "✅ VPS SESSION COMPLETED (or Cancelled — Backup Saved)"
-          echo "🎉 ================================="
-          echo ""
+          echo "🎉 ================================"
+          echo "✅ VPS SESSION COMPLETED (or Cancelled – Backup Saved)"
+          echo "🎉 ================================"
           echo "📦 Artifacts saved:"
-          echo "   - vps-backup-latest"
-          echo "   - tailscale-state"
+          echo " - vps-backup-latest"
+          echo " - tailscale-state"
