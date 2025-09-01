@@ -1,6 +1,4 @@
-To fully fix the code, I've incorporated all the corrections and improvements identified in the previous analysis. The updated code addresses the syntax error in the tar command and makes the backup cleanup process more robust.
-Full Corrected Workflow Code
-Name: Rocket-Powered Persistent VPS
+name: Rocket-Powered Persistent VPS
 
 on:
   workflow_dispatch:
@@ -79,25 +77,24 @@ jobs:
           mkdir -p restore
           
           # Get all releases and find the latest valid backup
-          RELEASES=$(gh release list --limit 20 --json tagName,createdAt --repo "${{ github.repository }}" | jq -c '.[]')
+          RELEASES=$(gh release list --limit 20 --json tagName,createdAt --repo "${{ github.repository }}")
           
           LATEST_BACKUP=""
           LATEST_TIMESTAMP=""
           
-          while IFS= read -r release; do
+          echo "$RELEASES" | jq -c '.[]' | while read -r release; do
             tag=$(echo "$release" | jq -r '.tagName')
             if [[ "$tag" == vps-backup-* ]]; then
               LATEST_BACKUP="$tag"
               LATEST_TIMESTAMP=$(echo "$release" | jq -r '.createdAt')
+              echo "backup_tag=$LATEST_BACKUP" >> $GITHUB_OUTPUT
+              echo "backup_timestamp=$LATEST_TIMESTAMP" >> $GITHUB_OUTPUT
+              echo "📦 Found backup: $LATEST_BACKUP (from $LATEST_TIMESTAMP)"
               break
             fi
-          done <<< "$RELEASES"
+          done
           
-          if [ -n "$LATEST_BACKUP" ]; then
-            echo "backup_tag=$LATEST_BACKUP" >> $GITHUB_OUTPUT
-            echo "backup_timestamp=$LATEST_TIMESTAMP" >> $GITHUB_OUTPUT
-            echo "📦 Found backup: $LATEST_BACKUP (from $LATEST_TIMESTAMP)"
-          else
+          if [ -z "$LATEST_BACKUP" ]; then
             echo "⚠️ No backup found, starting fresh"
           fi
 
@@ -118,7 +115,7 @@ jobs:
             if [ -f "$file" ]; then
               if gzip -t "$file"; then
                 echo "✅ $(basename $file): Valid archive ($(du -h $file | cut -f1))"
-                echo "   Contents: $(tar -tzf "$file" | wc -l) files"
+                echo "   Contents: $(tar -tzf $file | wc -l) files"
               else
                 echo "❌ $(basename $file): Corrupted, removing"
                 rm -f "$file"
@@ -138,7 +135,7 @@ jobs:
           # Restore user data with progress
           if [ -f "restore/jacky-home-full.tar.gz" ]; then
             echo "🏠 Restoring user home directory..."
-            sudo tar -xzf restore/jacky-home-full.tar.gz -C / | pv -l -s $(tar -tzf restore/jacky-home-full.tar.gz | wc -l) > /dev/null
+            sudo tar -xzf restore/jacky-home-full.tar.gz -C / 
           fi
           
           # Restore system services
@@ -223,15 +220,15 @@ jobs:
           # Backup user data (with exclusion patterns)
           echo "📁 Backing up user data..."
           sudo tar -czf backup/jacky-home-full.tar.gz \
-            -C /home/ \
-            --exclude='${{ env.VPS_USER }}/.cache' \
-            --exclude='${{ env.VPS_USER }}/.npm' \
-            --exclude='${{ env.VPS_USER }}/.docker' \
-            --exclude='${{ env.VPS_USER }}/*.tmp' \
-            --exclude='${{ env.VPS_USER }}/*.log' \
-            --exclude='${{ env.VPS_USER }}/node_modules' \
+            -C /home ${{ env.VPS_USER }} \
+            --exclude='.cache' \
+            --exclude='.npm' \
+            --exclude='.docker' \
+            --exclude='*.tmp' \
+            --exclude='*.log' \
+            --exclude='node_modules' \
             --warning=no-file-changed \
-            ${{ env.VPS_USER }} 2>/dev/null || echo "⚠️ Some files changed during backup"
+            . 2>/dev/null || echo "⚠️ Some files changed during backup"
           
           # Backup system state
           echo "⚙️ Backing up system configuration..."
@@ -256,35 +253,35 @@ jobs:
           # Create backup manifest
           echo "📝 Creating backup manifest..."
           cat > backup/manifest.json << EOF
-          {
-            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "version": "2.0",
-            "components": {
-              "user_data": {
-                "file": "jacky-home-full.tar.gz",
-                "size": "$(du -h backup/jacky-home-full.tar.gz | cut -f1)",
-                "files": "$(tar -tzf backup/jacky-home-full.tar.gz 2>/dev/null | wc -l || echo 0)"
-              },
-              "system_config": {
-                "file": "system-config.tar.gz",
-                "size": "$(du -h backup/system-config.tar.gz | cut -f1)"
-              },
-              "services": {
-                "file": "services-backup.tar.gz",
-                "size": "$(du -h backup/services-backup.tar.gz | cut -f1)"
-              },
-              "packages": {
-                "file": "installed-packages.list",
-                "count": "$(wc -l < backup/installed-packages.list)"
-              }
-            },
-            "system": {
-              "hostname": "$(hostname)",
-              "tailscale_ip": "$(tailscale ip -4 2>/dev/null || echo 'disconnected')",
-              "disk_usage": "$(df -h / | awk 'NR==2{print $5}')"
-            }
-          }
-          EOF
+{
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "version": "2.0",
+  "components": {
+    "user_data": {
+      "file": "jacky-home-full.tar.gz",
+      "size": "$(du -h backup/jacky-home-full.tar.gz | cut -f1)",
+      "files": "$(tar -tzf backup/jacky-home-full.tar.gz 2>/dev/null | wc -l || echo 0)"
+    },
+    "system_config": {
+      "file": "system-config.tar.gz",
+      "size": "$(du -h backup/system-config.tar.gz | cut -f1)"
+    },
+    "services": {
+      "file": "services-backup.tar.gz",
+      "size": "$(du -h backup/services-backup.tar.gz | cut -f1)"
+    },
+    "packages": {
+      "file": "installed-packages.list",
+      "count": "$(wc -l < backup/installed-packages.list)"
+    }
+  },
+  "system": {
+    "hostname": "$(hostname)",
+    "tailscale_ip": "$(tailscale ip -4 2>/dev/null || echo 'disconnected')",
+    "disk_usage": "$(df -h / | awk 'NR==2{print $5}')"
+  }
+}
+EOF
           
           echo "✅ Backup created: $(du -sh backup)"
 
@@ -317,18 +314,20 @@ jobs:
         run: |
           echo "🧹 Cleaning up old backups (retention: ${{ env.BACKUP_RETENTION_DAYS }} days)"
           
-          # Get all backup releases and filter using jq for robustness
+          # Get all backup releases
           OLD_BACKUPS=$(gh release list --limit 50 --json tagName,createdAt --repo "${{ github.repository }}" | \
-            jq -r --argjson retention_days ${{ env.BACKUP_RETENTION_DAYS }} '
-              .[] | select(.tagName | startswith("vps-backup-")) |
-              (now - (.createdAt | fromdate)) / (60*60*24) as $age_days |
-              if $age_days > $retention_days then .tagName else empty end
-            ')
+            jq -r '.[] | select(.tagName | startswith("vps-backup-")) | [.tagName, .createdAt] | @tsv')
           
-          # Delete old backups
-          for backup in $OLD_BACKUPS; do
-            echo "🗑️ Deleting old backup: $backup"
-            gh release delete "$backup" --yes --repo "${{ github.repository }}" || true
+          # Delete backups older than retention period
+          CURRENT_TIME=$(date +%s)
+          RETENTION_SECONDS=$(({{ env.BACKUP_RETENTION_DAYS }} * 24 * 60 * 60))
+          
+          echo "$OLD_BACKUPS" | while read -r tag date; do
+            BACKUP_TIME=$(date -d "$date" +%s)
+            if [ $((CURRENT_TIME - BACKUP_TIME)) -gt $RETENTION_SECONDS ]; then
+              echo "🗑️ Deleting old backup: $tag"
+              gh release delete "$tag" --yes --repo "${{ github.repository }}" || true
+            fi
           done
 
       - name: Final status report
@@ -346,7 +345,5 @@ jobs:
           fi
           
           echo "📦 Backup: Created and uploaded to GitHub Releases"
-          echo "🕒 Duration: $(($GITHUB_RUN_ATTEMPT / 60)) minutes"
           echo "💾 Disk usage: $(df -h / | awk 'NR==2{print $5}')"
           echo "=========================================="
-
