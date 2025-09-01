@@ -1,9 +1,15 @@
-name: Persistent VPS with MEGA Backup
+name: Persistent VPS with Backup & Restore
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: "Choose operation (backup or restore)"
+        required: true
+        default: "backup"
+  workflow_call:
   schedule:
-    - cron: "0 */6 * * *"   # Every 6 hours
+    - cron: "0 */6 * * *" # Every 6 hours
 
 jobs:
   vps:
@@ -14,85 +20,82 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create jacky user
+        run: |
+          sudo useradd -m -s /bin/bash jacky || true
+          echo "jacky:root" | sudo chpasswd
+          echo "✅ User jacky created with password root"
+
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y unzip zip curl tmate neofetch tar
-          curl https://rclone.org/install.sh | sudo bash
+          sudo apt install -y unzip zip curl wget tmate rclone tailscale neofetch
 
-      # === Restore Section ===
-      - name: Restore backup from MEGA
+      - name: Setup Tailscale
+        run: |
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
+          sleep 5
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+          echo "🎉 Tailscale Connected"
+          echo "🌐 Tailscale IP: $(tailscale ip -4)"
+          echo "👤 User: jacky / Password: root"
+
+      - name: Configure rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
           [mega]
           type = mega
           user = rajeeshsksbx7@gmail.com
-          pass = Rajesh123580
+          pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
           EOF
+          echo "✅ Rclone configured with MEGA remote"
 
-          mkdir -p backup
-          rclone copy mega:vps-backups/latest-backup.tar.gz backup/ || true
+      # === BACKUP SECTION ===
+      - name: Backup VPS data
+        if: github.event.inputs.operation == 'backup'
+        run: |
+          mkdir -p /opt/vps-backup
+          # Home directory
+          sudo cp -r /home/jacky /opt/vps-backup/ || true
+          # Tailscale state
+          sudo mkdir -p /opt/vps-backup/tailscale
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/tailscale/ || true
+          # Aapanel data (optional)
+          if [ -d "/www/server/panel" ]; then
+            sudo cp -r /www/server/panel /opt/vps-backup/aapanel || true
+          fi
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+          echo "📦 Backup archive created"
 
-          if [ -f backup/latest-backup.tar.gz ]; then
-            echo "📦 Found backup on MEGA, restoring..."
-            sudo tar -xzf backup/latest-backup.tar.gz -C /
+      - name: Upload backup to MEGA
+        if: github.event.inputs.operation == 'backup'
+        run: |
+          rclone copy backup.zip mega:vps-backups/ --progress
+          echo "☁️ Backup uploaded to MEGA"
+
+      # === RESTORE SECTION ===
+      - name: Download latest backup
+        if: github.event.inputs.operation == 'restore'
+        run: |
+          mkdir -p restore
+          rclone copy mega:vps-backups/backup.zip restore/ --progress || echo "⚠️ No backup found"
+          if [ -f restore/backup.zip ]; then
+            unzip restore/backup.zip -d /
+            echo "✅ Backup restored successfully"
           else
-            echo "ℹ️ No backup found, starting fresh."
+            echo "❌ No backup available to restore"
           fi
 
-      # === VPS Setup ===
-      - name: Setup user jacky
+      # === Ensure backup runs even on cancel ===
+      - name: Final backup on cancel
+        if: ${{ cancelled() }}
         run: |
-          sudo useradd -m jacky || true
-          echo "jacky:root" | sudo chpasswd
-          echo "👤 User Info:"
-          echo "Username: jacky"
-          echo "Password: root"
-
-      - name: Start Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname gha-vps
-          echo "🌐 Tailscale IP: $(tailscale ip -4)"
-
-      - name: VPS Session (SSH over tmate)
-        uses: mxschmitt/action-tmate@v3
-        timeout-minutes: 240
-
-      # === Backup Section (always runs, even on cancel/fail) ===
-      - name: Create and upload backup
-        if: always()
-        run: |
-          BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-          BACKUP_DIR="/opt/vps-backup"
-          sudo mkdir -p "$BACKUP_DIR"
-
-          echo "🗂 Collecting backup data..."
-
-          # Backup jacky’s home
-          sudo cp -r /home/jacky "$BACKUP_DIR/"
-
-          # Backup Tailscale state
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            sudo mkdir -p "$BACKUP_DIR/tailscale"
-            sudo cp /var/lib/tailscale/tailscaled.state "$BACKUP_DIR/tailscale/"
-          fi
-
-          # Optional: Backup aaPanel if installed
-          if [ -d /www/server/panel ]; then
-            echo "📦 aaPanel found, backing up..."
-            sudo cp -r /www/server/panel "$BACKUP_DIR/aapanel"
-          else
-            echo "ℹ️ aaPanel not installed, skipping..."
-          fi
-
-          # Pack backup
-          sudo tar -czf "$BACKUP_FILE" -C /opt vps-backup
-
-          # Upload to MEGA
-          echo "📤 Uploading backup to MEGA..."
-          rclone copy "$BACKUP_FILE" mega:vps-backups/
-          rclone copy "$BACKUP_FILE" mega:vps-backups/latest-backup.tar.gz --copy-links
-
-          echo "✅ Backup completed: $BACKUP_FILE"
+          echo "⚠️ Workflow cancelled, saving final backup..."
+          mkdir -p /opt/vps-backup-final
+          sudo cp -r /home/jacky /opt/vps-backup-final/ || true
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup-final/ || true
+          zip -r final-backup.zip /opt/vps-backup-final
+          rclone copy final-backup.zip mega:vps-backups/ --progress || true
+          echo "📦 Final backup uploaded due to cancellation"
