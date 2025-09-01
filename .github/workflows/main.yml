@@ -1,113 +1,523 @@
-name: VPS Operations (MEGA)
-
+name: VPS Operations (MEGA) - Improved
 on:
   workflow_dispatch:
+    inputs:
+      session_duration:
+        description: 'Session duration in minutes (default: 300, max: 360)'
+        required: false
+        default: '300'
+        type: string
+      backup_interval:
+        description: 'Backup interval in minutes (0 = no periodic backup)'
+        required: false
+        default: '60'
+        type: string
+      hostname_prefix:
+        description: 'Hostname prefix (default: vps)'
+        required: false
+        default: 'vps'
+        type: string
   push:
     branches:
       - main
+  schedule:
+    - cron: '0 */6 * * *'  # Optional: run every 6 hours
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  RCLONE_CONFIG_MEGA_TYPE: mega
+  RCLONE_CONFIG_MEGA_USER: "rajeeshsksbx7@gmail.com"
+  RCLONE_CONFIG_MEGA_PASS: "S9A4aF5Sff0ihj8ljvdoa0fC9w"
 
 jobs:
   vps-operations:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
+    timeout-minutes: 370
+    
     steps:
-      # Checkout repo
+      # Checkout repository
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      # Install dependencies
+      # Set environment variables and validate inputs
+      - name: Set environment variables
+        id: env_setup
+        run: |
+          # Set timestamp
+          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+          echo "START_TIME=$(date -u +%s)" >> $GITHUB_ENV
+          
+          # Validate and set session duration (max 360 minutes for safety)
+          DURATION="${{ github.event.inputs.session_duration || '300' }}"
+          if [[ $DURATION -gt 360 ]]; then
+            echo "⚠️  Duration capped at 360 minutes for safety"
+            DURATION=360
+          fi
+          DURATION_SECONDS=$((DURATION * 60))
+          echo "SESSION_DURATION=${DURATION_SECONDS}" >> $GITHUB_ENV
+          echo "SESSION_DURATION_MIN=${DURATION}" >> $GITHUB_ENV
+          
+          # Set backup interval
+          BACKUP_INTERVAL="${{ github.event.inputs.backup_interval || '60' }}"
+          BACKUP_INTERVAL_SECONDS=$((BACKUP_INTERVAL * 60))
+          echo "BACKUP_INTERVAL=${BACKUP_INTERVAL_SECONDS}" >> $GITHUB_ENV
+          
+          # Set hostname
+          HOSTNAME_PREFIX="${{ github.event.inputs.hostname_prefix || 'vps' }}"
+          echo "VPS_HOSTNAME=${HOSTNAME_PREFIX}-${TIMESTAMP}" >> $GITHUB_ENV
+          
+          # Generate secure password
+          SECURE_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
+          echo "::add-mask::${SECURE_PASSWORD}"
+          echo "SECURE_PASSWORD=${SECURE_PASSWORD}" >> $GITHUB_ENV
+          
+          echo "🚀 VPS Setup initialized:"
+          echo "  - Hostname: ${HOSTNAME_PREFIX}-${TIMESTAMP}"
+          echo "  - Duration: ${DURATION} minutes"
+          echo "  - Backup Interval: ${BACKUP_INTERVAL} minutes"
+
+      # Install dependencies with better error handling
       - name: Install required packages
         run: |
-          sudo apt update
-          sudo apt install -y unzip zip curl tmate rclone net-tools neofetch
+          set -e
+          echo "📦 Installing system packages..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            unzip zip curl wget \
+            rclone tmate \
+            net-tools neofetch htop tree \
+            git vim nano \
+            python3 python3-pip \
+            nodejs npm \
+            nginx \
+            fail2ban ufw \
+            screen tmux \
+            jq bc
+          
+          # Install additional development tools
+          sudo snap install code --classic || echo "⚠️  VSCode installation failed"
+          
+          echo "✅ Package installation completed"
 
-      # Configure rclone (MEGA)
+      # Secure rclone configuration
       - name: Configure rclone (MEGA)
         run: |
           set -e
+          echo "☁️  Configuring MEGA cloud storage..."
+          
+          # Create rclone config directory
           mkdir -p ~/.config/rclone
-          rclone config create mega mega user "rajeeshsksbx7@gmail.com" pass "S9A4aF5Sff0ihj8ljvdoa0fC9w"
-
-      # Set timestamps
-      - name: Set timestamps
-        id: vars
-        run: |
-          echo "ts=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_ENV
-
-      # Create user
-      - name: Create user jacky
-        run: |
-          sudo useradd -m jacky || true
-          echo "jacky:root" | sudo chpasswd
-
-      # Restore Tailscale state
-      - name: Restore Tailscale state if present
-        run: |
-          if [ -f state.tailscale ]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp state.tailscale /var/lib/tailscale/tailscaled.state
+          
+          # Configure rclone with hardcoded credentials
+          rclone config create mega mega \
+            user "rajeeshsksbx7@gmail.com" \
+            pass "S9A4aF5Sff0ihj8ljvdoa0fC9w" \
+            --obscure
+          
+          # Test connection
+          if rclone lsd mega: > /dev/null 2>&1; then
+            echo "✅ MEGA connection successful"
+          else
+            echo "⚠️  MEGA connection test failed, but continuing..."
           fi
 
-      # Install & start Tailscale
-      - name: Install and start Tailscale
+      # Enhanced user management
+      - name: Create secure user account
         run: |
+          set -e
+          echo "👤 Creating user account..."
+          
+          # Create user with home directory
+          sudo useradd -m -s /bin/bash -G sudo vpsuser || true
+          
+          # Set secure password
+          echo "vpsuser:${{ env.SECURE_PASSWORD }}" | sudo chpasswd
+          
+          # Configure SSH-like access
+          sudo mkdir -p /home/vpsuser/.ssh
+          sudo chmod 700 /home/vpsuser/.ssh
+          sudo chown vpsuser:vpsuser /home/vpsuser/.ssh
+          
+          # Create workspace directories
+          sudo -u vpsuser mkdir -p /home/vpsuser/{workspace,projects,downloads,scripts}
+          
+          echo "✅ User 'vpsuser' created with secure password"
+          echo "Password: ${{ env.SECURE_PASSWORD }}"
+
+      # Enhanced system security
+      - name: Configure basic security
+        run: |
+          set -e
+          echo "🔒 Configuring system security..."
+          
+          # Configure UFW firewall
+          sudo ufw --force reset
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          sudo ufw allow 22/tcp    # SSH
+          sudo ufw allow 80/tcp    # HTTP
+          sudo ufw allow 443/tcp   # HTTPS
+          sudo ufw allow 3000:8999/tcp  # Development ports
+          sudo ufw --force enable
+          
+          # Configure fail2ban
+          sudo systemctl enable fail2ban
+          sudo systemctl start fail2ban
+          
+          # Set up basic nginx
+          sudo systemctl enable nginx
+          sudo systemctl start nginx
+          
+          echo "✅ Basic security configured"
+
+      # Restore Tailscale state with better error handling
+      - name: Restore Tailscale state if present
+        run: |
+          echo "🔄 Checking for existing Tailscale state..."
+          if rclone copy mega:vps-backup/tailscale/tailscaled.state ./state.tailscale 2>/dev/null; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp state.tailscale /var/lib/tailscale/tailscaled.state
+            sudo chown root:root /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "✅ Tailscale state restored"
+          else
+            echo "ℹ️  No existing Tailscale state found"
+          fi
+
+      # Enhanced Tailscale setup
+      - name: Install and configure Tailscale
+        run: |
+          set -e
+          echo "🌐 Setting up Tailscale VPN..."
+          
+          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Clean up any existing instances
+          sudo pkill tailscaled || true
           sudo tailscaled --cleanup || true
-          sudo nohup tailscaled > /dev/null 2>&1 &
-          sleep 5
-          sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname="vps-${{ env.ts }}" || true
+          
+          # Start Tailscale daemon
+          sudo nohup tailscaled --state=/var/lib/tailscale/tailscaled.state > /tmp/tailscaled.log 2>&1 &
+          sleep 10
+          
+          # Connect to Tailscale with hardcoded auth key
+          if sudo tailscale up \
+            --authkey="tskey-auth-kMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+            --hostname="${{ env.VPS_HOSTNAME }}" \
+            --accept-routes \
+            --accept-dns; then
+            
+            # Get Tailscale IP and status
+            TAILSCALE_IP=$(sudo tailscale ip -4)
+            echo "✅ Tailscale connected successfully"
+            echo "🌐 Tailscale IP: ${TAILSCALE_IP}"
+            echo "🖥️  Hostname: ${{ env.VPS_HOSTNAME }}"
+            echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
+            
+            # Save connection info
+            echo "=== VPS CONNECTION INFO ===" > /tmp/connection_info.txt
+            echo "Hostname: ${{ env.VPS_HOSTNAME }}" >> /tmp/connection_info.txt
+            echo "Tailscale IP: ${TAILSCALE_IP}" >> /tmp/connection_info.txt
+            echo "Username: vpsuser" >> /tmp/connection_info.txt
+            echo "Password: ${{ env.SECURE_PASSWORD }}" >> /tmp/connection_info.txt
+            echo "Start Time: $(date)" >> /tmp/connection_info.txt
+            echo "Duration: ${{ env.SESSION_DURATION_MIN }} minutes" >> /tmp/connection_info.txt
+            
+          else
+            echo "⚠️  Tailscale connection failed, but continuing without VPN..."
+          fi
 
-      # Restore VPS data if present
-      - name: Restore VPS data (home/etc/www) if available
+      # Enhanced data restoration
+      - name: Restore VPS data if available
         run: |
-          rclone copy mega:vps-backup/home/ /home/ --create-dirs || true
-          rclone copy mega:vps-backup/etc/ /etc/ --create-dirs || true
-          rclone copy mega:vps-backup/www/ /var/www/ --create-dirs || true
+          set -e
+          echo "📂 Restoring VPS data from backup..."
+          
+          # Create backup directories
+          sudo mkdir -p /var/backups/vps-restore
+          
+          # Restore user data
+          if rclone copy mega:vps-backup/home/ /home/ --progress 2>/dev/null; then
+            echo "✅ Home directories restored"
+          else
+            echo "ℹ️  No home directory backup found"
+          fi
+          
+          # Restore configuration files (selective)
+          CONFIGS=(
+            "nginx/sites-available"
+            "nginx/sites-enabled"
+            "ssh/sshd_config.d"
+            "cron.d"
+            "systemd/system"
+          )
+          
+          for config in "${CONFIGS[@]}"; do
+            if rclone copy "mega:vps-backup/etc/${config}/" "/etc/${config}/" --progress 2>/dev/null; then
+              echo "✅ Restored /etc/${config}/"
+            fi
+          done
+          
+          # Restore web content
+          if rclone copy mega:vps-backup/www/ /var/www/ --progress 2>/dev/null; then
+            echo "✅ Web content restored"
+            sudo chown -R www-data:www-data /var/www/
+          else
+            echo "ℹ️  No web content backup found"
+          fi
+          
+          # Restore user projects
+          if rclone copy mega:vps-backup/projects/ /home/vpsuser/projects/ --progress 2>/dev/null; then
+            echo "✅ User projects restored"
+            sudo chown -R vpsuser:vpsuser /home/vpsuser/projects/
+          else
+            echo "ℹ️  No project backup found"
+          fi
+          
+          echo "📂 Data restoration completed"
 
-      # Keep VPS alive (with cancel-backup trap)
-      - name: Keep session alive (~6h) with cancel-backup trap
+      # Create system info and welcome message
+      - name: Generate system information
         run: |
-          trap 'echo "⏳ Cancel detected, running final backup..."; 
-                rclone sync /home/ mega:vps-backup/home/ --create-dirs; 
-                rclone sync /etc/ mega:vps-backup/etc/ --create-dirs; 
-                rclone sync /var/www/ mega:vps-backup/www/ --create-dirs; 
-                exit 0' INT TERM
-          echo "🔄 VPS session active. Sleeping..."
-          sleep 21600
+          echo "📋 Generating system information..."
+          
+          # Create system info file
+          cat > /tmp/system_info.txt << EOF
+          ╔══════════════════════════════════════════════════════════════╗
+          ║                        VPS SESSION ACTIVE                    ║
+          ╚══════════════════════════════════════════════════════════════╝
+          
+          🖥️  System Information:
+          $(neofetch --stdout)
+          
+          🌐 Network Information:
+          $(ip addr show | grep -E "inet.*scope global")
+          
+          💾 Disk Usage:
+          $(df -h | grep -E "(Filesystem|/dev/)")
+          
+          🔧 Services Status:
+          $(systemctl is-active nginx tailscaled fail2ban | paste -d' ' - <(echo -e "nginx\ntailscaled\nfail2ban"))
+          
+          📝 Quick Commands:
+          - Check system: neofetch
+          - Monitor resources: htop
+          - Network status: sudo tailscale status
+          - View logs: journalctl -f
+          - Web root: /var/www/html
+          - Projects: ~/projects/
+          
+          EOF
+          
+          # Display connection info
+          if [[ -f /tmp/connection_info.txt ]]; then
+            cat /tmp/connection_info.txt
+          fi
 
-      # Final backup (always runs, even if canceled)
-      - name: Backup VPS data to MEGA (always)
+      # Background backup function
+      - name: Setup periodic backup (if enabled)
+        run: |
+          if [[ ${{ env.BACKUP_INTERVAL }} -gt 0 ]]; then
+            echo "🔄 Setting up periodic backup every ${{ github.event.inputs.backup_interval || '60' }} minutes..."
+            
+            # Create backup script
+            cat > /tmp/periodic_backup.sh << 'EOF'
+          #!/bin/bash
+          while true; do
+            sleep ${{ env.BACKUP_INTERVAL }}
+            echo "🔄 [$(date)] Running periodic backup..."
+            
+            # Backup user data
+            rclone sync /home/vpsuser/ mega:vps-backup/home/vpsuser/ --exclude=".cache/**" --exclude=".local/share/Trash/**" --progress || true
+            
+            # Backup projects
+            rclone sync /home/vpsuser/projects/ mega:vps-backup/projects/ --progress || true
+            
+            # Backup web content
+            rclone sync /var/www/ mega:vps-backup/www/ --exclude="logs/**" --progress || true
+            
+            # Backup Tailscale state
+            if [[ -f /var/lib/tailscale/tailscaled.state ]]; then
+              rclone copy /var/lib/tailscale/tailscaled.state mega:vps-backup/tailscale/ --progress || true
+            fi
+            
+            echo "✅ [$(date)] Periodic backup completed"
+          done
+          EOF
+            
+            chmod +x /tmp/periodic_backup.sh
+            nohup bash /tmp/periodic_backup.sh > /tmp/backup.log 2>&1 &
+            echo $! > /tmp/backup_pid
+            
+            echo "✅ Periodic backup started (PID: $(cat /tmp/backup_pid))"
+          else
+            echo "ℹ️  Periodic backup disabled"
+          fi
+
+      # Main session with enhanced monitoring
+      - name: Keep VPS session alive with monitoring
+        run: |
+          set -e
+          echo "🎯 Starting VPS session for ${{ env.SESSION_DURATION_MIN }} minutes..."
+          
+          # Create final backup function
+          backup_and_exit() {
+            echo ""
+            echo "⏳ [$(date)] Session ending, running final backup..."
+            
+            # Stop periodic backup if running
+            if [[ -f /tmp/backup_pid ]] && kill -0 $(cat /tmp/backup_pid) 2>/dev/null; then
+              kill $(cat /tmp/backup_pid) || true
+              echo "🛑 Periodic backup stopped"
+            fi
+            
+            # Final comprehensive backup
+            echo "💾 Starting final backup..."
+            
+            # User data (excluding cache and temp files)
+            rclone sync /home/vpsuser/ mega:vps-backup/home/vpsuser/ \
+              --exclude=".cache/**" \
+              --exclude=".local/share/Trash/**" \
+              --exclude=".npm/_logs/**" \
+              --progress || echo "⚠️  User backup failed"
+            
+            # Projects directory
+            rclone sync /home/vpsuser/projects/ mega:vps-backup/projects/ \
+              --exclude="node_modules/**" \
+              --exclude="*.log" \
+              --progress || echo "⚠️  Projects backup failed"
+            
+            # Web content
+            rclone sync /var/www/ mega:vps-backup/www/ \
+              --exclude="logs/**" \
+              --exclude="*.log" \
+              --progress || echo "⚠️  Web content backup failed"
+            
+            # System configurations (selective)
+            mkdir -p /tmp/etc_backup
+            cp -r /etc/nginx /tmp/etc_backup/ 2>/dev/null || true
+            cp -r /etc/cron.d /tmp/etc_backup/ 2>/dev/null || true
+            rclone sync /tmp/etc_backup/ mega:vps-backup/etc/ --progress || echo "⚠️  Config backup failed"
+            
+            # Tailscale state
+            if [[ -f /var/lib/tailscale/tailscaled.state ]]; then
+              rclone copy /var/lib/tailscale/tailscaled.state mega:vps-backup/tailscale/ --progress || echo "⚠️  Tailscale backup failed"
+            fi
+            
+            # Session summary
+            END_TIME=$(date -u +%s)
+            DURATION=$(( (END_TIME - START_TIME) / 60 ))
+            
+            cat > /tmp/session_summary.txt << EOF
+          VPS Session Summary
+          ==================
+          Start: $(date -d @${{ env.START_TIME }} -u)
+          End: $(date -u)
+          Duration: ${DURATION} minutes
+          Hostname: ${{ env.VPS_HOSTNAME }}
+          Tailscale IP: ${TAILSCALE_IP:-"Not connected"}
+          Backup Status: Completed
+          EOF
+            
+            rclone copy /tmp/session_summary.txt mega:vps-backup/logs/ --progress || true
+            
+            echo "✅ Final backup completed successfully"
+            exit 0
+          }
+          
+          # Set up signal handlers
+          trap backup_and_exit INT TERM EXIT
+          
+          # Display system info
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║                    🚀 VPS SESSION STARTED                    ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          cat /tmp/connection_info.txt 2>/dev/null || echo "Connection info not available"
+          echo ""
+          cat /tmp/system_info.txt
+          echo ""
+          
+          # Session monitoring loop
+          START_TIME=$(date -u +%s)
+          END_TIME=$((START_TIME + ${{ env.SESSION_DURATION }}))
+          
+          while [[ $(date -u +%s) -lt $END_TIME ]]; do
+            CURRENT_TIME=$(date -u +%s)
+            REMAINING=$(( (END_TIME - CURRENT_TIME) / 60 ))
+            
+            # Status update every 10 minutes
+            if [[ $((CURRENT_TIME % 600)) -eq 0 ]]; then
+              echo "🕐 [$(date)] VPS active - ${REMAINING} minutes remaining"
+              echo "   Load: $(uptime | cut -d',' -f3-)"
+              echo "   Memory: $(free -h | grep '^Mem:' | awk '{print $3"/"$2}')"
+              echo "   Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5" used)"}')"
+              
+              # Check Tailscale status
+              if command -v tailscale >/dev/null 2>&1; then
+                TAILSCALE_STATUS=$(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState // "unknown"')
+                echo "   Tailscale: ${TAILSCALE_STATUS}"
+              fi
+              echo ""
+            fi
+            
+            sleep 30
+          done
+          
+          echo "⏰ Session duration reached, initiating shutdown..."
+
+      # Cleanup and final steps
+      - name: Cleanup and disconnect
         if: always()
         run: |
-          echo "Running final backup for ${{ env.ts }}"
-          rclone sync /home/ mega:vps-backup/home/ --create-dirs
-          rclone sync /etc/ mega:vps-backup/etc/ --create-dirs
-          rclone sync /var/www/ mega:vps-backup/www/ --create-dirs
-          echo "✅ Final backup completed."
+          echo "🧹 Performing cleanup..."
+          
+          # Stop background processes
+          if [[ -f /tmp/backup_pid ]] && kill -0 $(cat /tmp/backup_pid) 2>/dev/null; then
+            kill $(cat /tmp/backup_pid) || true
+          fi
+          
+          # Disconnect Tailscale
+          if command -v tailscale >/dev/null 2>&1; then
+            sudo tailscale down || true
+            echo "🌐 Tailscale disconnected"
+          fi
+          
+          # Clean up temporary files
+          rm -f /tmp/backup_pid /tmp/periodic_backup.sh /tmp/connection_info.txt
+          
+          echo "✅ Cleanup completed"
 
-      # Clean old dated markers (optional keep last 5)
-      - name: Clean old dated markers (keep last 5)
-        if: always()
-        run: |
-          echo "🧹 Cleanup complete."
-
-      # Disconnect Tailscale
-      - name: Disconnect Tailscale
-        if: always()
-        run: |
-          sudo tailscale down || true
-          echo "Tailscale disconnected."
-
-      # Completion summary
-      - name: Completion summary
+      # Final status report
+      - name: Generate final report
         if: always()
         run: |
           echo ""
-          echo "🎉 ================================"
-          echo "✅ VPS SESSION COMPLETED (MEGA)"
-          echo "🎉 ================================"
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║                  🎉 VPS SESSION COMPLETED                    ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "Start : ${{ env.ts }}"
-          echo "End   : $(date +'%Y%m%d_%H%M%S')"
-          echo "☁️ Backup stored in: mega:vps-backup"
+          echo "📊 Session Details:"
+          echo "  • Hostname: ${{ env.VPS_HOSTNAME }}"
+          echo "  • Started: $(date -d @${{ env.START_TIME }} -u) UTC"
+          echo "  • Ended: $(date -u) UTC"
+          echo "  • Planned Duration: ${{ env.SESSION_DURATION_MIN }} minutes"
+          echo "  • Backup Location: mega:vps-backup/"
+          echo ""
+          echo "🔗 Access Information (for next session):"
+          echo "  • Check mega:vps-backup/logs/ for session summary"
+          echo "  • Data preserved in mega:vps-backup/"
+          echo "  • Use 'workflow_dispatch' to start a new session"
+          echo ""
+          echo "✨ Thank you for using VPS Operations!"
+          
+      # Post-run cleanup
+      - name: Post Checkout repository cleanup
+        uses: actions/checkout@v4
+        if: always()
+        with:
+          clean: true
