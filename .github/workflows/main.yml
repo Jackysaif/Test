@@ -15,9 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -------------------
       # Create restricted user "jacky"
-      # -------------------
       - name: Create restricted user
         run: |
           if ! id -u jacky >/dev/null 2>&1; then
@@ -26,26 +24,11 @@ jobs:
           fi
           echo "✅ User jacky created with password 'root'"
 
-      # -------------------
-      # Setup Tailscale (FIXED)
-      # -------------------
-      - name: Setup Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --ssh
-          echo "🎉 Connected to Tailscale!"
-          echo "Tailscale IP Address:"
-          tailscale ip -4
-          echo "Username: jacky"
-          echo "Password: root"
-
-      # -------------------
-      # Configure rclone (MEGA, hardcoded)
-      # -------------------
+      # Configure rclone (MEGA)
       - name: Configure rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
+          cat > ~/.config/rclone/rclone.conf <<'EOF'
 [mega]
 type = mega
 user = rajeeshsksbx7@gmail.com
@@ -53,13 +36,11 @@ pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
 EOF
           echo "✅ rclone configured with MEGA"
 
-      # -------------------
-      # Restore VPS data (NEW)
-      # -------------------
+      # Restore VPS data (before Tailscale up)
       - name: Restore VPS data
         run: |
           mkdir -p restore
-          echo "📥 Downloading latest backup from MEGA..."
+          echo "📥 Downloading latest backup set from MEGA..."
           rclone copy mega:/vps-backup restore --progress || echo "⚠️ No backup found in MEGA"
 
           if [ -f restore/jacky-home.tar.gz ]; then
@@ -75,9 +56,18 @@ EOF
 
           echo "✅ Restore process finished"
 
-      # -------------------
-      # Backup VPS data
-      # -------------------
+      # Setup Tailscale (after restore)
+      - name: Setup Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --ssh --hostname github-vps
+          echo "🎉 Connected to Tailscale!"
+          echo "🌐 Tailscale IP:"
+          tailscale ip -4
+          echo "👤 Username: jacky"
+          echo "🔑 Password: root"
+
+      # Backup VPS data (only jacky + optional aaPanel)
       - name: Backup VPS data
         run: |
           mkdir -p backup
@@ -87,24 +77,23 @@ EOF
           if [ -d "/www/server" ]; then
             echo "📦 Backing up aaPanel data..."
             sudo tar -czf backup/aapanel.tar.gz /www/server
+          else
+            echo "ℹ️ aaPanel not installed, skipping..."
           fi
 
           echo "✅ Backup complete:"
           ls -lh backup
 
-      # -------------------
       # Upload backup to MEGA
-      # -------------------
       - name: Upload backup to MEGA
         run: |
+          rclone mkdir mega:/vps-backup || true
           rclone copy backup mega:/vps-backup --progress
           echo "✅ Backup uploaded to MEGA"
 
-      # -------------------
-      # Final backup on cancel
-      # -------------------
+      # Final backup if the workflow is cancelled
       - name: Final backup on cancel
-        if: cancelled()
+        if: ${{ cancelled() }}
         run: |
           echo "⚠️ Workflow cancelled — performing final backup"
           mkdir -p backup
