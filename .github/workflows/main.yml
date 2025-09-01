@@ -1,13 +1,8 @@
-name: Persistent VPS with Robust Backup & Restore
+name: Persistent VPS with GitHub Artifact Backup
 
 on:
   workflow_dispatch:
   workflow_call:
-
-env:
-  BACKUP_DIR: /tmp/vps-backup
-  RESTORE_DIR: /tmp/vps-restore
-  MEGA_BACKUP_DIR: vps-backup
 
 jobs:
   vps:
@@ -15,266 +10,217 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. Checkout and setup
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Install required tools
+      # 1. Install dependencies
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y unzip curl tmate pv pigz rsync
-          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -a rclone-current-linux-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo cp rclone /usr/bin/
-          sudo chown root:root /usr/bin/rclone
-          sudo chmod 755 /usr/bin/rclone
-          rclone version
+          sudo apt install -y curl tmate
 
-      # 3. Configure MEGA
-      - name: Setup rclone with MEGA
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
-          echo "🔑 MEGA configured successfully!"
-          rclone ls mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
-
-      # 4. Create user with sudo
-      - name: Create user with sudo access
+      # 2. Create jacky:root WITH SUDO PRIVILEGES
+      - name: Create restricted user with sudo access
         run: |
           if ! id -u jacky >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash jacky
             echo "jacky:root" | sudo chpasswd
+            # Add jacky to sudo group
             sudo usermod -aG sudo jacky
-            echo "✅ User jacky created with password root and sudo privileges"
+            echo "User jacky created with password root and sudo privileges"
           else
-            echo "ℹ️ User jacky already exists, ensuring sudo privileges..."
+            echo "User jacky already exists, ensuring sudo privileges..."
             sudo usermod -aG sudo jacky
           fi
 
-      # 5. Set hostname
+      # 3. Set hostname
       - name: Set hostname
         run: |
           sudo hostnamectl set-hostname github-vps
-          echo "✅ Hostname set to $(hostname)"
+          echo "Hostname set to $(hostname)"
 
-      # 6. RESTORE PHASE - Comprehensive restoration (excluding snapd)
-      - name: Restore system from backup
+      # 4. Download and restore backup from previous workflow artifact
+      - name: Download previous backup artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: restore/
+        continue-on-error: true
+
+      # 5. Restore backup if exists
+      - name: Restore backup if exists
         run: |
-          set -e
-          mkdir -p $RESTORE_DIR
-          
-          # Download backup files with retries
-          echo "📥 Downloading backup files from MEGA..."
-          for retry in {1..3}; do
-            if rclone copy mega:$MEGA_BACKUP_DIR/ $RESTORE_DIR/ --progress --include "*.tar.gz" --include "*.list"; then
-              echo "✅ Backup files downloaded successfully"
-              break
-            else
-              echo "⚠️ Download attempt $retry failed, retrying..."
-              sleep 5
+          if [ -f "restore/latest.tar.gz" ]; then
+            echo "📦 Restoring backup..."
+            sudo tar -xzf restore/latest.tar.gz -C /
+            echo "✅ User data and system configuration restored successfully"
+            
+            # Reinstall previously installed packages
+            if [ -f "restore/installed-packages.list" ]; then
+              echo "📦 Reinstalling previous packages..."
+              sudo apt-get update
+              sudo dpkg --set-selections < restore/installed-packages.list
+              sudo apt-get upgrade -y
+              sudo apt-get dselect-upgrade -y
             fi
-            if [ $retry -eq 3 ]; then
-              echo "❌ Failed to download backup after 3 attempts, starting fresh"
-              exit 0
+            
+            # Restore services if they were installed
+            if [ -f "restore/services-backup.tar.gz" ]; then
+              echo "🔄 Restoring system services (Apache, MySQL, etc)..."
+              sudo tar -xzf restore/services-backup.tar.gz -C /
             fi
-          done
-
-          # Restore packages first (excluding snapd)
-          if [ -f "$RESTORE_DIR/installed-packages.list" ]; then
-            echo "📦 Restoring installed packages (excluding snapd)..."
-            # Filter out snapd packages before restoring
-            grep -v "snapd" "$RESTORE_DIR/installed-packages.list" > "$RESTORE_DIR/filtered-packages.list"
-            sudo apt-get update
-            sudo dpkg --set-selections < "$RESTORE_DIR/filtered-packages.list"
-            sudo apt-get upgrade -y
-            sudo apt-get dselect-upgrade -y
+            
+            # Restore jacky user data (all files including hidden)
+            if [ -f "restore/jacky-home-full.tar.gz" ]; then
+              echo "🔄 Restoring jacky user data (all files)..."
+              sudo tar -xzf restore/jacky-home-full.tar.gz -C /
+            fi
+            
+          else
+            echo "⚠️ No previous backup found, starting fresh"
           fi
 
-          # Restore system services and configurations (excluding snapd)
-          for backup_file in "$RESTORE_DIR"/*.tar.gz; do
-            case $(basename "$backup_file") in
-              *system*|*services*|*aapanel*)
-                echo "🔄 Restoring system files from $(basename "$backup_file") (excluding snapd)..."
-                sudo tar -xzf "$backup_file" -C / --keep-newer-files --exclude="snap" --exclude="var/lib/snapd" --exclude="var/snap"
-                ;;
-              *tailscale*)
-                echo "🔄 Restoring Tailscale state..."
-                sudo systemctl stop tailscaled 2>/dev/null || true
-                sudo tar -xzf "$backup_file" -C / --keep-newer-files
-                sudo systemctl start tailscaled 2>/dev/null || true
-                ;;
-              *jacky*|*home*)
-                echo "🔄 Restoring user data..."
-                sudo tar -xzf "$backup_file" -C / --skip-old-files --exclude="snap" --exclude=".snap"
-                ;;
-            esac
-          done
-
-          # Fix permissions
-          echo "🔧 Fixing file permissions..."
-          sudo chown -R jacky:jacky /home/jacky 2>/dev/null || true
-          sudo chmod 700 /home/jacky/.ssh 2>/dev/null || true
-          sudo chmod 600 /home/jacky/.ssh/* 2>/dev/null || true
-
-          # Clean up old backups from MEGA after successful restoration
-          echo "🗑️ Cleaning up old backups from MEGA..."
-          rclone delete mega:$MEGA_BACKUP_DIR/ --include "*.tar.gz" --include "*.list" || \
-          echo "⚠️ Could not delete old backups (maybe they don't exist)"
-
-          echo "✅ Restoration and cleanup completed successfully"
-
-      # 7. Setup Tailscale
+      # 6. Setup Tailscale
       - name: Setup Tailscale
         run: |
+          # Install using official script
           curl -fsSL https://tailscale.com/install.sh | sh
           
+          # Check if we have a restored state
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔄 Using restored Tailscale state"
+            echo "🔄 Using existing Tailscale state with existing IP"
             sudo systemctl start tailscaled
-            sleep 5
+            # Wait a moment for tailscale to initialize
+            sleep 3
+            echo "🎉 Connected to Tailscale with existing state!"
           else
-            echo "🆕 Creating new Tailscale connection"
+            echo "🆕 Setting up new Tailscale connection (new IP)"
             sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+            echo "🎉 Connected to Tailscale with new IP!"
           fi
           
-          echo "🎉 Tailscale Status:"
-          tailscale status || echo "⏳ Tailscale still initializing..."
-          echo "IP: $(tailscale ip -4 || echo 'Getting IP...')"
+          echo "IP Address: $(tailscale ip -4 || echo 'Not available yet')"
+          echo "👤 Username: jacky"
+          echo "🔑 Password: root"
+          echo "✅ Sudo access: Enabled (use 'sudo su' to become root)"
+          echo "Tailscale status:"
+          tailscale status || echo "Status check failed - may need more time to initialize"
 
-      # 8. Start tmate session
+      # 7. Start tmate session
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
-          echo "👤 Username: jacky | Password: root"
-          echo "💻 Use 'sudo su' to become root"
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🌐 Connect with: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          echo "⏰ Session will remain active for 6 hours"
-          # Keep session alive
-          sleep 21600
+          echo "✅ User jacky has sudo privileges (password: root)"
+          echo "Use 'sudo su' to become root user"
+          echo "Connect with: ssh $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Session will remain active for up to 6 hours"
+          # Start tmate in foreground mode to keep the workflow running
+          tmate -F -S /tmp/tmate.sock
 
-      # 9. BACKUP PHASE - Optimized for large files (excluding snapd)
-      - name: Backup complete system
-        if: always()
+      # 8. Backup ALL user data when session ends
+      - name: Backup VPS data on session end
+        if: always() && !cancelled()
         run: |
-          set -e
-          mkdir -p $BACKUP_DIR
-          cd $BACKUP_DIR
+          mkdir -p backup
           
-          echo "📦 Starting optimized system backup (excluding snapd)..."
-          
-          # 1. Backup installed packages (excluding snapd)
-          echo "📦 Backing up installed packages (excluding snapd)..."
-          dpkg --get-selections | grep -v "snapd" > installed-packages.list
-
-          # 2. Backup user data with efficient compression and exclusions (including snap exclusion)
-          echo "📦 Backing up user data (optimized compression, excluding snap)..."
-          sudo tar -cf - \
+          echo "📦 Backing up ALL jacky user data (including hidden files)..."
+          # Use --warning=no-file-changed to ignore files that change during backup
+          sudo tar -czf backup/jacky-home-full.tar.gz \
             -C /home jacky \
-            --exclude='./backup' \
             --exclude='*.tar.gz' \
             --exclude='.cache' \
-            --exclude='tmp' \
-            --exclude='temp' \
-            --exclude='node_modules' \
-            --exclude='.npm' \
-            --exclude='Downloads' \
-            --exclude='Videos' \
-            --exclude='Music' \
-            --exclude='Pictures' \
-            --exclude='snap' \
-            --exclude='.snap' \
-            . | pigz -6 > jacky-home.tar.gz
-
-          # 3. Backup system services and configurations (excluding snapd)
-          echo "📦 Backing up system services (excluding snapd)..."
-          services=(
-            "/etc/apache2" "/etc/nginx" "/etc/mysql" "/etc/php"
-            "/var/www" "/var/lib/mysql"
-            "/usr/local/aapanel" "/opt/aapanel" "/root/.aapanel"
-            "/etc/ssh" "/etc/ssl" "/etc/cron.d" "/etc/systemd"
-            "/root/.ssh" "/home/jacky/.ssh"
-          )
+            --warning=no-file-changed \
+            . 2>/dev/null || echo "Home directory backup completed (some files may have changed)"
           
-          for service in "${services[@]}"; do
-            if [ -d "$service" ] || [ -f "$service" ]; then
-              echo "💾 Backing up $service"
-              sudo tar -czf "system-$(basename "$service").tar.gz" -C / "$service" \
-                --exclude="snap" --exclude="var/lib/snapd" --exclude="var/snap" 2>/dev/null || true
-            fi
-          done
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          
+          echo "📦 Backing up system services (Apache, MySQL, PHP, aapanel)..."
+          # Backup common web service directories with ignore-failed-read
+          sudo tar -czf backup/services-backup.tar.gz \
+            --ignore-failed-read \
+            /etc/apache2 /etc/nginx /etc/mysql /etc/php \
+            /var/www /var/lib/mysql \
+            /usr/local/aapanel /opt/aapanel \
+            /root/.aapanel 2>/dev/null || echo "Services backup completed"
+          
+          echo "📦 Backing up system configurations..."
+          sudo tar -czf backup/system-config.tar.gz \
+            --ignore-failed-read \
+            /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
+            /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
+          
+          echo "📦 Creating full backup archive..."
+          tar -czf backup/latest.tar.gz -C backup .
+          echo "Backup contents:"
+          ls -lh backup/
 
-          # 4. Backup Tailscale state
-          echo "📦 Backing up Tailscale state..."
-          sudo systemctl stop tailscaled 2>/dev/null || true
-          sudo tar -czf tailscale-state.tar.gz -C /var/lib tailscale/ 2>/dev/null || true
-          sudo systemctl start tailscaled 2>/dev/null || true
+      # 9. Upload backup as GitHub artifact when session ends
+      - name: Upload backup as GitHub artifact
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup/
+          retention-days: 90
+          if-no-files-found: warn
 
-          # Create backup manifest
-          echo "📋 Creating backup manifest..."
-          ls -la *.tar.gz *.list > backup-manifest.txt
-          du -sh * >> backup-manifest.txt
+      # 10. Backup on workflow cancellation
+      - name: Backup on workflow cancellation
+        if: cancelled()
+        run: |
+          mkdir -p backup
+          echo "⚠️ Workflow cancelled, backing up data..."
+          
+          echo "📦 Backing up ALL jacky user data (including hidden files)..."
+          sudo tar -czf backup/jacky-home-full.tar.gz \
+            -C /home jacky \
+            --exclude='*.tar.gz' \
+            --exclude='.cache' \
+            --warning=no-file-changed \
+            . 2>/dev/null || echo "Home directory backup completed (some files may have changed)"
+          
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          
+          echo "📦 Backing up system services (Apache, MySQL, PHP, aapanel)..."
+          sudo tar -czf backup/services-backup.tar.gz \
+            --ignore-failed-read \
+            /etc/apache2 /etc/nginx /etc/mysql /etc/php \
+            /var/www /var/lib/mysql \
+            /usr/local/aapanel /opt/aapanel \
+            /root/.aapanel 2>/dev/null || echo "Services backup completed"
+          
+          echo "📦 Backing up system configurations..."
+          sudo tar -czf backup/system-config.tar.gz \
+            --ignore-failed-read \
+            /etc/ssh /etc/ssl /etc/cron.d /etc/systemd \
+            /root/.ssh /home/jacky/.ssh 2>/dev/null || echo "Config backup completed"
+          
+          echo "📦 Creating backup archive..."
+          tar -czf backup/latest.tar.gz -C backup .
+          
+          echo "📦 Uploading backup as artifact..."
+          # Upload using GitHub's artifact system
+          ls -lh backup/
 
-          echo "✅ Backup completed: $(du -sh $BACKUP_DIR)"
+      # 11. Upload final backup on cancellation
+      - name: Upload final backup on cancellation
+        if: cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup-cancelled
+          path: backup/
+          retention-days: 90
+          if-no-files-found: warn
 
-      # 10. Upload backup with chunking and timeout handling
-      - name: Upload backup to MEGA
+      # 12. Display connection info after session
+      - name: Display session results
         if: always()
         run: |
-          set -e
-          echo "☁️ Uploading backup to MEGA..."
-          
-          # Create backup directory
-          rclone mkdir mega:$MEGA_BACKUP_DIR || true
-          
-          # Upload strategy: Small files first, large files with chunking
-          echo "⬆️ Uploading small files first..."
-          for file in $BACKUP_DIR/*.list $BACKUP_DIR/*manifest* $BACKUP_DIR/*system-* $BACKUP_DIR/*tailscale*; do
-            if [ -f "$file" ] && [ $(stat -c%s "$file") -lt 100000000 ]; then  # Files < 100MB
-              echo "Uploading $(basename "$file")..."
-              rclone copy "$file" mega:$MEGA_BACKUP_DIR/ --progress --timeout 300s
-            fi
-          done
-
-          # Upload large home directory with optimized settings
-          echo "⬆️ Uploading large home directory (this may take time)..."
-          if [ -f "$BACKUP_DIR/jacky-home.tar.gz" ]; then
-            # Use chunked upload with timeout and retries
-            timeout 600 rclone copy "$BACKUP_DIR/jacky-home.tar.gz" mega:$MEGA_BACKUP_DIR/ \
-              --progress \
-              --transfers 2 \
-              --checkers 4 \
-              --timeout 300s \
-              --retries 3 \
-              --low-level-retries 10 \
-              --contimeout 60s \
-              --bwlimit 10M || \
-            echo "⚠️ Home directory upload timed out or failed, but continuing..."
+          if cancelled(); then
+            echo "🏁 Session was cancelled - backup should be available in artifacts"
+          else
+            echo "🏁 Session ended normally - backup available in artifacts"
           fi
-
-          # Upload any remaining files
-          echo "⬆️ Uploading remaining files..."
-          for file in $BACKUP_DIR/*.tar.gz; do
-            if [ -f "$file" ] && [ ! -f "$BACKUP_DIR/jacky-home.tar.gz" ] || [ "$file" != "$BACKUP_DIR/jacky-home.tar.gz" ]; then
-              echo "Uploading $(basename "$file")..."
-              rclone copy "$file" mega:$MEGA_BACKUP_DIR/ --progress --timeout 180s
-            fi
-          done
-
-          echo "🎉 Backup upload process completed"
-
-      # 11. Final cleanup
-      - name: Cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up temporary files..."
-          sudo rm -rf $BACKUP_DIR $RESTORE_DIR 2>/dev/null || true
-          echo "✅ Cleanup completed"
+          echo "📦 Next session will restore from this backup"
