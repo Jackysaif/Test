@@ -3,24 +3,34 @@ name: Persistent VPS (Artifacts)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"   # every 6h
 
 jobs:
   vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 370   # slightly over 6h
+    timeout-minutes: 370   # ~6h + buffer
+
     steps:
-      # --- Setup environment ---
+      # ===============================
+      # Install prerequisites
+      # ===============================
       - name: Install required packages
         run: |
           sudo apt update
           sudo apt install -y sudo curl unzip zip tmate net-tools neofetch
 
-      - name: Set timestamps
+      # ===============================
+      # Setup user (jacky/root)
+      # ===============================
+      - name: Create user jacky
         run: |
-          echo "START_TIME=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+          sudo useradd -m -s /bin/bash jacky || true
+          echo 'jacky:root' | sudo chpasswd
+          echo "✅ User jacky created with password root"
 
-      # --- Restore from previous artifacts ---
+      # ===============================
+      # Restore VPS from artifact
+      # ===============================
       - name: Download VPS backup if exists
         uses: actions/download-artifact@v4
         with:
@@ -28,7 +38,7 @@ jobs:
           path: restore
         continue-on-error: true
 
-      - name: Restore VPS data
+      - name: Restore VPS files
         run: |
           if [ -d restore ]; then
             echo "♻️ Restoring VPS backup..."
@@ -36,9 +46,12 @@ jobs:
             sudo cp -r restore/home/* /home/ || true
             sudo cp -r restore/var/www/* /var/www/ || true
           else
-            echo "⚠️ No previous backup found. Fresh session."
+            echo "⚠️ No previous VPS backup found. Fresh session."
           fi
 
+      # ===============================
+      # Restore Tailscale state
+      # ===============================
       - name: Download Tailscale state if exists
         uses: actions/download-artifact@v4
         with:
@@ -56,14 +69,9 @@ jobs:
             echo "⚠️ No previous Tailscale state found."
           fi
 
-      # --- Setup system user ---
-      - name: Create user jacky
-        run: |
-          sudo useradd -m -s /bin/bash jacky || true
-          echo 'jacky:root' | sudo chpasswd
-          echo "✅ User jacky created with password root"
-
-      # --- Setup Tailscale ---
+      # ===============================
+      # Install and connect Tailscale
+      # ===============================
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
@@ -79,7 +87,9 @@ jobs:
           fi
           sudo tailscale ip -4
 
-      # --- Session info ---
+      # ===============================
+      # Show system info
+      # ===============================
       - name: System Info
         run: |
           echo "🖥️ System Info:"
@@ -89,49 +99,57 @@ jobs:
           echo "💾 Disk:"
           df -h / || true
 
-      # --- Keep alive session (6h) ---
+      # ===============================
+      # Keep VPS alive (6h) with cancel-safe backup
+      # ===============================
       - name: Keep VPS alive
         run: |
+          set -e
+          cleanup() {
+            echo "⚠️ Workflow stopped — running backup before exit..."
+            mkdir -p backup/{etc,home,var/www}
+            sudo cp -r /etc backup/etc || true
+            sudo cp -r /home backup/home || true
+            sudo cp -r /var/www backup/var/www || true
+            mkdir -p ts-backup
+            sudo cp /var/lib/tailscale/tailscaled.state ts-backup/tailscaled.state || true
+          }
+          trap cleanup EXIT
           echo "🔗 Starting tmate session..."
-          tmate -F &
-          sleep 21600 &  # 6h
+          sudo tmate -F &
+          sleep 21600 &   # 6h
           wait
 
-      # --- Backup before exit ---
-      - name: Prepare VPS backup
-        run: |
-          mkdir -p backup/{etc,home,var/www}
-          sudo cp -r /etc backup/etc || true
-          sudo cp -r /home backup/home || true
-          sudo cp -r /var/www backup/var/www || true
-
-      - name: Upload VPS backup (Artifacts)
+      # ===============================
+      # Save backups (always runs)
+      # ===============================
+      - name: Upload VPS backup
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup-latest
           path: backup/
           retention-days: 3
 
-      - name: Backup Tailscale state
-        run: |
-          mkdir -p ts-backup
-          sudo cp /var/lib/tailscale/tailscaled.state ts-backup/tailscaled.state || true
-
-      - name: Upload Tailscale state (Artifacts)
+      - name: Upload Tailscale state
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-state
           path: ts-backup/
           retention-days: 3
 
-      # --- Final log ---
+      # ===============================
+      # Summary
+      # ===============================
       - name: Completion summary
+        if: always()
         run: |
           echo ""
           echo "🎉 ================================="
-          echo "✅ VPS SESSION COMPLETED"
+          echo "✅ VPS SESSION COMPLETED (or Cancelled — Backup Saved)"
           echo "🎉 ================================="
           echo ""
-          echo "📦 Backups stored as GitHub Artifacts:"
+          echo "📦 Artifacts saved:"
           echo "   - vps-backup-latest"
           echo "   - tailscale-state"
