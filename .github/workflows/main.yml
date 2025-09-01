@@ -31,6 +31,18 @@ jobs:
             echo "ℹ️ User jacky already exists"
           fi
 
+      # Configure rclone with MEGA remote using secrets
+      - name: Configure rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
+          echo "✅ Rclone MEGA remote configured"
+
       - name: Install & setup Tailscale
         run: |
           set -x
