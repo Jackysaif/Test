@@ -78,7 +78,12 @@ jobs:
         run: |
           echo "📦 Creating VPS backup..."
           mkdir -p backup
-          sudo tar --exclude=./backup/vps-backup.tar.gz -czf backup/vps-backup.tar.gz /etc /home /var || true
+          # Exclude backup itself, ignore file-changed errors
+          sudo tar --warning=no-file-changed \
+                   --ignore-failed-read \
+                   --exclude=./backup/vps-backup.tar.gz \
+                   -czf backup/vps-backup.tar.gz /etc /home /var || true
+
 
       - name: Backup Tailscale state
         if: always()
