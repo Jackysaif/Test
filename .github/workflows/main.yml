@@ -189,12 +189,11 @@ jobs:
             /home/${{ env.VPS_USER }}/public_html \
             2>/dev/null || echo "⚠️ Website data not found"
 
-          # 5. Backup databases (MySQL/MariaDB)
+          # 5. Backup databases (MySQL/MariaDB) - FIXED LINE
           echo "🗄️ Backing up databases..."
           if command -v mysql >/dev/null 2>&1; then
-            # Backup all databases
-            sudo mysqldump --all-databases --single-transaction --quick \
-              --lock-tables=false > backup/all-databases.sql 2>/dev/null || \
+            # Backup all databases (simplified command)
+            sudo mysqldump --all-databases --single-transaction > backup/all-databases.sql 2>/dev/null || \
               echo "⚠️ Could not backup databases"
             # Compress database backup
             gzip -f backup/all-databases.sql || true
