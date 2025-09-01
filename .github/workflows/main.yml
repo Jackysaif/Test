@@ -28,12 +28,10 @@ jobs:
       - name: Configure rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
-          cat <<EOF > ~/.config/rclone/rclone.conf
-[mega]
-type = mega
-user = rajeeshsksbx7@gmail.com
-pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
-EOF
+          echo "[mega]" > ~/.config/rclone/rclone.conf
+          echo "type = mega" >> ~/.config/rclone/rclone.conf
+          echo "user = rajeeshsksbx7@gmail.com" >> ~/.config/rclone/rclone.conf
+          echo "pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA" >> ~/.config/rclone/rclone.conf
           echo "✅ rclone configured with MEGA"
 
       # Restore VPS data (before Tailscale up)
