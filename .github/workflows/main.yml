@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v4
 
       # 1. Install rclone first
-      - name: Install rclone
+      - name: Install rclone and dependencies
         run: |
           sudo apt update
           sudo apt install -y unzip curl tmate
@@ -56,19 +56,25 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "Hostname set to $(hostname)"
 
-      # 5. Restore backup + Tailscale state
+      # 5. Restore backup from previous session
       - name: Restore backup if exists
         run: |
           mkdir -p restore
           if rclone copy mega:/vps-backup/latest.tar.gz restore/ --progress; then
             echo "📦 Restoring backup..."
             sudo tar -xzf restore/latest.tar.gz -C /
+            echo "✅ User data and packages restored successfully"
+            
+            # Reinstall previously installed packages
+            if [ -f /restore/installed-packages.list ]; then
+              echo "📦 Reinstalling previous packages..."
+              sudo apt-get update
+              sudo dpkg --set-selections < /restore/installed-packages.list
+              sudo apt-get upgrade -y
+              sudo apt-get dselect-upgrade -y
+            fi
           else
-            echo "⚠️ No previous backup found"
-          fi
-          if rclone copy mega:/vps-backup/tailscale.tgz restore/; then
-            sudo tar -xzf restore/tailscale.tgz -C /
-            echo "🔄 Restored Tailscale state"
+            echo "⚠️ No previous backup found, starting fresh"
           fi
 
       # 6. Setup Tailscale
@@ -81,42 +87,48 @@ jobs:
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
 
-      # 7. Backup data + packages + tailscale state
-      - name: Backup VPS data
-        if: always()
-        run: |
-          mkdir -p backup
-          echo "📦 Backing up /home/jacky ..."
-          sudo tar --exclude='*.tar.gz' -czf backup/jacky-home.tar.gz /home/jacky
-          echo "📦 Backing up installed packages..."
-          dpkg --get-selections > backup/installed-packages.list
-          echo "📦 Backing up Tailscale state..."
-          sudo tar -czf backup/tailscale.tgz /var/lib/tailscale
-          ls -lh backup/
-
-      # 8. Start tmate session (keep alive ~6h)
+      # 7. Start tmate session (this will keep the workflow running)
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
-          tmate -F
+          echo "Connect with: ssh $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          tmate -S /tmp/tmate.sock
 
-      # 9. Upload backup to MEGA
-      - name: Upload backup to MEGA
-        if: always()
+      # 8. Backup user data and installed apps when tmate session ends
+      - name: Backup VPS data on session end
+        if: always() && !cancelled()
         run: |
-          BACKUP_FILE="latest.tar.gz"
-          tar --exclude='*.tar.gz' -czf $BACKUP_FILE -C backup .
-          rclone mkdir mega:/vps-backup || true
-          echo "☁️ Uploading backup to MEGA..."
-          rclone copy $BACKUP_FILE mega:/vps-backup --progress
-          rclone copy backup/tailscale.tgz mega:/vps-backup --progress
-          echo "✅ Backup uploaded"
+          mkdir -p backup
+          echo "📦 Backing up /home/jacky ..."
+          sudo tar --exclude='*.tar.gz' --exclude='.cache' -czf backup/jacky-home.tar.gz /home/jacky 2>/dev/null || echo "Could not backup home directory"
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          echo "📦 Creating full backup archive..."
+          tar -czf backup/latest.tar.gz -C backup jacky-home.tar.gz installed-packages.list
+          ls -lh backup/
 
-      # 10. Final backup on cancel
-      - name: Final backup on cancel
+      # 9. Upload backup to MEGA when session ends
+      - name: Upload backup to MEGA on session end
+        if: always() && !cancelled()
+        run: |
+          echo "☁️ Uploading backup to MEGA..."
+          rclone mkdir mega:/vps-backup || true
+          rclone copy backup/latest.tar.gz mega:/vps-backup --progress
+          echo "✅ Backup uploaded successfully"
+
+      # 10. Backup on workflow cancellation
+      - name: Backup on workflow cancellation
         if: cancelled()
         run: |
-          echo "⚠️ Workflow cancelled, saving backup..."
-          BACKUP_FILE="cancelled-$(date +%s).tar.gz"
-          tar --exclude='*.tar.gz' -czf $BACKUP_FILE -C backup .
-          rclone copy $BACKUP_FILE mega:/vps-backup --progress
+          mkdir -p backup
+          echo "⚠️ Workflow cancelled, backing up data..."
+          echo "📦 Backing up /home/jacky ..."
+          sudo tar --exclude='*.tar.gz' --exclude='.cache' -czf backup/jacky-home.tar.gz /home/jacky 2>/dev/null || echo "Could not backup home directory"
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
+          echo "📦 Creating backup archive..."
+          tar -czf backup/latest.tar.gz -C backup jacky-home.tar.gz installed-packages.list
+          echo "☁️ Uploading backup to MEGA..."
+          rclone mkdir mega:/vps-backup || true
+          rclone copy backup/latest.tar.gz mega:/vps-backup --progress
+          echo "✅ Backup completed before termination"
