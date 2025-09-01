@@ -13,7 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Install rclone first
+      # 1. Install rclone and dependencies
       - name: Install rclone and dependencies
         run: |
           sudo apt update
@@ -56,10 +56,12 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "Hostname set to $(hostname)"
 
-      # 5. Restore backup from previous session
+      # 5. Restore backup from previous session (including Tailscale state)
       - name: Restore backup if exists
         run: |
           mkdir -p restore
+          
+          # Restore user data and packages
           if rclone copy mega:/vps-backup/latest.tar.gz restore/ --progress; then
             echo "📦 Restoring backup..."
             sudo tar -xzf restore/latest.tar.gz -C /
@@ -76,25 +78,58 @@ jobs:
           else
             echo "⚠️ No previous backup found, starting fresh"
           fi
+          
+          # Restore Tailscale state (critical for keeping same IP)
+          if rclone copy mega:/vps-backup/tailscale-state.tar.gz restore/ --progress; then
+            echo "🔄 Restoring Tailscale state..."
+            sudo systemctl stop tailscaled 2>/dev/null || true
+            sudo tar -xzf restore/tailscale-state.tar.gz -C /
+            sudo systemctl start tailscaled 2>/dev/null || true
+            echo "✅ Tailscale state restored - should maintain same IP address"
+          else
+            echo "⚠️ No previous Tailscale state found, will get new IP"
+          fi
 
-      # 6. Setup Tailscale
+      # 6. Setup Tailscale with state restoration
       - name: Setup Tailscale
         run: |
+          # Remove any existing tailscale packages to avoid conflicts
+          sudo apt remove -y tailscale tailscale-archive-keyring || true
+          
+          # Install using official script
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+          
+          # Check if we have a restored state
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            echo "🔄 Using restored Tailscale state with existing IP"
+            sudo systemctl start tailscaled
+            # Wait a moment for tailscale to initialize with restored state
+            sleep 3
+          else
+            echo "🆕 Setting up new Tailscale connection (new IP)"
+            sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+          fi
+          
           echo "🎉 Connected to Tailscale!"
-          tailscale ip -4
+          echo "IP Address: $(tailscale ip -4)"
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
+          echo "Tailscale status:"
+          tailscale status
 
-      # 7. Start tmate session (this will keep the workflow running)
+      # 7. Start tmate session
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
-          echo "Connect with: ssh $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          tmate -S /tmp/tmate.sock
+          # Create a persistent socket and display connection info
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "Connect with: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Session will remain active for up to 6 hours"
+          # Keep the session alive
+          sleep 21600
 
-      # 8. Backup user data and installed apps when tmate session ends
+      # 8. Backup user data, packages AND Tailscale state when session ends
       - name: Backup VPS data on session end
         if: always() && !cancelled()
         run: |
@@ -103,20 +138,26 @@ jobs:
           sudo tar --exclude='*.tar.gz' --exclude='.cache' -czf backup/jacky-home.tar.gz /home/jacky 2>/dev/null || echo "Could not backup home directory"
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > backup/installed-packages.list
+          echo "📦 Backing up Tailscale state (for IP preservation)..."
+          sudo systemctl stop tailscaled 2>/dev/null || true
+          sudo tar -czf backup/tailscale-state.tar.gz /var/lib/tailscale/ 2>/dev/null || echo "Could not backup Tailscale state"
+          sudo systemctl start tailscaled 2>/dev/null || true
           echo "📦 Creating full backup archive..."
           tar -czf backup/latest.tar.gz -C backup jacky-home.tar.gz installed-packages.list
           ls -lh backup/
 
-      # 9. Upload backup to MEGA when session ends
+      # 9. Upload backup to MEGA when session ends (including Tailscale state)
       - name: Upload backup to MEGA on session end
         if: always() && !cancelled()
         run: |
           echo "☁️ Uploading backup to MEGA..."
           rclone mkdir mega:/vps-backup || true
           rclone copy backup/latest.tar.gz mega:/vps-backup --progress
-          echo "✅ Backup uploaded successfully"
+          # Upload Tailscale state separately for easier restoration
+          rclone copy backup/tailscale-state.tar.gz mega:/vps-backup --progress
+          echo "✅ Backup uploaded successfully (including Tailscale state)"
 
-      # 10. Backup on workflow cancellation
+      # 10. Backup on workflow cancellation (including Tailscale state)
       - name: Backup on workflow cancellation
         if: cancelled()
         run: |
@@ -126,9 +167,14 @@ jobs:
           sudo tar --exclude='*.tar.gz' --exclude='.cache' -czf backup/jacky-home.tar.gz /home/jacky 2>/dev/null || echo "Could not backup home directory"
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > backup/installed-packages.list
+          echo "📦 Backing up Tailscale state (for IP preservation)..."
+          sudo systemctl stop tailscaled 2>/dev/null || true
+          sudo tar -czf backup/tailscale-state.tar.gz /var/lib/tailscale/ 2>/dev/null || echo "Could not backup Tailscale state"
+          sudo systemctl start tailscaled 2>/dev/null || true
           echo "📦 Creating backup archive..."
           tar -czf backup/latest.tar.gz -C backup jacky-home.tar.gz installed-packages.list
           echo "☁️ Uploading backup to MEGA..."
           rclone mkdir mega:/vps-backup || true
           rclone copy backup/latest.tar.gz mega:/vps-backup --progress
-          echo "✅ Backup completed before termination"
+          rclone copy backup/tailscale-state.tar.gz mega:/vps-backup --progress
+          echo "✅ Backup completed before termination (including Tailscale state)"
