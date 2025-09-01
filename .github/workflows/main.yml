@@ -28,12 +28,10 @@ jobs:
             echo "📦 Restoring VPS data..."
             sudo tar -xzf backup/vps-backup-*.tar.gz -C / || true
             
-            # Restore ownership of /home/jacky if it exists
             if [ -d /home/jacky ]; then
               sudo chown -R jacky:jacky /home/jacky
             fi
             
-            # Restart tailscale if state was restored
             if [ -f /var/lib/tailscale/tailscaled.state ]; then
               echo "🔄 Restoring Tailscale state..."
               sudo systemctl restart tailscaled || true
@@ -59,9 +57,12 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable tailscaled
-          sudo tailscaled &
+          sudo systemctl start tailscaled
           sleep 5
-          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+          sudo tailscale up \
+            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
+            --hostname github-vps \
+            --ssh
 
       - name: System Info
         run: |
@@ -119,6 +120,6 @@ jobs:
         if: always()
         run: |
           echo "🎉 VPS Backup & Restore Workflow Completed"
-          if [ -f backup/*.tar.gz ]; then
+          if ls backup/*.tar.gz 1>/dev/null 2>&1; then
             du -h backup/*.tar.gz
           fi
