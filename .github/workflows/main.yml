@@ -154,7 +154,7 @@ jobs:
           # Keep session alive
           sleep 21600
 
-      # 9. BACKUP PHASE - Comprehensive backup with robust handling
+      # 9. BACKUP PHASE - Optimized for large files
       - name: Backup complete system
         if: always()
         run: |
@@ -162,15 +162,15 @@ jobs:
           mkdir -p $BACKUP_DIR
           cd $BACKUP_DIR
           
-          echo "📦 Starting comprehensive system backup..."
+          echo "📦 Starting optimized system backup..."
           
           # 1. Backup installed packages
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > installed-packages.list
 
-          # 2. Backup user data (with exclusions for temp files)
-          echo "📦 Backing up user data..."
-          sudo tar -czf jacky-home.tar.gz \
+          # 2. Backup user data with efficient compression and exclusions
+          echo "📦 Backing up user data (optimized compression)..."
+          sudo tar -cf - \
             -C /home jacky \
             --exclude='./backup' \
             --exclude='*.tar.gz' \
@@ -179,7 +179,11 @@ jobs:
             --exclude='temp' \
             --exclude='node_modules' \
             --exclude='.npm' \
-            .
+            --exclude='Downloads' \
+            --exclude='Videos' \
+            --exclude='Music' \
+            --exclude='Pictures' \
+            . | pigz -6 > jacky-home.tar.gz
 
           # 3. Backup system services and configurations
           echo "📦 Backing up system services..."
@@ -211,7 +215,7 @@ jobs:
 
           echo "✅ Backup completed: $(du -sh $BACKUP_DIR)"
 
-      # 10. Upload backup with robust handling
+      # 10. Upload backup with chunking and timeout handling
       - name: Upload backup to MEGA
         if: always()
         run: |
@@ -221,35 +225,41 @@ jobs:
           # Create backup directory
           rclone mkdir mega:$MEGA_BACKUP_DIR || true
           
-          # Upload with retries and chunked upload for large files
-          for file in $BACKUP_DIR/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              echo "⬆️ Uploading $filename..."
-              
-              for retry in {1..3}; do
-                if rclone copy "$file" mega:$MEGA_BACKUP_DIR/ \
-                  --progress \
-                  --transfers 2 \
-                  --checkers 4 \
-                  --low-level-retries 10 \
-                  --retries 10; then
-                  echo "✅ $filename uploaded successfully"
-                  break
-                else
-                  echo "⚠️ Upload attempt $retry failed for $filename, retrying..."
-                  sleep 10
-                fi
-                if [ $retry -eq 3 ]; then
-                  echo "❌ Failed to upload $filename after 3 attempts"
-                  # Continue with other files instead of failing completely
-                  continue
-                fi
-              done
+          # Upload strategy: Small files first, large files with chunking
+          echo "⬆️ Uploading small files first..."
+          for file in $BACKUP_DIR/*.list $BACKUP_DIR/*manifest* $BACKUP_DIR/*system-* $BACKUP_DIR/*tailscale*; do
+            if [ -f "$file" ] && [ $(stat -c%s "$file") -lt 100000000 ]; then  # Files < 100MB
+              echo "Uploading $(basename "$file")..."
+              rclone copy "$file" mega:$MEGA_BACKUP_DIR/ --progress --timeout 300s
             fi
           done
 
-          echo "🎉 All backups uploaded successfully to MEGA"
+          # Upload large home directory with optimized settings
+          echo "⬆️ Uploading large home directory (this may take time)..."
+          if [ -f "$BACKUP_DIR/jacky-home.tar.gz" ]; then
+            # Use chunked upload with timeout and retries
+            timeout 600 rclone copy "$BACKUP_DIR/jacky-home.tar.gz" mega:$MEGA_BACKUP_DIR/ \
+              --progress \
+              --transfers 2 \
+              --checkers 4 \
+              --timeout 300s \
+              --retries 3 \
+              --low-level-retries 10 \
+              --contimeout 60s \
+              --bwlimit 10M || \
+            echo "⚠️ Home directory upload timed out or failed, but continuing..."
+          fi
+
+          # Upload any remaining files
+          echo "⬆️ Uploading remaining files..."
+          for file in $BACKUP_DIR/*.tar.gz; do
+            if [ -f "$file" ] && [ ! -f "$BACKUP_DIR/jacky-home.tar.gz" ] || [ "$file" != "$BACKUP_DIR/jacky-home.tar.gz" ]; then
+              echo "Uploading $(basename "$file")..."
+              rclone copy "$file" mega:$MEGA_BACKUP_DIR/ --progress --timeout 180s
+            fi
+          done
+
+          echo "🎉 Backup upload process completed"
 
       # 11. Final cleanup
       - name: Cleanup
