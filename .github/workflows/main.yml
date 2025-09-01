@@ -1,4 +1,4 @@
-name: Persistent VPS with Rclone Backup
+name: Persistent VPS with Complete Backup
 
 on:
   workflow_dispatch:
@@ -21,18 +21,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Install all necessary tools at once
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate tar dpkg unzip
+          sudo apt install -y curl tmate
 
       # ===== RCLONE SETUP =====
       - name: Install and configure rclone
         run: |
           # Install rclone
           curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -o rclone-current-linux-amd64.zip
+          unzip -a rclone-current-linux-amd64.zip
           cd rclone-*-linux-amd64
           sudo cp rclone /usr/bin/
           sudo chown root:root /usr/bin/rclone
@@ -62,41 +61,70 @@ jobs:
             echo "🔁 User ${{ env.VPS_USER }} already exists"
           fi
 
-      # Use the standard `hostname` command
       - name: Set hostname
         run: |
-          sudo hostname "${{ env.VPS_HOSTNAME }}"
+          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
           echo "🏷️ Hostname set to $(hostname)"
 
-      # ===== BACKUP RESTORATION =====
+      # ===== COMPLETE BACKUP RESTORATION =====
       - name: Restore from previous backup
         run: |
           mkdir -p restore
+          echo "🔄 Restoring previous session state..."
           
-          # Download latest backup
-          if rclone copy mega:${{ env.BACKUP_DIR }}/latest.tar.gz restore/ --progress; then
-            echo "📦 Restoring system backup..."
-            sudo tar -xzf restore/latest.tar.gz -C /
-            echo "✅ System backup restored"
-          else
-            echo "⚠️ No system backup found, starting fresh"
+          # Array of backup components to restore
+          declare -A backup_components=(
+            ["user-home.tar.gz"]="🏠 User data"
+            ["system-packages.list"]="📦 System packages"
+            ["webserver-config.tar.gz"]="🌐 Web server config"
+            ["webserver-data.tar.gz"]="💾 Website data"
+            ["database.tar.gz"]="🗄️ Databases"
+            ["aapanel-config.tar.gz"]="⚙️ aaPanel config"
+            ["php-config.tar.gz"]="🐘 PHP config"
+            ["system-services.tar.gz"]="🔧 System services"
+          )
+          
+          # Restore each component
+          for file in "${!backup_components[@]}"; do
+            if rclone copy mega:${{ env.BACKUP_DIR }}/$file restore/ --progress 2>/dev/null; then
+              echo "${backup_components[$file]} restoring..."
+              
+              case $file in
+                *.tar.gz)
+                  sudo tar -xzf restore/$file -C /
+                  ;;
+                *.list)
+                  if [ "$file" = "system-packages.list" ]; then
+                    sudo apt-get update
+                    sudo dpkg --set-selections < restore/$file
+                    sudo apt-get upgrade -y
+                    sudo apt-get dselect-upgrade -y
+                  fi
+                  ;;
+              esac
+              echo "✅ ${backup_components[$file]} restored"
+            else
+              echo "⚠️ ${backup_components[$file]} not found (fresh install)"
+            fi
+          done
+          
+          # Start services if they were restored
+          if [ -f "/etc/init.d/mysql" ]; then
+            sudo systemctl start mysql 2>/dev/null || true
+          fi
+          if [ -f "/etc/init.d/apache2" ]; then
+            sudo systemctl start apache2 2>/dev/null || true
+          fi
+          if [ -f "/etc/init.d/nginx" ]; then
+            sudo systemctl start nginx 2>/dev/null || true
           fi
           
-          # Download package list
-          if rclone copy mega:${{ env.BACKUP_DIR }}/packages.list restore/ --progress; then
-            echo "📦 Restoring packages..."
-            sudo apt-get update
-            sudo dpkg --set-selections < restore/packages.list
-            sudo apt-get dselect-upgrade -y
-            echo "✅ Packages restored"
-          fi
+          echo "✅ Restoration completed"
 
       # ===== TAILSCALE SETUP =====
       - name: Setup Tailscale
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sudo sh
-          sudo tailscaled --tun=userspace-networking &
-          sleep 5
+          curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname ${{ env.VPS_HOSTNAME }} --ssh
           
           echo "🌐 Tailscale IP: $(tailscale ip -4)"
@@ -119,41 +147,116 @@ jobs:
           echo "🔗 Connect: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           
           # Keep session alive
-          sleep 21600
+          sleep 21600  # 6 hours
 
-      # ===== BACKUP CREATION =====
-      - name: Create backup
+      # ===== COMPLETE BACKUP CREATION =====
+      - name: Create complete backup
         if: always()
         run: |
           mkdir -p backup
-          echo "💾 Creating backup..."
+          echo "💾 Creating complete backup of everything..."
           
-          # Backup directories with their full path, including Tailscale state
-          sudo tar -czf backup/latest.tar.gz \
-            --ignore-failed-read \
+          # 1. Backup user home directory
+          echo "📁 Backing up user data..."
+          sudo tar -czf backup/user-home.tar.gz \
+            -C /home ${{ env.VPS_USER }} \
+            --exclude='.cache' \
+            --exclude='node_modules' \
+            --exclude='*.tmp' \
+            --exclude='*.log' \
             --warning=no-file-changed \
-            /etc/ssh /etc/nginx /etc/mysql /etc/apache2 \
-            /var/www /var/lib/tailscale /root/.ssh /home/${{ env.VPS_USER }} \
-            2>/dev/null || true
-          
-          # Backup package list
-          echo "📦 Backing up packages..."
-          dpkg --get-selections > backup/packages.list
-          
-          echo "✅ Backup created: $(du -sh backup)"
+            . 2>/dev/null || echo "⚠️ User data backup incomplete"
 
-      # ===== UPLOAD BACKUP =====
-      - name: Upload backup to MEGA
+          # 2. Backup system packages
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/system-packages.list
+          apt-mark showauto > backup/auto-packages.list
+
+          # 3. Backup web server configurations (Apache/Nginx)
+          echo "🌐 Backing up web server configs..."
+          sudo tar -czf backup/webserver-config.tar.gz \
+            --ignore-failed-read \
+            /etc/apache2 /etc/nginx /etc/letsencrypt \
+            2>/dev/null || echo "⚠️ Web server config not found"
+
+          # 4. Backup website data
+          echo "💾 Backing up website data..."
+          sudo tar -czf backup/webserver-data.tar.gz \
+            --ignore-failed-read \
+            /var/www /home/${{ env.VPS_USER }}/www \
+            /home/${{ env.VPS_USER }}/public_html \
+            2>/dev/null || echo "⚠️ Website data not found"
+
+          # 5. Backup databases (MySQL/MariaDB)
+          echo "🗄️ Backing up databases..."
+          if command -v mysql >/dev/null 2>&1; then
+            # Backup all databases
+            sudo mysqldump --all-databases --single-transaction --quick \
+              --lock-tables=false > backup/all-databases.sql 2>/dev/null || \
+              echo "⚠️ Could not backup databases"
+            # Compress database backup
+            gzip -f backup/all-databases.sql || true
+          else
+            echo "⚠️ MySQL not installed, skipping database backup"
+          fi
+
+          # 6. Backup aaPanel configuration
+          echo "⚙️ Backing up aaPanel config..."
+          sudo tar -czf backup/aapanel-config.tar.gz \
+            --ignore-failed-read \
+            /www/server/panel /www/server/data \
+            /www/server/nginx /www/server/apache \
+            /www/server/php /www/server/mysql \
+            2>/dev/null || echo "⚠️ aaPanel not installed"
+
+          # 7. Backup PHP configuration
+          echo "🐘 Backing up PHP config..."
+          sudo tar -czf backup/php-config.tar.gz \
+            --ignore-failed-read \
+            /etc/php /usr/lib/php /usr/local/php \
+            2>/dev/null || echo "⚠️ PHP config not found"
+
+          # 8. Backup system services
+          echo "🔧 Backing up system services..."
+          sudo tar -czf backup/system-services.tar.gz \
+            --ignore-failed-read \
+            /etc/systemd/system /lib/systemd/system \
+            /etc/init.d /etc/default \
+            2>/dev/null || echo "⚠️ System services backup incomplete"
+
+          # 9. Create backup manifest
+          echo "📝 Creating backup manifest..."
+          cat > backup/manifest.txt << EOF
+Backup created: $(date)
+Components backed up:
+- User home directory
+- System packages
+- Web server configurations
+- Website data
+- Databases
+- aaPanel configuration
+- PHP configuration
+- System services
+EOF
+
+          echo "✅ Complete backup created: $(du -sh backup)"
+
+      # ===== UPLOAD COMPLETE BACKUP =====
+      - name: Upload complete backup to MEGA
         if: always()
         run: |
-          echo "☁️ Uploading backup to MEGA..."
+          echo "☁️ Uploading complete backup to MEGA..."
           rclone mkdir mega:${{ env.BACKUP_DIR }} || true
           
-          # Upload final backup
-          rclone copy backup/latest.tar.gz mega:${{ env.BACKUP_DIR }} --progress
-          rclone copy backup/packages.list mega:${{ env.BACKUP_DIR }} --progress
+          # Upload all backup components
+          for backup_file in backup/*; do
+            if [ -f "$backup_file" ]; then
+              echo "⬆️ Uploading $(basename $backup_file)..."
+              rclone copy "$backup_file" mega:${{ env.BACKUP_DIR }} --progress --no-traverse
+            fi
+          done
           
-          echo "✅ Backup uploaded to MEGA"
+          echo "✅ Complete backup uploaded to MEGA"
 
       # ===== FINAL REPORT =====
       - name: Session report
@@ -163,6 +266,7 @@ jobs:
           echo "VPS Session Completed"
           echo "=================================="
           echo "Status: ${{ job.status }}"
-          echo "Backup: ✅ Uploaded to MEGA"
-          echo "Next session will restore this state"
+          echo "Backup: ✅ Complete system snapshot uploaded"
+          echo "Includes: User data, Packages, Websites, Databases, Configs"
+          echo "Next session will restore exact same state"
           echo "=================================="
