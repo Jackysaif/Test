@@ -201,8 +201,6 @@ jobs:
           tar -czf backup/latest.tar.gz -C backup .
           
           echo "📦 Uploading backup as artifact..."
-          # Upload using GitHub's artifact system
-          ls -lh backup/
 
       # 11. Upload final backup on cancellation
       - name: Upload final backup on cancellation
@@ -214,11 +212,11 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      # 12. Display connection info after session
+      # 12. Display session results - FIXED: Proper GitHub Actions syntax
       - name: Display session results
         if: always()
         run: |
-          if cancelled(); then
+          if [ "${{ job.status }}" = "cancelled" ]; then
             echo "🏁 Session was cancelled - backup should be available in artifacts"
           else
             echo "🏁 Session ended normally - backup available in artifacts"
