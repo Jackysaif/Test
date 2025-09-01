@@ -1,8 +1,8 @@
-name: Continuous Persistent VPS
+name: Continuous Persistent VPS with Backup & Restore
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours (keep session alive)
+    - cron: '0 */6 * * *'   # Every 6 hours (keep alive)
   workflow_dispatch:
   workflow_cancel:
 
@@ -12,13 +12,25 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      # === Initial Setup ===
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Display startup info
         run: |
-          echo "Creating hostname root-notfleppy"
-          echo "Creating username 'not' with password 'fleppy'"
+          echo "🔧 Starting VPS setup..."
+          echo "🖥️ Hostname: root-notfleppy"
+          echo "👤 User: not / fleppy"
+
+      # === Restore VPS Data if backup exists ===
+      - name: Restore VPS backup
+        run: |
+          if [ -f backup/vps-backup.zip ]; then
+            echo "🔄 Restoring VPS data from backup..."
+            sudo unzip -o backup/vps-backup.zip -d /
+          else
+            echo "⚠️ No previous VPS backup found"
+          fi
 
       - name: Set hostname
         run: |
@@ -26,28 +38,30 @@ jobs:
           echo "127.0.0.1 root-notfleppy" | sudo tee -a /etc/hosts
 
       - name: Set root password
-        run: |
-          echo "root:fleppy" | sudo chpasswd
+        run: echo "root:fleppy" | sudo chpasswd
 
-      - name: Create user 'not' with password 'fleppy'
+      - name: Create user 'not'
         run: |
           if ! id -u not >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash not
             echo "not:fleppy" | sudo chpasswd
             sudo usermod -aG sudo not
             echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
+          else
+            echo "ℹ️ User 'not' already exists"
           fi
 
+      # === Dependencies ===
       - name: Install prerequisites
         run: |
           sudo apt update
           sudo apt install -y tmate curl unzip zip sudo net-tools neofetch
 
+      # === Tailscale Setup ===
       - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+        run: curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Restore Tailscale state if exists
+      - name: Restore Tailscale state
         run: |
           if [ -f backup/tailscaled.state ]; then
             echo "🔄 Restoring old Tailscale state"
@@ -55,7 +69,7 @@ jobs:
             sudo cp backup/tailscaled.state /var/lib/tailscale/tailscaled.state
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
           else
-            echo "⚠️ No previous Tailscale state found. Will setup fresh."
+            echo "⚠️ No previous Tailscale state found"
           fi
 
       - name: Start Tailscale
@@ -63,14 +77,13 @@ jobs:
           sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
           sleep 8
           if [ ! -f backup/tailscaled.state ]; then
-            echo "🔑 Setting up fresh Tailscale with AuthKey"
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root-notfleppy || true
-            # Backup new state immediately
+            echo "🔑 Fresh Tailscale setup"
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --ssh --hostname=root-notfleppy || true
             mkdir -p backup
             sudo cp /var/lib/tailscale/tailscaled.state backup/tailscaled.state
           else
             echo "✅ Using restored Tailscale state"
-            sudo tailscale up --hostname=root-notfleppy || true
+            sudo tailscale up --ssh --hostname=root-notfleppy || true
           fi
 
       - name: Show Tailscale IP
@@ -78,15 +91,19 @@ jobs:
           echo "🌐 Tailscale IPv4:"
           tailscale ip -4 || echo "⚠️ No Tailscale IP found"
 
-      - name: Start tmate session (keep alive)
+      # === Remote SSH Access (tmate) ===
+      - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
 
-      - name: Sleep to keep VPS alive
-        run: sleep 21600
+      - name: Keep VPS alive
+        run: |
+          echo "🕒 VPS will remain alive for 6 hours"
+          sleep 21600
 
   backup:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_cancel'
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -95,7 +112,10 @@ jobs:
         run: |
           echo "📦 Creating backup..."
           mkdir -p backup
-          zip -r backup/backup.zip /home/not /root 2>/dev/null || true
-          # Save Tailscale state
-          sudo cp /var/lib/tailscale/tailscaled.state backup/tailscaled.state || true
-          echo "✅ Backup complete. Files saved in ./backup"
+          zip -r backup/vps-backup.zip /home/not /root 2>/dev/null || true
+
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo cp /var/lib/tailscale/tailscaled.state backup/tailscaled.state
+          fi
+
+          echo "✅ Backup complete. Files available in ./backup"
