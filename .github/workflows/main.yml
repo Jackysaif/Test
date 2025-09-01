@@ -2,14 +2,9 @@ name: Persistent VPS with Backup & Restore
 
 on:
   workflow_dispatch:
-    inputs:
-      operation:
-        description: "Choose operation (backup or restore)"
-        required: true
-        default: "backup"
   workflow_call:
   schedule:
-    - cron: "0 */6 * * *" # Every 6 hours
+    - cron: "0 */6 * * *"
 
 jobs:
   vps:
@@ -20,82 +15,99 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create jacky user
+      # -------------------
+      # Create restricted user "jacky"
+      # -------------------
+      - name: Create restricted user
         run: |
-          sudo useradd -m -s /bin/bash jacky || true
-          echo "jacky:root" | sudo chpasswd
-          echo "✅ User jacky created with password root"
+          if ! id -u jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+          fi
+          echo "✅ User jacky created with password 'root'"
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y unzip zip curl wget tmate rclone tailscale neofetch
-
+      # -------------------
+      # Setup Tailscale (FIXED)
+      # -------------------
       - name: Setup Tailscale
         run: |
-          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &
-          sleep 5
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
-          echo "🎉 Tailscale Connected"
-          echo "🌐 Tailscale IP: $(tailscale ip -4)"
-          echo "👤 User: jacky / Password: root"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --ssh
+          echo "🎉 Connected to Tailscale!"
+          echo "Tailscale IP Address:"
+          tailscale ip -4
+          echo "Username: jacky"
+          echo "Password: root"
 
+      # -------------------
+      # Configure rclone (MEGA, hardcoded)
+      # -------------------
       - name: Configure rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = rajeeshsksbx7@gmail.com
-          pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
-          EOF
-          echo "✅ Rclone configured with MEGA remote"
+[mega]
+type = mega
+user = rajeeshsksbx7@gmail.com
+pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
+EOF
+          echo "✅ rclone configured with MEGA"
 
-      # === BACKUP SECTION ===
-      - name: Backup VPS data
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          mkdir -p /opt/vps-backup
-          # Home directory
-          sudo cp -r /home/jacky /opt/vps-backup/ || true
-          # Tailscale state
-          sudo mkdir -p /opt/vps-backup/tailscale
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/tailscale/ || true
-          # Aapanel data (optional)
-          if [ -d "/www/server/panel" ]; then
-            sudo cp -r /www/server/panel /opt/vps-backup/aapanel || true
-          fi
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
-          echo "📦 Backup archive created"
-
-      - name: Upload backup to MEGA
-        if: github.event.inputs.operation == 'backup'
-        run: |
-          rclone copy backup.zip mega:vps-backups/ --progress
-          echo "☁️ Backup uploaded to MEGA"
-
-      # === RESTORE SECTION ===
-      - name: Download latest backup
-        if: github.event.inputs.operation == 'restore'
+      # -------------------
+      # Restore VPS data (NEW)
+      # -------------------
+      - name: Restore VPS data
         run: |
           mkdir -p restore
-          rclone copy mega:vps-backups/backup.zip restore/ --progress || echo "⚠️ No backup found"
-          if [ -f restore/backup.zip ]; then
-            unzip restore/backup.zip -d /
-            echo "✅ Backup restored successfully"
-          else
-            echo "❌ No backup available to restore"
+          echo "📥 Downloading latest backup from MEGA..."
+          rclone copy mega:/vps-backup restore --progress || echo "⚠️ No backup found in MEGA"
+
+          if [ -f restore/jacky-home.tar.gz ]; then
+            echo "📂 Restoring jacky home directory..."
+            sudo tar -xzf restore/jacky-home.tar.gz -C /
           fi
 
-      # === Ensure backup runs even on cancel ===
-      - name: Final backup on cancel
-        if: ${{ cancelled() }}
+          if [ -f restore/aapanel.tar.gz ]; then
+            echo "📂 Restoring aaPanel data..."
+            sudo mkdir -p /www/server
+            sudo tar -xzf restore/aapanel.tar.gz -C /
+          fi
+
+          echo "✅ Restore process finished"
+
+      # -------------------
+      # Backup VPS data
+      # -------------------
+      - name: Backup VPS data
         run: |
-          echo "⚠️ Workflow cancelled, saving final backup..."
-          mkdir -p /opt/vps-backup-final
-          sudo cp -r /home/jacky /opt/vps-backup-final/ || true
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup-final/ || true
-          zip -r final-backup.zip /opt/vps-backup-final
-          rclone copy final-backup.zip mega:vps-backups/ --progress || true
-          echo "📦 Final backup uploaded due to cancellation"
+          mkdir -p backup
+          echo "📦 Backing up user jacky home directory..."
+          sudo tar -czf backup/jacky-home.tar.gz /home/jacky
+
+          if [ -d "/www/server" ]; then
+            echo "📦 Backing up aaPanel data..."
+            sudo tar -czf backup/aapanel.tar.gz /www/server
+          fi
+
+          echo "✅ Backup complete:"
+          ls -lh backup
+
+      # -------------------
+      # Upload backup to MEGA
+      # -------------------
+      - name: Upload backup to MEGA
+        run: |
+          rclone copy backup mega:/vps-backup --progress
+          echo "✅ Backup uploaded to MEGA"
+
+      # -------------------
+      # Final backup on cancel
+      # -------------------
+      - name: Final backup on cancel
+        if: cancelled()
+        run: |
+          echo "⚠️ Workflow cancelled — performing final backup"
+          mkdir -p backup
+          sudo tar -czf backup/jacky-home-final.tar.gz /home/jacky
+          rclone copy backup mega:/vps-backup --progress
+          echo "✅ Final backup uploaded to MEGA"
