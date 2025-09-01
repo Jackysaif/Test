@@ -1,724 +1,191 @@
-name: Rocket-Powered Persistent VPS
+name: Persistent VPS with Rclone Backup
 
 on:
   workflow_dispatch:
-    inputs:
-      skip_restore:
-        description: 'Skip restoration from backup (fresh start)'
-        required: false
-        default: 'false'
-        type: boolean
-      session_timeout:
-        description: 'Session timeout in minutes (max 360)'
-        required: false
-        default: '360'
-        type: string
   workflow_call:
-    inputs:
-      skip_restore:
-        required: false
-        default: false
-        type: boolean
-      session_timeout:
-        required: false
-        default: '360'
-        type: string
 
 env:
-  VPS_USER: ${{ secrets.VPS_USER || 'vpsuser' }}
-  VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+  VPS_USER: jacky
+  VPS_PASSWORD: root
   VPS_HOSTNAME: github-vps
-  BACKUP_RETENTION_DAYS: 7
-  GH_TOKEN: ${{ github.token }}
-  DEBIAN_FRONTEND: noninteractive
+  BACKUP_DIR: vps-backup
+  SESSION_TIMEOUT: 6h
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # Fixed: Using literal value
-    
+    timeout-minutes: 360
+
     steps:
       # ===== INITIALIZATION =====
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate inputs
+      - name: Install system tools
         run: |
-          set -euo pipefail
-          
-          # Validate session timeout
-          TIMEOUT="${{ inputs.session_timeout || '360' }}"
-          if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || [ "$TIMEOUT" -gt 360 ] || [ "$TIMEOUT" -lt 1 ]; then
-            echo "❌ Invalid session timeout: $TIMEOUT (must be 1-360)"
-            exit 1
-          fi
-          
-          # Check required secrets
-          if [ -z "${{ secrets.VPS_PASSWORD }}" ]; then
-            echo "❌ VPS_PASSWORD secret is not set"
-            exit 1
-          fi
-          
-          if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
-            echo "⚠️ TAILSCALE_AUTHKEY secret is not set - Tailscale will be skipped"
-          fi
-          
-          echo "✅ Input validation passed"
+          sudo apt update
+          sudo apt install -y curl tmate
 
-      - name: Setup system
+      # ===== RCLONE SETUP =====
+      - name: Install and configure rclone
         run: |
-          set -euo pipefail
+          # Install rclone
+          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -a rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          sudo chown root:root /usr/bin/rclone
+          sudo chmod 755 /usr/bin/rclone
           
-          # Update package lists with retry
-          for i in {1..3}; do
-            if sudo apt-get update; then
-              break
-            fi
-            echo "Retry $i/3..."
-            sleep 5
-          done
-          
-          # Install required packages
-          sudo apt-get install -y \
-            curl \
-            tmate \
-            jq \
-            bc \
-            software-properties-common \
-            openssh-server \
-            net-tools \
-            htop \
-            2>&1 | tee /tmp/apt-install.log
-          
-          echo "🚀 System tools installed successfully"
-          echo "📋 Installed packages: $(grep -c 'Setting up' /tmp/apt-install.log || echo '0')"
-
-      # ===== SECURE SETUP =====
-      - name: Configure secure user
-        run: |
-          set -euo pipefail
-          
-          USER_NAME="${{ env.VPS_USER }}"
-          USER_PASS="${{ env.VPS_PASSWORD }}"
-          
-          if ! id -u "$USER_NAME" &>/dev/null; then
-            # Create user with home directory
-            sudo useradd -m -s /bin/bash "$USER_NAME"
-            
-            # Set password securely
-            echo "${USER_NAME}:${USER_PASS}" | sudo chpasswd
-            
-            # Add to sudo group
-            sudo usermod -aG sudo "$USER_NAME"
-            
-            # Configure SSH directory
-            SSH_DIR="/home/${USER_NAME}/.ssh"
-            sudo mkdir -p "$SSH_DIR"
-            sudo chmod 700 "$SSH_DIR"
-            sudo touch "${SSH_DIR}/authorized_keys"
-            sudo chmod 600 "${SSH_DIR}/authorized_keys"
-            sudo chown -R "${USER_NAME}:${USER_NAME}" "$SSH_DIR"
-            
-            # Set up sudoers for passwordless sudo (optional)
-            echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${USER_NAME}"
-            
-            echo "✅ User ${USER_NAME} created with sudo privileges"
-          else
-            echo "🔁 User ${USER_NAME} already exists"
-          fi
-          
-          # Verify user creation
-          if id "$USER_NAME" &>/dev/null; then
-            echo "✅ User verification passed"
-            id "$USER_NAME"
-          else
-            echo "❌ User creation failed"
-            exit 1
-          fi
-
-      - name: Set hostname and optimize system
-        run: |
-          set -euo pipefail
-          
-          # Set hostname
-          sudo hostnamectl set-hostname "${{ env.VPS_HOSTNAME }}"
-          echo "127.0.1.1 ${{ env.VPS_HOSTNAME }}" | sudo tee -a /etc/hosts
-          
-          # System optimization
-          cat << 'EOF' | sudo tee /etc/sysctl.d/99-github-vps.conf
-          # GitHub VPS Optimizations
-          vm.swappiness=10
-          vm.vfs_cache_pressure=50
-          fs.file-max=2097152
-          net.core.somaxconn=65535
-          net.ipv4.tcp_max_syn_backlog=8192
-          net.core.netdev_max_backlog=16384
+          # Configure MEGA
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
           EOF
           
-          sudo sysctl -p /etc/sysctl.d/99-github-vps.conf
-          
-          echo "🏷️ Hostname: $(hostname)"
-          echo "⚙️ System optimizations applied"
+          echo "✅ Rclone configured with MEGA"
+          rclone about mega: || echo "⚠️ MEGA connection test failed"
+
+      # ===== USER SETUP =====
+      - name: Create user with sudo access
+        run: |
+          if ! id -u ${{ env.VPS_USER }} >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash ${{ env.VPS_USER }}
+            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
+            sudo usermod -aG sudo ${{ env.VPS_USER }}
+            echo "✅ User ${{ env.VPS_USER }} created with sudo access"
+          else
+            echo "🔁 User ${{ env.VPS_USER }} already exists"
+          fi
+
+      - name: Set hostname
+        run: |
+          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
+          echo "🏷️ Hostname set to $(hostname)"
 
       # ===== BACKUP RESTORATION =====
-      - name: Install GitHub CLI
-        if: ${{ inputs.skip_restore != 'true' }}
+      - name: Restore from previous backup
         run: |
-          set -euo pipefail
-          
-          if ! command -v gh &>/dev/null; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
-              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-              sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            
-            sudo apt-get update
-            sudo apt-get install -y gh
-            echo "✅ GitHub CLI installed"
-          else
-            echo "✅ GitHub CLI already installed: $(gh --version | head -1)"
-          fi
-
-      - name: Discover latest backup
-        if: ${{ inputs.skip_restore != 'true' }}
-        id: discover-backup
-        run: |
-          set -euo pipefail
           mkdir -p restore
           
-          # Initialize output variables
-          echo "backup_tag=" >> $GITHUB_OUTPUT
-          echo "backup_timestamp=" >> $GITHUB_OUTPUT
-          echo "backup_found=false" >> $GITHUB_OUTPUT
-          
-          # Get all releases
-          echo "🔍 Searching for backups..."
-          if ! RELEASES=$(gh release list --limit 20 --json tagName,createdAt --repo "${{ github.repository }}" 2>/dev/null); then
-            echo "⚠️ No releases found or API error"
-            exit 0
-          fi
-          
-          # Find latest backup
-          LATEST_BACKUP=""
-          LATEST_TIMESTAMP=""
-          
-          while IFS=$'\t' read -r tag timestamp; do
-            if [[ "$tag" == vps-backup-* ]]; then
-              LATEST_BACKUP="$tag"
-              LATEST_TIMESTAMP="$timestamp"
-              break
-            fi
-          done < <(echo "$RELEASES" | jq -r '.[] | [.tagName, .createdAt] | @tsv')
-          
-          # Set outputs
-          if [[ -n "$LATEST_BACKUP" ]]; then
-            echo "backup_tag=$LATEST_BACKUP" >> $GITHUB_OUTPUT
-            echo "backup_timestamp=$LATEST_TIMESTAMP" >> $GITHUB_OUTPUT
-            echo "backup_found=true" >> $GITHUB_OUTPUT
-            echo "📦 Found backup: $LATEST_BACKUP"
-            echo "📅 Created: $LATEST_TIMESTAMP"
+          # Download latest backup
+          if rclone copy mega:${{ env.BACKUP_DIR }}/latest.tar.gz restore/ --progress; then
+            echo "📦 Restoring system backup..."
+            sudo tar -xzf restore/latest.tar.gz -C /
+            echo "✅ System backup restored"
           else
-            echo "⚠️ No backup found, starting fresh"
-          fi
-
-      - name: Download and validate backup
-        if: steps.discover-backup.outputs.backup_found == 'true'
-        run: |
-          set -euo pipefail
-          
-          BACKUP_TAG="${{ steps.discover-backup.outputs.backup_tag }}"
-          echo "📥 Downloading backup: $BACKUP_TAG"
-          
-          # Download with retry logic
-          for attempt in {1..3}; do
-            if gh release download "$BACKUP_TAG" \
-              --dir restore \
-              --repo "${{ github.repository }}" \
-              --clobber; then
-              echo "✅ Download successful"
-              break
-            else
-              echo "⚠️ Download attempt $attempt failed"
-              sleep 5
-            fi
-          done
-          
-          # Validate downloads
-          echo "🔍 Validating backup integrity..."
-          VALID_FILES=0
-          INVALID_FILES=0
-          
-          for file in restore/*.tar.gz; do
-            if [[ -f "$file" ]]; then
-              if gzip -t "$file" 2>/dev/null; then
-                SIZE=$(du -h "$file" | cut -f1)
-                COUNT=$(tar -tzf "$file" 2>/dev/null | wc -l || echo "0")
-                echo "✅ $(basename "$file"): Valid ($SIZE, $COUNT files)"
-                ((VALID_FILES++))
-              else
-                echo "❌ $(basename "$file"): Corrupted, removing"
-                rm -f "$file"
-                ((INVALID_FILES++))
-              fi
-            fi
-          done
-          
-          if [[ -f "restore/installed-packages.list" ]]; then
-            PACKAGES=$(wc -l < "restore/installed-packages.list")
-            echo "✅ Package list: $PACKAGES packages"
+            echo "⚠️ No system backup found, starting fresh"
           fi
           
-          echo "📊 Validation complete: $VALID_FILES valid, $INVALID_FILES invalid"
-
-      - name: Restore system state
-        if: steps.discover-backup.outputs.backup_found == 'true'
-        run: |
-          set -euo pipefail
-          
-          echo "🔄 Starting system restoration..."
-          RESTORED_ITEMS=0
-          
-          # Function to safely extract archives
-          safe_extract() {
-            local archive="$1"
-            local target="$2"
-            local description="$3"
-            
-            if [[ -f "$archive" ]]; then
-              echo "📦 Restoring $description..."
-              if sudo tar -xzf "$archive" -C "$target" 2>/dev/null; then
-                echo "✅ $description restored successfully"
-                return 0
-              else
-                echo "⚠️ Failed to restore $description"
-                return 1
-              fi
-            else
-              echo "⏭️ Skipping $description (not found)"
-              return 1
-            fi
-          }
-          
-          # Restore user data
-          if safe_extract "restore/${{ env.VPS_USER }}-home-full.tar.gz" "/" "user home directory"; then
-            ((RESTORED_ITEMS++))
+          # Download user data separately
+          if rclone copy mega:${{ env.BACKUP_DIR }}/user-home.tar.gz restore/ --progress; then
+            echo "🏠 Restoring user data..."
+            sudo tar -xzf restore/user-home.tar.gz -C /
+            echo "✅ User data restored"
           fi
           
-          # Restore system services
-          if safe_extract "restore/services-backup.tar.gz" "/" "system services"; then
-            ((RESTORED_ITEMS++))
-            sudo systemctl daemon-reload
-          fi
-          
-          # Restore configurations
-          if safe_extract "restore/system-config.tar.gz" "/" "system configurations"; then
-            ((RESTORED_ITEMS++))
-          fi
-          
-          # Restore packages
-          if [[ -f "restore/installed-packages.list" ]]; then
+          # Download package list
+          if rclone copy mega:${{ env.BACKUP_DIR }}/packages.list restore/ --progress; then
             echo "📦 Restoring packages..."
-            sudo dpkg --clear-selections
-            sudo dpkg --set-selections < restore/installed-packages.list
-            sudo apt-get dselect-upgrade -y 2>&1 | tail -20
-            ((RESTORED_ITEMS++))
+            sudo apt-get update
+            sudo dpkg --set-selections < restore/packages.list
+            sudo apt-get upgrade -y
+            sudo apt-get dselect-upgrade -y
+            echo "✅ Packages restored"
           fi
-          
-          # Fix permissions
-          sudo chown -R "${{ env.VPS_USER }}:${{ env.VPS_USER }}" "/home/${{ env.VPS_USER }}" 2>/dev/null || true
-          
-          echo "✅ Restoration completed: $RESTORED_ITEMS components restored"
 
       # ===== TAILSCALE SETUP =====
-      - name: Setup Tailscale with state management
-        if: ${{ secrets.TAILSCALE_AUTHKEY != '' }}
-        id: tailscale
+      - name: Setup Tailscale
         run: |
-          set -euo pipefail
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname ${{ env.VPS_HOSTNAME }} --ssh
           
-          echo "🌐 Setting up Tailscale..."
-          
-          # Install Tailscale
-          if ! command -v tailscale &>/dev/null; then
-            curl -fsSL https://tailscale.com/install.sh | sh
-            echo "✅ Tailscale installed"
-          else
-            echo "✅ Tailscale already installed"
-          fi
-          
-          # Start Tailscale daemon
-          sudo systemctl start tailscaled
-          sleep 3
-          
-          # Connect to Tailscale
-          if [[ -f "/var/lib/tailscale/tailscaled.state" ]]; then
-            echo "🔄 Using existing Tailscale state"
-          else
-            echo "🆕 Creating new Tailscale connection"
-            sudo tailscale up \
-              --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" \
-              --hostname "${{ env.VPS_HOSTNAME }}" \
-              --ssh \
-              --accept-routes \
-              --accept-dns=false
-          fi
-          
-          # Get connection info
-          sleep 5
-          TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "pending")
-          
-          echo "tailscale_ip=$TAILSCALE_IP" >> $GITHUB_OUTPUT
-          echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          echo "🔑 SSH: ssh ${{ env.VPS_USER }}@$TAILSCALE_IP"
+          echo "🌐 Tailscale IP: $(tailscale ip -4)"
+          echo "🔑 SSH: ssh ${{ env.VPS_USER }}@$(tailscale ip -4)"
 
       # ===== VPS SESSION =====
-      - name: Start persistent session
-        id: session
+      - name: Start VPS session
         run: |
-          set -euo pipefail
-          
-          # Get session timeout
-          TIMEOUT_MINUTES="${{ inputs.session_timeout || '360' }}"
-          TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
-          
-          # Get connection info
-          TAILSCALE_IP="${{ steps.tailscale.outputs.tailscale_ip || 'Not configured' }}"
-          
-          # Create session info file
-          cat > /tmp/session-info.txt << EOF
-          🚀 Rocket VPS Session Started
-          ==========================================
-          👤 Username: ${{ env.VPS_USER }}
-          🔑 Password: [Hidden - Check GitHub Secrets]
-          🌐 Tailscale IP: $TAILSCALE_IP
-          🖥️ Hostname: $(hostname -f)
-          ⏰ Timeout: $TIMEOUT_MINUTES minutes
-          📅 Started: $(date '+%Y-%m-%d %H:%M:%S UTC')
-          ==========================================
-          EOF
-          
-          cat /tmp/session-info.txt
+          echo "🚀 VPS Session Started"
+          echo "========================"
+          echo "👤 User: ${{ env.VPS_USER }}"
+          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
+          echo "🌐 IP: $(tailscale ip -4)"
+          echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
+          echo "========================"
           
           # Start tmate session
-          echo "🔗 Starting tmate session..."
-          
-          # Create tmate configuration
-          cat > ~/.tmate.conf << 'EOF'
-          set -g default-terminal "screen-256color"
-          set -g history-limit 10000
-          set -g mouse on
-          EOF
-          
-          # Start session
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔗 Connect: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           
-          # Get connection details
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "==========================================
-          🔗 Connection Methods:
-          ==========================================
-          SSH: $TMATE_SSH
-          Web: $TMATE_WEB
-          ==========================================
-          "
-          
-          # Save session info to outputs
-          echo "tmate_ssh=$TMATE_SSH" >> $GITHUB_OUTPUT
-          echo "tmate_web=$TMATE_WEB" >> $GITHUB_OUTPUT
-          echo "session_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-          
-          # Monitor session
-          echo "⏳ Session active for $TIMEOUT_MINUTES minutes..."
-          echo "💡 Tip: You can cancel the workflow anytime to trigger backup"
-          
-          # Keep alive with progress indicator
-          for ((i=0; i<TIMEOUT_SECONDS; i+=60)); do
-            ELAPSED=$((i/60))
-            REMAINING=$(((TIMEOUT_SECONDS-i)/60))
-            echo "⏰ Time: ${ELAPSED}/${TIMEOUT_MINUTES} minutes (${REMAINING} remaining)"
-            sleep 60
-          done
-          
-          echo "⏰ Session timeout reached"
+          # Keep session alive
+          sleep 21600  # 6 hours
 
-      # ===== INTELLIGENT BACKUP =====
-      - name: Create smart backup
+      # ===== BACKUP CREATION =====
+      - name: Create backup
         if: always()
-        id: backup
         run: |
-          set -euo pipefail
-          
           mkdir -p backup
-          echo "💾 Creating intelligent backup..."
+          echo "💾 Creating backup..."
           
-          # Define exclusion patterns
-          EXCLUDE_PATTERNS=(
-            --exclude='*.tmp'
-            --exclude='*.temp'
-            --exclude='*.log'
-            --exclude='*.cache'
-            --exclude='.cache'
-            --exclude='.npm'
-            --exclude='.yarn'
-            --exclude='.docker'
-            --exclude='node_modules'
-            --exclude='__pycache__'
-            --exclude='.git'
-            --exclude='vendor'
-            --exclude='venv'
-            --exclude='.venv'
-          )
-          
-          # Backup user data with compression
+          # Backup user home directory
           echo "📁 Backing up user data..."
-          if sudo tar -czf "backup/${{ env.VPS_USER }}-home-full.tar.gz" \
-            -C /home \
-            "${{ env.VPS_USER }}" \
-            "${EXCLUDE_PATTERNS[@]}" \
+          sudo tar -czf backup/user-home.tar.gz \
+            -C /home ${{ env.VPS_USER }} \
+            --exclude='.cache' \
+            --exclude='node_modules' \
+            --exclude='*.tmp' \
+            --exclude='*.log' \
             --warning=no-file-changed \
-            2>/dev/null; then
-            echo "✅ User data backed up"
-          else
-            echo "⚠️ User data backup completed with warnings"
-          fi
+            .
           
-          # Backup system configurations
+          # Backup system files
           echo "⚙️ Backing up system configuration..."
-          SYSTEM_DIRS=""
-          for dir in /etc/ssh /etc/ssl /etc/systemd/system /etc/cron.d; do
-            [[ -d "$dir" ]] && SYSTEM_DIRS="$SYSTEM_DIRS $dir"
-          done
+          sudo tar -czf backup/system-config.tar.gz \
+            --ignore-failed-read \
+            /etc/ssh /etc/nginx /etc/mysql /etc/apache2 \
+            /var/www /root/.ssh /home/${{ env.VPS_USER }}/.ssh \
+            2>/dev/null || true
           
-          if [[ -n "$SYSTEM_DIRS" ]]; then
-            sudo tar -czf backup/system-config.tar.gz \
-              --ignore-failed-read \
-              $SYSTEM_DIRS 2>/dev/null || true
-          fi
+          # Backup package list
+          echo "📦 Backing up packages..."
+          dpkg --get-selections > backup/packages.list
           
-          # Backup services
-          echo "🔧 Backing up services..."
-          SERVICE_DIRS=""
-          for dir in /etc/apache2 /etc/nginx /etc/mysql /etc/postgresql /var/www; do
-            [[ -d "$dir" ]] && SERVICE_DIRS="$SERVICE_DIRS $dir"
-          done
+          # Create combined backup
+          echo "📦 Creating final backup archive..."
+          tar -czf backup/latest.tar.gz -C backup .
           
-          if [[ -n "$SERVICE_DIRS" ]]; then
-            sudo tar -czf backup/services-backup.tar.gz \
-              --ignore-failed-read \
-              $SERVICE_DIRS 2>/dev/null || true
-          fi
-          
-          # Backup Tailscale state
-          if [[ -f "/var/lib/tailscale/tailscaled.state" ]]; then
-            echo "🌐 Backing up Tailscale state..."
-            sudo tar -czf backup/tailscale-state.tar.gz \
-              -C / \
-              var/lib/tailscale/tailscaled.state 2>/dev/null || true
-          fi
-          
-          # Backup package lists
-          echo "📦 Backing up package information..."
-          dpkg --get-selections > backup/installed-packages.list
-          apt-mark showauto > backup/auto-packages.list
-          snap list 2>/dev/null > backup/snap-packages.list || true
-          
-          # Create comprehensive manifest
-          echo "📝 Creating backup manifest..."
-          BACKUP_SIZE=$(du -sh backup | cut -f1)
-          DISK_USAGE=$(df -h / | awk 'NR==2{print $5}')
-          
-          cat > backup/manifest.json << EOF
-          {
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "version": "3.0",
-            "session": {
-              "start_time": "${{ steps.session.outputs.session_start || 'N/A' }}",
-              "user": "${{ env.VPS_USER }}",
-              "hostname": "$(hostname -f)"
-            },
-            "components": {
-              "user_data": {
-                "file": "${{ env.VPS_USER }}-home-full.tar.gz",
-                "size": "$(du -h backup/${{ env.VPS_USER }}-home-full.tar.gz 2>/dev/null | cut -f1 || echo '0')"
-              },
-              "system_config": {
-                "file": "system-config.tar.gz",
-                "size": "$(du -h backup/system-config.tar.gz 2>/dev/null | cut -f1 || echo '0')"
-              },
-              "services": {
-                "file": "services-backup.tar.gz",
-                "size": "$(du -h backup/services-backup.tar.gz 2>/dev/null | cut -f1 || echo '0')"
-              },
-              "packages": {
-                "dpkg_count": "$(wc -l < backup/installed-packages.list)",
-                "snap_count": "$(wc -l < backup/snap-packages.list 2>/dev/null || echo '0')"
-              }
-            },
-            "system": {
-              "tailscale_ip": "${{ steps.tailscale.outputs.tailscale_ip || 'not configured' }}",
-              "disk_usage": "$DISK_USAGE",
-              "total_backup_size": "$BACKUP_SIZE"
-            }
-          }
-          EOF
-          
-          # Output backup stats
-          echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
-          echo "✅ Backup created: $BACKUP_SIZE"
-          ls -lah backup/
+          echo "✅ Backup created: $(du -sh backup)"
 
-      - name: Upload backup to GitHub Releases
-        if: always() && steps.backup.outcome == 'success'
-        run: |
-          set -euo pipefail
-          
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          BACKUP_TAG="vps-backup-$TIMESTAMP"
-          
-          echo "☁️ Uploading backup: $BACKUP_TAG"
-          
-          # Create release notes
-          RELEASE_NOTES="## 🚀 Automated VPS Backup
-          
-          **Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          **User:** ${{ env.VPS_USER }}
-          **Hostname:** $(hostname -f)
-          **Size:** ${{ steps.backup.outputs.backup_size }}
-          **Session Duration:** ${{ inputs.session_timeout || '360' }} minutes
-          
-          ### 📦 Components
-          - User home directory
-          - System configurations  
-          - Service configurations
-          - Package lists
-          - Tailscale state (if configured)
-          
-          ### 📊 System Info
-          - Disk Usage: $(df -h / | awk 'NR==2{print $5}')
-          - Memory: $(free -h | awk 'NR==2{print $3"/"$2}')
-          - Uptime: $(uptime -p)
-          
-          ### 🔄 Restore Command
-          \`\`\`bash
-          gh workflow run vps.yml -f skip_restore=false
-          \`\`\`
-          "
-          
-          # Upload to release
-          for attempt in {1..3}; do
-            if gh release create "$BACKUP_TAG" \
-              backup/* \
-              --title "VPS Backup - $TIMESTAMP" \
-              --notes "$RELEASE_NOTES" \
-              --repo "${{ github.repository }}"; then
-              echo "✅ Backup uploaded successfully"
-              break
-            else
-              echo "⚠️ Upload attempt $attempt failed, retrying..."
-              sleep 10
-            fi
-          done
-
-      - name: Cleanup old backups
+      # ===== UPLOAD BACKUP =====
+      - name: Upload backup to MEGA
         if: always()
         run: |
-          set -euo pipefail
+          echo "☁️ Uploading backup to MEGA..."
+          rclone mkdir mega:${{ env.BACKUP_DIR }} || true
           
-          echo "🧹 Cleaning up old backups (retention: ${{ env.BACKUP_RETENTION_DAYS }} days)"
+          # Upload individual files for easy restoration
+          rclone copy backup/user-home.tar.gz mega:${{ env.BACKUP_DIR }} --progress
+          rclone copy backup/packages.list mega:${{ env.BACKUP_DIR }} --progress
+          rclone copy backup/system-config.tar.gz mega:${{ env.BACKUP_DIR }} --progress
           
-          # Calculate cutoff date
-          RETENTION_DAYS="${{ env.BACKUP_RETENTION_DAYS }}"
-          CUTOFF_DATE=$(date -u -d "$RETENTION_DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
-          CUTOFF_TIMESTAMP=$(date -d "$CUTOFF_DATE" +%s)
+          # Upload complete backup
+          rclone copy backup/latest.tar.gz mega:${{ env.BACKUP_DIR }} --progress
           
-          # Get all backup releases
-          RELEASES=$(gh release list --limit 100 --json tagName,createdAt --repo "${{ github.repository }}")
-          
-          # Count backups
-          TOTAL_BACKUPS=0
-          DELETED_BACKUPS=0
-          
-          # Process each release
-          echo "$RELEASES" | jq -c '.[]' | while read -r release; do
-            tag=$(echo "$release" | jq -r '.tagName')
-            created=$(echo "$release" | jq -r '.createdAt')
-            
-            if [[ "$tag" == vps-backup-* ]]; then
-              ((TOTAL_BACKUPS++))
-              
-              # Convert creation date to timestamp
-              if release_timestamp=$(date -d "$created" +%s 2>/dev/null); then
-                if [[ "$release_timestamp" -lt "$CUTOFF_TIMESTAMP" ]]; then
-                  echo "🗑️ Deleting old backup: $tag (created: $created)"
-                  if gh release delete "$tag" --yes --repo "${{ github.repository }}" 2>/dev/null; then
-                    ((DELETED_BACKUPS++))
-                  fi
-                else
-                  echo "✅ Keeping recent backup: $tag (created: $created)"
-                fi
-              fi
-            fi
-          done
-          
-          echo "📊 Cleanup complete: Deleted $DELETED_BACKUPS old backups"
+          echo "✅ Backup uploaded to MEGA"
 
-      - name: Final status report
+      # ===== FINAL REPORT =====
+      - name: Session report
         if: always()
         run: |
-          set -euo pipefail
-          
-          echo "
-          ╔══════════════════════════════════════════╗
-          ║     🚀 ROCKET VPS SESSION COMPLETE       ║
-          ╚══════════════════════════════════════════╝
-          "
-          
-          # Determine status emoji and message
-          case "${{ job.status }}" in
-            "cancelled")
-              STATUS="🟡 CANCELLED"
-              MESSAGE="Session was manually cancelled"
-              ;;
-            "failure")
-              STATUS="🔴 FAILED"
-              MESSAGE="Session encountered errors"
-              ;;
-            "success")
-              STATUS="🟢 SUCCESS"
-              MESSAGE="Session completed successfully"
-              ;;
-            *)
-              STATUS="⚪ UNKNOWN"
-              MESSAGE="Session status unknown"
-              ;;
-          esac
-          
-          echo "Status: $STATUS"
-          echo "Message: $MESSAGE"
-          echo ""
-          echo "📊 Session Statistics:"
-          echo "├─ Duration: ${{ inputs.session_timeout || '360' }} minutes"
-          echo "├─ User: ${{ env.VPS_USER }}"
-          echo "├─ Hostname: $(hostname -f)"
-          echo "├─ Backup Created: ${{ steps.backup.outcome == 'success' && 'Yes ✅' || 'No ❌' }}"
-          echo "├─ Backup Size: ${{ steps.backup.outputs.backup_size || 'N/A' }}"
-          echo "├─ Disk Usage: $(df -h / | awk 'NR==2{print $5}')"
-          echo "└─ Memory Usage: $(free -h | awk 'NR==2{print $3"/"$2}')"
-          echo ""
-          echo "🔗 Connection Info:"
-          echo "├─ Tailscale IP: ${{ steps.tailscale.outputs.tailscale_ip || 'Not configured' }}"
-          echo "├─ Tmate SSH: ${{ steps.session.outputs.tmate_ssh || 'Session ended' }}"
-          echo "└─ Tmate Web: ${{ steps.session.outputs.tmate_web || 'Session ended' }}"
-          echo ""
-          echo "📝 Next Steps:"
-          echo "├─ To restore this backup: gh workflow run ${{ github.workflow }} -f skip_restore=false"
-          echo "├─ To start fresh: gh workflow run ${{ github.workflow }} -f skip_restore=true"
-          echo "└─ View backups: gh release list --repo ${{ github.repository }}"
-          echo ""
-          echo "════════════════════════════════════════════"
-          echo "Thank you for using Rocket-Powered VPS! 🚀"
-          echo "════════════════════════════════════════════"
+          echo "=================================="
+          echo "VPS Session Completed"
+          echo "=================================="
+          echo "Status: ${{ job.status }}"
+          echo "Backup: ✅ Uploaded to MEGA"
+          echo "Next session will restore this state"
+          echo "=================================="
