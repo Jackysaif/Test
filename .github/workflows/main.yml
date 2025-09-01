@@ -3,8 +3,6 @@ name: Persistent VPS with Backup & Restore
 on:
   workflow_dispatch:
   workflow_call:
-  schedule:
-    - cron: "0 */6 * * *"  # every 6 hours
 
 jobs:
   vps:
@@ -18,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y unzip curl
+          sudo apt install -y unzip curl tmate tailscale
           curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
           unzip -a rclone-current-linux-amd64.zip
           cd rclone-*-linux-amd64
@@ -43,47 +41,63 @@ jobs:
           cat > ~/.config/rclone/rclone.conf <<EOF
           [mega]
           type = mega
-          user = rajeeshsksbx7@gmail.com
-          pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
           EOF
 
           echo "🔑 MEGA rclone configured successfully!"
           echo "📂 Listing MEGA remote root to confirm:"
           rclone ls mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
 
-      - name: Download latest backup from MEGA
+      - name: Restore latest backup (if exists)
         run: |
           mkdir -p restore
           if rclone copy mega:/vps-backup/latest.tar.gz restore/ --progress; then
             echo "✅ Backup found, restoring..."
+            sudo tar -xzf restore/latest.tar.gz -C /
           else
             echo "ℹ️ No previous backup found"
           fi
 
-      - name: Restore backup if exists
+      - name: Restore installed packages (if list exists)
         run: |
-          if [ -f restore/latest.tar.gz ]; then
-            echo "📦 Restoring backup..."
-            sudo tar -xzf restore/latest.tar.gz -C /
+          if [ -f backup/installed-packages.list ]; then
+            echo "📦 Restoring installed packages..."
+            sudo dpkg --set-selections < backup/installed-packages.list
+            sudo apt-get -y dselect-upgrade
+            echo "✅ Packages restored"
           else
-            echo "⚠️ No backup to restore"
+            echo "ℹ️ No package list found, skipping"
           fi
 
       - name: Setup Tailscale
         run: |
-          set -x
-          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo mkdir -p /var/lib/tailscale
+          if rclone copy mega:/vps-backup/tailscale.state /var/lib/tailscale/ --progress; then
+            echo "✅ Restored Tailscale state"
+          else
+            echo "ℹ️ No previous Tailscale state, fresh login"
+          fi
+
+          sudo tailscaled --state=/var/lib/tailscale/tailscale.state --tun=userspace-networking &
+          sleep 5
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
-          echo "🎉 Connected to Tailscale!"
           tailscale ip -4
-          echo "👤 Username: jacky"
-          echo "🔑 Password: root"
+
+      - name: Start tmate session (keep VPS alive)
+        run: |
+          echo "⏳ Starting tmate session..."
+          tmate -F &
+          sleep 10
+          tmate show-messages || true
 
       - name: Backup VPS data
         run: |
           mkdir -p backup
           echo "📦 Backing up user jacky home directory..."
           sudo tar --exclude='*.tar.gz' -czf backup/jacky-home.tar.gz /home/jacky
+          echo "📦 Saving list of installed packages..."
+          dpkg --get-selections > backup/installed-packages.list
           echo "✅ Backup complete"
           ls -lh backup/
 
@@ -94,6 +108,7 @@ jobs:
           rclone mkdir mega:/vps-backup || true
           echo "☁️ Uploading backup to MEGA..."
           rclone copy $BACKUP_FILE mega:/vps-backup --progress
+          rclone copy /var/lib/tailscale/tailscale.state mega:/vps-backup --progress || true
           echo "✅ Backup uploaded to MEGA"
 
       - name: Final backup on cancel
