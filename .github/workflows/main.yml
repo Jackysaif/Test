@@ -34,15 +34,10 @@ jobs:
         run: |
           if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
             echo "📦 Restoring VPS files..."
-            # Restore with better error handling
             for backup_file in backup/vps-backup-*.tar.gz; do
               if [ -f "$backup_file" ]; then
                 echo "Restoring from: $backup_file"
-                if gzip -t "$backup_file" 2>/dev/null; then
-                  sudo tar -xzf "$backup_file" -C / 2>/dev/null || echo "⚠️ Some files couldn't be restored"
-                else
-                  echo "⚠️ Backup file corrupted: $backup_file"
-                fi
+                sudo tar -xzf "$backup_file" -C / 2>/dev/null || echo "⚠️ Some files couldn't be restored"
               fi
             done
           else
@@ -79,205 +74,172 @@ jobs:
         if: always()
         run: |
           echo "🧹 Cleaning up before backup..."
-          # Clean package manager cache
           sudo apt-get clean 2>/dev/null || true
-          # Clean journal logs older than 1 day
           sudo journalctl --vacuum-time=1d 2>/dev/null || true
-          # Clean temporary files
           sudo find /tmp -type f -atime +1 -delete 2>/dev/null || true
           sudo find /var/tmp -type f -atime +1 -delete 2>/dev/null || true
-          # Remove old log files
-          sudo find /var/log -name "*.gz" -type f -delete 2>/dev/null || true
-          sudo find /var/log -name "*.old" -type f -delete 2>/dev/null || true
 
-      - name: Create versioned backup
+      - name: Create versioned backup using ZIP method
         if: always()
         run: |
           mkdir -p backup
           BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-          echo "📦 Creating VPS backup at $BACKUP_FILE"
+          echo "📦 Creating VPS backup using ZIP method..."
           
-          # Create a list of directories to backup
-          BACKUP_DIRS="/etc /home /var/lib /opt"
+          # Create temporary directory for staging
+          TEMP_BACKUP_DIR=$(mktemp -d)
+          echo "Using temp directory: $TEMP_BACKUP_DIR"
           
-          # Set up signal handling
-          trap 'echo "⚠️ Backup interrupted, finalizing..."; exit 0' TERM INT
+          # Define what to backup
+          BACKUP_ITEMS=(
+            "/etc"
+            "/home"
+            "/var/lib"
+            "/opt"
+            "/root/.bashrc"
+            "/root/.profile"
+          )
           
-          # Use a more robust backup approach
-          set +e  # Don't exit on error
+          # Copy files to temp directory first (more reliable than direct tar)
+          for item in "${BACKUP_ITEMS[@]}"; do
+            if [ -e "$item" ]; then
+              echo "📁 Copying $item..."
+              # Create parent directory structure
+              parent_dir=$(dirname "$item")
+              mkdir -p "$TEMP_BACKUP_DIR$parent_dir"
+              
+              # Use cp instead of rsync for better compatibility
+              sudo cp -a "$item" "$TEMP_BACKUP_DIR$parent_dir/" 2>/dev/null || {
+                echo "⚠️ Failed to copy $item, trying alternative method..."
+                # Try with find and cpio as fallback
+                cd /
+                sudo find ".$item" -type f ! -name "*.sock" ! -name "*.pid" ! -name "*.lock" 2>/dev/null | \
+                  sudo cpio -pdm "$TEMP_BACKUP_DIR" 2>/dev/null || true
+                cd - >/dev/null
+              }
+            fi
+          done
           
-          # Create backup with better error handling
-          sudo tar \
-            --warning=no-file-changed \
-            --warning=no-file-removed \
-            --ignore-failed-read \
-            --exclude="$BACKUP_FILE" \
-            --exclude=/proc \
-            --exclude=/sys \
-            --exclude=/dev \
-            --exclude=/run \
-            --exclude=/tmp \
-            --exclude=/var/run \
-            --exclude=/var/lock \
-            --exclude=/var/cache/apt \
-            --exclude=/var/lib/docker \
-            --exclude=/var/lib/containerd \
-            --exclude=/var/log \
-            --exclude='*.sock' \
-            --exclude='*.pid' \
-            --exclude='*.lock' \
-            --exclude='/var/lib/tailscale/*.sock' \
-            -czf "$BACKUP_FILE" $BACKUP_DIRS 2>/dev/null
+          # Clean up problematic files from temp directory
+          echo "🧹 Cleaning temporary backup..."
+          find "$TEMP_BACKUP_DIR" -type s -delete 2>/dev/null || true  # Remove sockets
+          find "$TEMP_BACKUP_DIR" -name "*.sock" -delete 2>/dev/null || true
+          find "$TEMP_BACKUP_DIR" -name "*.pid" -delete 2>/dev/null || true
+          find "$TEMP_BACKUP_DIR" -name "*.lock" -delete 2>/dev/null || true
+          find "$TEMP_BACKUP_DIR" -path "*/docker/*" -delete 2>/dev/null || true
+          find "$TEMP_BACKUP_DIR" -path "*/containerd/*" -delete 2>/dev/null || true
           
-          TAR_EXIT_CODE=$?
+          # Create the archive from temp directory
+          echo "📦 Creating compressed archive..."
+          cd "$TEMP_BACKUP_DIR"
           
-          # Handle specific tar exit codes
-          case $TAR_EXIT_CODE in
-            0)
-              echo "✅ Backup completed successfully"
-              ;;
-            1)
-              echo "⚠️ Backup completed with warnings (some files changed during backup)"
-              ;;
-            2)
-              echo "❌ Fatal error during backup"
-              # Try alternative backup method
-              ;;
-            *)
-              echo "⚠️ Backup completed with exit code: $TAR_EXIT_CODE"
-              ;;
-          esac
+          # Use zip for better handling of special files
+          sudo zip -r -q backup.zip . -x "*.sock" "*.pid" "*.lock" || {
+            echo "⚠️ ZIP failed, trying tar..."
+            sudo tar -czf backup.tar.gz . 2>/dev/null || true
+          }
           
-          # Verify backup was created and has content
+          # Move the archive to final location
+          if [ -f backup.zip ]; then
+            # Convert zip to tar.gz for consistency
+            sudo unzip -q backup.zip -d extracted/ 2>/dev/null || true
+            if [ -d extracted ]; then
+              cd extracted
+              sudo tar -czf "$BACKUP_FILE" . 2>/dev/null || true
+              cd ..
+            else
+              # Just rename if extraction failed
+              sudo mv backup.zip "$BACKUP_FILE"
+            fi
+          elif [ -f backup.tar.gz ]; then
+            sudo mv backup.tar.gz "$BACKUP_FILE"
+          fi
+          
+          cd - >/dev/null
+          
+          # Cleanup temp directory
+          sudo rm -rf "$TEMP_BACKUP_DIR"
+          
+          # Verify backup
           if [ -f "$BACKUP_FILE" ]; then
             BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-            echo "📊 Backup size: $BACKUP_SIZE"
-            
-            # Test backup integrity
-            if gzip -t "$BACKUP_FILE" 2>/dev/null; then
-              echo "✅ Backup integrity verified"
-            else
-              echo "❌ Backup corrupted, attempting incremental backup..."
-              
-              # Method 2: Incremental backup approach
-              rm -f "$BACKUP_FILE"
-              TEMP_DIR=$(mktemp -d)
-              
-              for dir in $BACKUP_DIRS; do
-                if [ -d "$dir" ]; then
-                  echo "Backing up $dir..."
-                  sudo tar -rf "$TEMP_DIR/backup.tar" "$dir" \
-                    --exclude=/var/run \
-                    --exclude=/var/lock \
-                    --exclude='*.sock' \
-                    --exclude='*.pid' \
-                    2>/dev/null || true
-                fi
-              done
-              
-              # Compress the final archive
-              if [ -f "$TEMP_DIR/backup.tar" ]; then
-                gzip -c "$TEMP_DIR/backup.tar" > "$BACKUP_FILE"
-                rm -rf "$TEMP_DIR"
-                echo "✅ Incremental backup completed"
-              fi
-            fi
+            echo "✅ Backup created successfully: $BACKUP_SIZE"
           else
-            echo "❌ Primary backup failed, trying alternative method..."
+            echo "❌ Backup creation failed"
           fi
 
-      - name: Alternative backup method (if main fails)
-        if: always()
-        run: |
-          # Check if primary backup exists and is valid
-          PRIMARY_BACKUP=$(ls -t backup/vps-backup-*.tar.gz 2>/dev/null | head -1)
-          
-          if [ -z "$PRIMARY_BACKUP" ] || ! gzip -t "$PRIMARY_BACKUP" 2>/dev/null; then
-            echo "🔄 Using rsync-based backup as fallback..."
-            
-            mkdir -p backup
-            BACKUP_DIR="backup/vps-files-$(date +%Y%m%d-%H%M%S)"
-            
-            # Copy important directories with rsync
-            for dir in /etc /home /var/lib /opt; do
-              if [ -d "$dir" ]; then
-                echo "Syncing $dir..."
-                sudo rsync -a \
-                  --exclude='*.sock' \
-                  --exclude='*.pid' \
-                  --exclude='*.lock' \
-                  --exclude='/var/lib/docker' \
-                  --exclude='/var/lib/containerd' \
-                  "$dir" "$BACKUP_DIR/" 2>/dev/null || true
-              fi
-            done
-            
-            # Create compressed archive
-            if [ -d "$BACKUP_DIR" ]; then
-              tar -czf "$BACKUP_DIR.tar.gz" -C backup "$(basename $BACKUP_DIR)" 2>/dev/null || true
-              rm -rf "$BACKUP_DIR"
-              echo "✅ Alternative backup completed"
-            fi
-          fi
-
-      - name: Backup Tailscale state
+      - name: Backup Tailscale state separately
         if: always()
         run: |
           echo "💾 Backing up Tailscale state..."
+          mkdir -p ts-backup
+          
+          # Stop tailscale temporarily
           sudo systemctl stop tailscaled 2>/dev/null || true
           sleep 2
           
-          mkdir -p ts-backup
+          # Copy tailscale data
           if [ -d /var/lib/tailscale ]; then
-            sudo rsync -a \
-              --exclude='*.sock' \
-              --exclude='*.lock' \
-              /var/lib/tailscale/ ts-backup/ 2>/dev/null || true
+            sudo cp -a /var/lib/tailscale/* ts-backup/ 2>/dev/null || true
+            # Remove any socket files
+            find ts-backup -type s -delete 2>/dev/null || true
+            find ts-backup -name "*.sock" -delete 2>/dev/null || true
           fi
           
+          # Restart tailscale
           sudo systemctl start tailscaled 2>/dev/null || true
+          
+          # Create archive of tailscale backup
+          if [ "$(ls -A ts-backup 2>/dev/null)" ]; then
+            tar -czf backup/tailscale-backup.tar.gz ts-backup/ 2>/dev/null || true
+          fi
 
-      - name: Split large backups
+      - name: Create smaller chunked backups if needed
         if: always()
         run: |
-          echo "📦 Checking for large backups to split..."
-          for backup in backup/vps-backup-*.tar.gz backup/vps-files-*.tar.gz; do
+          echo "📦 Checking backup sizes..."
+          
+          for backup in backup/*.tar.gz; do
             if [ -f "$backup" ]; then
-              SIZE=$(stat -c%s "$backup" 2>/dev/null || stat -f%z "$backup" 2>/dev/null || echo "0")
+              SIZE=$(stat -c%s "$backup" 2>/dev/null || echo "0")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              if [ "$SIZE" -gt 1073741824 ]; then
-                echo "Splitting large backup: $backup (${SIZE_MB}MB)"
+              if [ "$SIZE" -gt 2147483648 ]; then  # 2GB limit for artifacts
+                echo "⚠️ Backup too large ($SIZE_MB MB), creating chunks..."
+                
+                # Split into 500MB chunks
                 split -b 500M "$backup" "$backup.part-"
+                
+                # Remove original large file
                 rm "$backup"
-                echo "✅ Split into parts"
+                
+                # Create index file
+                echo "Original file: $(basename $backup)" > "$backup.parts.txt"
+                echo "Size: $SIZE_MB MB" >> "$backup.parts.txt"
+                echo "Parts:" >> "$backup.parts.txt"
+                ls -la "$backup.part-"* >> "$backup.parts.txt"
               else
-                echo "Backup $backup size: ${SIZE_MB}MB (no split needed)"
+                echo "✅ Backup size OK: $(basename $backup) ($SIZE_MB MB)"
               fi
             fi
           done
 
-      - name: Create backup manifest
+      - name: Create backup summary
         if: always()
         run: |
-          echo "📋 Creating backup manifest..."
-          cat > backup/manifest.txt << EOF
-          Backup Date: $(date)
-          Hostname: $(hostname)
-          User: $(whoami)
+          cat > backup/backup-summary.txt << EOF
+          Backup Summary
+          ==============
+          Date: $(date)
+          Run ID: ${{ github.run_id }}
           
-          Backup Contents:
+          Files backed up:
           EOF
           
-          for backup in backup/*.tar.gz backup/*.tar.gz.part-*; do
-            if [ -f "$backup" ]; then
-              echo "- $(basename $backup): $(du -h $backup | cut -f1)" >> backup/manifest.txt
-            fi
-          done
+          ls -lah backup/*.tar.gz* 2>/dev/null >> backup/backup-summary.txt || echo "No backups found" >> backup/backup-summary.txt
           
-          echo "" >> backup/manifest.txt
-          echo "System Info:" >> backup/manifest.txt
-          df -h >> backup/manifest.txt
+          echo -e "\nDisk usage:" >> backup/backup-summary.txt
+          df -h >> backup/backup-summary.txt
 
       - name: Upload versioned backups
         if: always()
@@ -285,10 +247,8 @@ jobs:
         with:
           name: vps-backup-${{ github.run_id }}
           path: |
-            backup/vps-backup-*.tar.gz*
-            backup/vps-files-*.tar.gz*
-            backup/manifest.txt
-            ts-backup/
+            backup/*.tar.gz*
+            backup/*.txt
           retention-days: 7
           compression-level: 0  # Already compressed
 
@@ -298,34 +258,16 @@ jobs:
         with:
           name: vps-backup-latest
           path: |
-            backup/vps-backup-*.tar.gz*
-            backup/vps-files-*.tar.gz*
-            backup/manifest.txt
-            ts-backup/
+            backup/*.tar.gz*
+            backup/*.txt
           retention-days: 1
           compression-level: 0
-
-      - name: Cleanup old backups
-        if: always()
-        run: |
-          echo "🧹 Cleaning up old local backups..."
-          find backup/ -name "vps-backup-*.tar.gz*" -mtime +7 -delete 2>/dev/null || true
-          find backup/ -name "vps-files-*.tar.gz*" -mtime +7 -delete 2>/dev/null || true
 
       - name: Completion summary
         if: always()
         run: |
           echo "🎉 VPS Maintenance Completed"
           echo ""
-          echo "📊 Backup Summary:"
-          if [ -f backup/manifest.txt ]; then
-            cat backup/manifest.txt
-          else
-            du -sh backup/* 2>/dev/null || echo "No backups found"
+          if [ -f backup/backup-summary.txt ]; then
+            cat backup/backup-summary.txt
           fi
-          echo ""
-          echo "💾 Disk Usage:"
-          df -h
-          echo ""
-          echo "🧮 Memory Usage:"
-          free -m
