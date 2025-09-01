@@ -28,7 +28,7 @@ jobs:
       - name: Configure rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<'EOF'
+          cat <<EOF > ~/.config/rclone/rclone.conf
 [mega]
 type = mega
 user = rajeeshsksbx7@gmail.com
