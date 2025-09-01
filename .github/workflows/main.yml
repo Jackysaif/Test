@@ -108,13 +108,13 @@ jobs:
           echo "👤 Username: jacky"
           echo "🔑 Password: root"
 
-
       # === Tmate Session ===
       - name: Start Tmate session (keep VPS alive)
         run: |
           echo "🔗 Starting tmate session..."
           tmate -F -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔑 SSH connection string:"
           tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
           echo "🕒 VPS will stay alive for 21600s (6 hours)"
           sleep 21600
