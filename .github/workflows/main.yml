@@ -39,7 +39,7 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "Hostname set to $(hostname)"
 
-      # 4. Download latest backup from GitHub Releases with authentication
+            # 4. Download latest backup from GitHub Releases with authentication
       - name: Download latest backup
         run: |
           mkdir -p restore
@@ -50,25 +50,73 @@ jobs:
           
           if [ -n "$LATEST_RELEASE" ] && [ "$LATEST_RELEASE" != "null" ]; then
             echo "📦 Downloading backup from release: $LATEST_RELEASE"
-            # Download with authentication
-            curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              -o restore/latest.tar.gz \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_RELEASE" | \
-                grep -A 10 '"assets":' | grep '"id":' | head -1 | cut -d':' -f2 | tr -d ' ,')" \
-              || echo "⚠️ Could not download backup from release"
             
-            # Check if download was successful
-            if [ -f "restore/latest.tar.gz" ] && file restore/latest.tar.gz | grep -q "gzip compressed data"; then
-              echo "✅ Backup downloaded successfully"
-            else
-              echo "⚠️ Download failed or file is not a valid backup"
-              rm -f restore/latest.tar.gz
-            fi
+            # Get all assets from the release
+            ASSETS_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_RELEASE")
+            
+            # Download each asset
+            echo "$ASSETS_JSON" | grep '"name":' | cut -d'"' -f4 | while read asset_name; do
+              if [[ "$asset_name" == *.tar.gz || "$asset_name" == *.list ]]; then
+                echo "Downloading $asset_name..."
+                asset_id=$(echo "$ASSETS_JSON" | grep -A 1 "\"name\": \"$asset_name\"" | grep '"id":' | cut -d':' -f2 | tr -d ' ,')
+                
+                if [ -n "$asset_id" ]; then
+                  curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                    -H "Accept: application/octet-stream" \
+                    -o "restore/$asset_name" \
+                    "https://api.github.com/repos/${{ github.repository }}/releases/assets/$asset_id" \
+                    && echo "✅ Downloaded $asset_name" \
+                    || echo "⚠️ Failed to download $asset_name"
+                fi
+              fi
+            done
+            
           else
             echo "⚠️ No releases found, starting fresh"
           fi
+
+      # 5. Restore backup if exists
+      - name: Restore backup if exists
+        run: |
+          echo "🔄 Restoring backup..."
+          
+          # Restore jacky user data (all files including hidden)
+          if [ -f "restore/jacky-home-full.tar.gz" ] && file restore/jacky-home-full.tar.gz | grep -q "gzip compressed data"; then
+            echo "📦 Restoring jacky user data (all files)..."
+            sudo tar -xzf restore/jacky-home-full.tar.gz -C /
+          else
+            echo "⚠️ No jacky user data found to restore"
+          fi
+          
+          # Restore services if they were installed
+          if [ -f "restore/services-backup.tar.gz" ] && file restore/services-backup.tar.gz | grep -q "gzip compressed data"; then
+            echo "🔄 Restoring system services (Apache, MySQL, etc)..."
+            sudo tar -xzf restore/services-backup.tar.gz -C /
+          else
+            echo "⚠️ No system services found to restore"
+          fi
+          
+          # Restore system configurations
+          if [ -f "restore/system-config.tar.gz" ] && file restore/system-config.tar.gz | grep -q "gzip compressed data"; then
+            echo "🔄 Restoring system configurations..."
+            sudo tar -xzf restore/system-config.tar.gz -C /
+          else
+            echo "⚠️ No system configurations found to restore"
+          fi
+          
+          # Reinstall previously installed packages
+          if [ -f "restore/installed-packages.list" ]; then
+            echo "📦 Reinstalling previous packages..."
+            sudo apt-get update
+            sudo dpkg --set-selections < restore/installed-packages.list
+            sudo apt-get upgrade -y
+            sudo apt-get dselect-upgrade -y
+          else
+            echo "⚠️ No installed packages list found to restore"
+          fi
+          
+          echo "✅ Restoration completed"
 
             # 5. Restore backup if exists
       - name: Restore backup if exists
