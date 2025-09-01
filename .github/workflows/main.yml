@@ -27,14 +27,27 @@ jobs:
           if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
             echo "📦 Restoring VPS data..."
             sudo tar -xzf backup/vps-backup-*.tar.gz -C / || true
-            
+
+            # Ensure restored files are accessible
             if [ -d /home/jacky ]; then
               sudo chown -R jacky:jacky /home/jacky
             fi
-            
+
+            # If root SSH keys exist, copy them to jacky
+            if [ -d /root/.ssh ]; then
+              sudo mkdir -p /home/jacky/.ssh
+              sudo cp -a /root/.ssh/* /home/jacky/.ssh/ || true
+              sudo chown -R jacky:jacky /home/jacky/.ssh
+              sudo chmod 700 /home/jacky/.ssh
+              sudo chmod 600 /home/jacky/.ssh/* || true
+              echo "🔑 SSH keys copied to jacky"
+            fi
+
+            # Restart tailscale if state was restored
             if [ -f /var/lib/tailscale/tailscaled.state ]; then
               echo "🔄 Restoring Tailscale state..."
-              sudo systemctl restart tailscaled || true
+              sudo systemctl restart tailscaled || sudo pkill -f tailscaled || true
+              sleep 3
             fi
           else
             echo "ℹ️ No previous backup found, starting fresh."
@@ -57,12 +70,20 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable tailscaled
-          sudo systemctl start tailscaled
+          sudo tailscaled &
           sleep 5
-          sudo tailscale up \
-            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
-            --hostname github-vps \
-            --ssh
+          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
+
+      - name: Show Tailscale Connection Info
+        run: |
+          echo "=== Tailscale Status ==="
+          tailscale ip -4 || true
+          tailscale ip -6 || true
+          tailscale status || true
+          echo ""
+          echo "=== User Credentials ==="
+          echo "Username: jacky"
+          echo "Password: root"
 
       - name: System Info
         run: |
@@ -100,12 +121,22 @@ jobs:
             fi
           done
 
+          # Optional: backup aaPanel data if installed
+          if [ -d "/www/server" ]; then
+            echo "📦 Backing up aaPanel data..."
+            sudo mkdir -p "$TEMP_BACKUP/www"
+            sudo cp -a /www/server "$TEMP_BACKUP/www/"
+          fi
+
           BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
           sudo tar -czf "$BACKUP_FILE" -C "$TEMP_BACKUP" .
-          sudo chown $USER:$USER "$BACKUP_FILE"
+
+          # Ensure artifact is owned by runner so it's downloadable next session
+          sudo chown runner:runner "$BACKUP_FILE"
           sudo rm -rf "$TEMP_BACKUP"
 
           echo "✅ Backup created: $BACKUP_FILE"
+          du -sh "$BACKUP_FILE"
 
       - name: Upload VPS backup artifact
         if: always()
@@ -120,6 +151,6 @@ jobs:
         if: always()
         run: |
           echo "🎉 VPS Backup & Restore Workflow Completed"
-          if ls backup/*.tar.gz 1>/dev/null 2>&1; then
+          if compgen -G "backup/*.tar.gz" > /dev/null; then
             du -h backup/*.tar.gz
           fi
