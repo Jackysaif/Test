@@ -1,456 +1,137 @@
-name: VPS Operations - Working Version
+name: Persistent VPS (Artifacts)
+
 on:
   workflow_dispatch:
-    inputs:
-      session_duration:
-        description: 'Session duration in minutes (default: 300, max: 360)'
-        required: false
-        default: '300'
-        type: string
-      hostname_prefix:
-        description: 'Hostname prefix (default: vps)'
-        required: false
-        default: 'vps'
-        type: string
-  push:
-    branches:
-      - main
-
-env:
-  DEBIAN_FRONTEND: noninteractive
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
-  vps-operations:
+  vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 370
-    
+    timeout-minutes: 370   # slightly over 6h
     steps:
-      # Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Set environment variables
-      - name: Set environment variables
-        run: |
-          # Set timestamp
-          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-          echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
-          echo "START_TIME=$(date -u +%s)" >> $GITHUB_ENV
-          
-          # Validate and set session duration
-          DURATION="${{ github.event.inputs.session_duration || '300' }}"
-          if [[ $DURATION -gt 360 ]]; then
-            DURATION=360
-          fi
-          DURATION_SECONDS=$((DURATION * 60))
-          echo "SESSION_DURATION=${DURATION_SECONDS}" >> $GITHUB_ENV
-          echo "SESSION_DURATION_MIN=${DURATION}" >> $GITHUB_ENV
-          
-          # Set hostname
-          HOSTNAME_PREFIX="${{ github.event.inputs.hostname_prefix || 'vps' }}"
-          echo "VPS_HOSTNAME=${HOSTNAME_PREFIX}-${TIMESTAMP}" >> $GITHUB_ENV
-          
-          # Generate secure password
-          SECURE_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
-          echo "::add-mask::${SECURE_PASSWORD}"
-          echo "SECURE_PASSWORD=${SECURE_PASSWORD}" >> $GITHUB_ENV
-          
-          echo "🚀 VPS Setup initialized:"
-          echo "  - Hostname: ${HOSTNAME_PREFIX}-${TIMESTAMP}"
-          echo "  - Duration: ${DURATION} minutes"
-
-      # Install packages
+      # --- Setup environment ---
       - name: Install required packages
         run: |
-          set -e
-          echo "📦 Installing system packages..."
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            curl wget unzip zip \
-            net-tools htop tree neofetch \
-            git vim nano \
-            python3 python3-pip \
-            nodejs npm \
-            nginx \
-            fail2ban ufw \
-            screen tmux \
-            jq bc
-          echo "✅ Package installation completed"
+          sudo apt update
+          sudo apt install -y sudo curl unzip zip tmate net-tools neofetch
 
-      # Create secure user
-      - name: Create secure user account
+      - name: Set timestamps
         run: |
-          echo "👤 Creating user account..."
-          sudo useradd -m -s /bin/bash -G sudo vpsuser || true
-          echo "vpsuser:${{ env.SECURE_PASSWORD }}" | sudo chpasswd
-          sudo mkdir -p /home/vpsuser/{workspace,projects,downloads,scripts}
-          sudo chown -R vpsuser:vpsuser /home/vpsuser/
-          echo "✅ User 'vpsuser' created"
+          echo "START_TIME=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
 
-      # Configure security
-      - name: Configure basic security
-        run: |
-          echo "🔒 Configuring system security..."
-          
-          # Configure UFW firewall
-          sudo ufw --force reset >/dev/null 2>&1
-          sudo ufw default deny incoming >/dev/null 2>&1
-          sudo ufw default allow outgoing >/dev/null 2>&1
-          sudo ufw allow 22/tcp >/dev/null 2>&1
-          sudo ufw allow 80/tcp >/dev/null 2>&1
-          sudo ufw allow 443/tcp >/dev/null 2>&1
-          sudo ufw allow 3000:8999/tcp >/dev/null 2>&1
-          sudo ufw --force enable >/dev/null 2>&1
-          
-          # Start services
-          sudo systemctl enable nginx fail2ban >/dev/null 2>&1
-          sudo systemctl start nginx fail2ban >/dev/null 2>&1
-          
-          echo "✅ Security configured"
-
-      # Setup Tailscale
-      - name: Install and configure Tailscale
-        run: |
-          set -e
-          echo "🌐 Setting up Tailscale VPN..."
-          
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]]; then
-            echo "❌ TAILSCALE_AUTHKEY not found in secrets!"
-            exit 1
-          fi
-          
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo pkill tailscaled || true
-          sudo tailscaled --cleanup || true
-          
-          # Start daemon with existing state if available
-          if [[ -f /var/lib/tailscale/tailscaled.state ]]; then
-            echo "🔄 Using existing Tailscale state..."
-          fi
-          
-          sudo nohup tailscaled --state=/var/lib/tailscale/tailscaled.state > /tmp/tailscaled.log 2>&1 &
-          sleep 10
-          
-          # Connect to Tailscale
-          if sudo tailscale up \
-            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-            --hostname="${{ env.VPS_HOSTNAME }}" \
-            --accept-routes \
-            --accept-dns; then
-            
-            TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Not available")
-            echo "✅ Tailscale connected successfully"
-            echo "🌐 Tailscale IP: ${TAILSCALE_IP}"
-            echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
-            
-            # Create connection info
-            cat > /tmp/connection_info.txt << EOF
-          === VPS CONNECTION INFO ===
-          Hostname: ${{ env.VPS_HOSTNAME }}
-          Tailscale IP: ${TAILSCALE_IP}
-          Username: vpsuser
-          Password: ${{ env.SECURE_PASSWORD }}
-          Start Time: $(date)
-          Duration: ${{ env.SESSION_DURATION_MIN }} minutes
-          ===============================
-          EOF
-          else
-            echo "⚠️  Tailscale connection failed"
-            echo "TAILSCALE_IP=Failed" >> $GITHUB_ENV
-          fi
-
-      # Restore Tailscale state if present
-      - name: Restore Tailscale state if present
-        run: |
-          echo "🔄 Checking for existing Tailscale state..."
-          if [[ -f /tmp/vps-restore/tailscale/tailscaled.state ]]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /tmp/vps-restore/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chown root:root /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            echo "✅ Tailscale state restored"
-          else
-            echo "ℹ️  No existing Tailscale state found"
-          fi
-        run: |
-          echo "📋 Generating system information..."
-          
-          cat > /tmp/system_info.txt << EOF
-          ╔══════════════════════════════════════════════════════════════╗
-          ║                        VPS SESSION ACTIVE                    ║
-          ╚══════════════════════════════════════════════════════════════╝
-          
-          🖥️  System Information:
-          $(neofetch --stdout 2>/dev/null || echo "System: Ubuntu 22.04")
-          
-          🌐 Network Information:
-          $(ip addr show | grep -E "inet.*scope global" || echo "Network info not available")
-          
-          💾 Disk Usage:
-          $(df -h / | tail -1)
-          
-          🔧 Services Status:
-          - nginx: $(systemctl is-active nginx 2>/dev/null || echo "inactive")
-          - fail2ban: $(systemctl is-active fail2ban 2>/dev/null || echo "inactive")
-          - tailscaled: $(systemctl is-active tailscaled 2>/dev/null || echo "inactive")
-          
-          📝 Quick Commands:
-          - Check system: neofetch
-          - Monitor resources: htop
-          - Network status: sudo tailscale status
-          - Web root: /var/www/html
-          - Projects: ~/projects/
-          
-          EOF
-
-      # Download and restore previous backup if available
-      - name: Restore previous VPS data if available
-        run: |
-          echo "📂 Checking for previous VPS backup..."
-          
-          # Create restore directories
-          mkdir -p /tmp/vps-restore
-          
-          # Look for the most recent backup artifact (this would need to be manually downloaded)
-          # Since we can't automatically download artifacts, we'll check if user manually placed backup
-          if [[ -f "vps-backup.zip" ]] || [[ -d "vps-backup" ]]; then
-            echo "📦 Found backup data, starting restoration..."
-            
-            # Extract if it's a zip file
-            if [[ -f "vps-backup.zip" ]]; then
-              unzip -q vps-backup.zip -d /tmp/vps-restore/
-            elif [[ -d "vps-backup" ]]; then
-              cp -r vps-backup/* /tmp/vps-restore/
-            fi
-            
-            # Restore user data
-            if [[ -f /tmp/vps-restore/home/vpsuser-backup.tar.gz ]]; then
-              echo "🏠 Restoring user home directory..."
-              sudo mkdir -p /home/vpsuser
-              sudo tar -xzf /tmp/vps-restore/home/vpsuser-backup.tar.gz -C /home/vpsuser/ 2>/dev/null || true
-              sudo chown -R vpsuser:vpsuser /home/vpsuser/
-              echo "✅ User data restored"
-            fi
-            
-            # Restore projects
-            if [[ -f /tmp/vps-restore/projects/projects-backup.tar.gz ]]; then
-              echo "📁 Restoring projects directory..."
-              sudo mkdir -p /home/vpsuser/projects
-              sudo tar -xzf /tmp/vps-restore/projects/projects-backup.tar.gz -C /home/vpsuser/projects/ 2>/dev/null || true
-              sudo chown -R vpsuser:vpsuser /home/vpsuser/projects/
-              echo "✅ Projects restored"
-            fi
-            
-            # Restore web content
-            if [[ -f /tmp/vps-restore/www/www-backup.tar.gz ]]; then
-              echo "🌐 Restoring web content..."
-              sudo tar -xzf /tmp/vps-restore/www/www-backup.tar.gz -C /var/www/ 2>/dev/null || true
-              sudo chown -R www-data:www-data /var/www/
-              echo "✅ Web content restored"
-            fi
-            
-            # Restore configurations
-            if [[ -f /tmp/vps-restore/config/config-backup.tar.gz ]]; then
-              echo "⚙️ Restoring configurations..."
-              sudo tar -xzf /tmp/vps-restore/config/config-backup.tar.gz -C /etc/ 2>/dev/null || true
-              echo "✅ Configurations restored"
-            fi
-            
-            echo "🎉 VPS data restoration completed!"
-          else
-            echo "ℹ️  No previous backup found. Starting fresh VPS session."
-            echo "💡 To restore from previous session:"
-            echo "   1. Download backup artifact from previous workflow run"
-            echo "   2. Extract and commit 'vps-backup' folder to your repository"
-            echo "   3. Run workflow again to restore data"
-          fi
-          
-          # Create backup script for final backup only
-          cat > /tmp/create_backup.sh << 'EOF'
-          #!/bin/bash
-          echo "🔄 [$(date)] Creating final backup..."
-          
-          # Create backup directories
-          mkdir -p /tmp/vps-backup/{home,projects,www,config}
-          
-          # Backup user data (excluding cache)
-          if [[ -d /home/vpsuser ]]; then
-            echo "💾 Backing up user data..."
-            tar -czf /tmp/vps-backup/home/vpsuser-backup.tar.gz \
-              -C /home/vpsuser \
-              --exclude='.cache' \
-              --exclude='.local/share/Trash' \
-              --exclude='*.log' \
-              . 2>/dev/null || true
-          fi
-          
-          # Backup projects
-          if [[ -d /home/vpsuser/projects ]] && [[ -n "$(ls -A /home/vpsuser/projects 2>/dev/null)" ]]; then
-            echo "📁 Backing up projects..."
-            tar -czf /tmp/vps-backup/projects/projects-backup.tar.gz \
-              -C /home/vpsuser/projects \
-              --exclude='node_modules' \
-              --exclude='*.log' \
-              . 2>/dev/null || true
-          fi
-          
-          # Backup web content
-          if [[ -d /var/www ]] && [[ -n "$(ls -A /var/www 2>/dev/null)" ]]; then
-            echo "🌐 Backing up web content..."
-            sudo tar -czf /tmp/vps-backup/www/www-backup.tar.gz \
-              -C /var/www \
-              --exclude='logs' \
-              . 2>/dev/null || true
-            sudo chown $USER:$USER /tmp/vps-backup/www/www-backup.tar.gz
-          fi
-          
-          # Backup important configs
-          echo "⚙️ Backing up configurations..."
-          sudo tar -czf /tmp/vps-backup/config/config-backup.tar.gz \
-            -C /etc \
-            nginx/sites-available nginx/sites-enabled \
-            2>/dev/null || true
-          sudo chown $USER:$USER /tmp/vps-backup/config/config-backup.tar.gz
-          
-          # Backup Tailscale state if exists
-          if [[ -f /var/lib/tailscale/tailscaled.state ]]; then
-            echo "🌐 Backing up Tailscale state..."
-            mkdir -p /tmp/vps-backup/tailscale
-            sudo cp /var/lib/tailscale/tailscaled.state /tmp/vps-backup/tailscale/ 2>/dev/null || true
-            sudo chown $USER:$USER /tmp/vps-backup/tailscale/tailscaled.state 2>/dev/null || true
-          fi
-          
-          echo "✅ [$(date)] Final backup completed successfully"
-          EOF
-          
-          chmod +x /tmp/create_backup.sh
-          echo "✅ Backup restoration and final backup script prepared"
-
-      # Main VPS session
-      - name: Keep VPS session alive with monitoring
-        run: |
-          echo "🎯 Starting VPS session for ${{ env.SESSION_DURATION_MIN }} minutes..."
-          
-          # Final backup function (called on cancellation or session end)
-          final_backup() {
-            echo ""
-            echo "⏳ [$(date)] Session ending, creating final backup..."
-            /tmp/create_backup.sh
-            
-            # Create session summary
-            cat > /tmp/session_summary.txt << EOF
-          VPS Session Summary
-          ==================
-          Start: $(date -d @${{ env.START_TIME }} -u)
-          End: $(date -u)
-          Hostname: ${{ env.VPS_HOSTNAME }}
-          Tailscale IP: ${{ env.TAILSCALE_IP }}
-          Duration: ${{ env.SESSION_DURATION_MIN }} minutes
-          Status: Session completed successfully
-          Backup: Available in GitHub artifacts
-          EOF
-            
-            cp /tmp/session_summary.txt /tmp/vps-backup/
-            
-            echo "✅ Final backup completed - session ending gracefully"
-          }
-          
-          # Set trap for cleanup (handles cancellation and normal exit)
-          trap final_backup EXIT INT TERM
-          
-          # Display session info
-          echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║                    🚀 VPS SESSION STARTED                    ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
-          
-          if [[ -f /tmp/connection_info.txt ]]; then
-            cat /tmp/connection_info.txt
-          fi
-          echo ""
-          cat /tmp/system_info.txt
-          echo ""
-          
-          # Session monitoring (no periodic backups)
-          START_TIME=$(date -u +%s)
-          END_TIME=$((START_TIME + ${{ env.SESSION_DURATION }}))
-          
-          echo "💡 Session will run for ${{ env.SESSION_DURATION_MIN }} minutes"
-          echo "🛑 Press 'Cancel workflow' to safely end session early (backup will be created)"
-          echo ""
-          
-          while [[ $(date -u +%s) -lt $END_TIME ]]; do
-            CURRENT_TIME=$(date -u +%s)
-            REMAINING=$(( (END_TIME - CURRENT_TIME) / 60 ))
-            
-            # Status update every 10 minutes
-            if [[ $((CURRENT_TIME % 600)) -eq 0 ]]; then
-              echo "🕐 [$(date)] VPS active - ${REMAINING} minutes remaining"
-              echo "   Load: $(uptime | cut -d',' -f3- | sed 's/^[[:space:]]*//')"
-              echo "   Memory: $(free -h | grep '^Mem:' | awk '{print $3"/"$2}')"
-              echo "   Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5" used)"}')"
-              
-              if command -v tailscale >/dev/null 2>&1; then
-                TS_STATUS=$(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState // "unknown"' 2>/dev/null || echo "unknown")
-                echo "   Tailscale: ${TS_STATUS}"
-              fi
-              echo ""
-            fi
-            
-            sleep 30
-          done
-          
-          echo "⏰ Session duration reached - final backup will be created automatically"
-
-      # Upload backups as artifacts
-      - name: Upload backup artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
+      # --- Restore from previous artifacts ---
+      - name: Download VPS backup if exists
+        uses: actions/download-artifact@v4
         with:
-          name: vps-backup-${{ env.TIMESTAMP }}
-          path: /tmp/vps-backup/
-          retention-days: 30
+          name: vps-backup-latest
+          path: restore
+        continue-on-error: true
 
-      # Cleanup
-      - name: Cleanup and disconnect
-        if: always()
+      - name: Restore VPS data
         run: |
-          echo "🧹 Performing cleanup..."
-          
-          if command -v tailscale >/dev/null 2>&1; then
-            sudo tailscale down || true
-            echo "🌐 Tailscale disconnected"
+          if [ -d restore ]; then
+            echo "♻️ Restoring VPS backup..."
+            sudo cp -r restore/etc/* /etc/ || true
+            sudo cp -r restore/home/* /home/ || true
+            sudo cp -r restore/var/www/* /var/www/ || true
+          else
+            echo "⚠️ No previous backup found. Fresh session."
           fi
-          
-          echo "✅ Cleanup completed"
 
-      # Final report
-      - name: Generate final report
-        if: always()
+      - name: Download Tailscale state if exists
+        uses: actions/download-artifact@v4
+        with:
+          name: tailscale-state
+          path: tailscale_restore
+        continue-on-error: true
+
+      - name: Restore Tailscale state
+        run: |
+          sudo mkdir -p /var/lib/tailscale
+          if [ -f tailscale_restore/tailscaled.state ]; then
+            echo "♻️ Restoring Tailscale state..."
+            sudo cp tailscale_restore/tailscaled.state /var/lib/tailscale/tailscaled.state
+          else
+            echo "⚠️ No previous Tailscale state found."
+          fi
+
+      # --- Setup system user ---
+      - name: Create user jacky
+        run: |
+          sudo useradd -m -s /bin/bash jacky || true
+          echo 'jacky:root' | sudo chpasswd
+          echo "✅ User jacky created with password root"
+
+      # --- Setup Tailscale ---
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscaled --cleanup || true
+          sudo nohup tailscaled > /dev/null 2>&1 &
+          sleep 5
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            echo "🔗 Connecting with restored Tailscale state..."
+            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname "gh-vps" || true
+          else
+            echo "🔗 New Tailscale login..."
+            sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname "gh-vps"
+          fi
+          sudo tailscale ip -4
+
+      # --- Session info ---
+      - name: System Info
+        run: |
+          echo "🖥️ System Info:"
+          neofetch --stdout || true
+          echo "🌐 Network:"
+          ip addr show | grep inet || true
+          echo "💾 Disk:"
+          df -h / || true
+
+      # --- Keep alive session (6h) ---
+      - name: Keep VPS alive
+        run: |
+          echo "🔗 Starting tmate session..."
+          tmate -F &
+          sleep 21600 &  # 6h
+          wait
+
+      # --- Backup before exit ---
+      - name: Prepare VPS backup
+        run: |
+          mkdir -p backup/{etc,home,var/www}
+          sudo cp -r /etc backup/etc || true
+          sudo cp -r /home backup/home || true
+          sudo cp -r /var/www backup/var/www || true
+
+      - name: Upload VPS backup (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup-latest
+          path: backup/
+          retention-days: 3
+
+      - name: Backup Tailscale state
+        run: |
+          mkdir -p ts-backup
+          sudo cp /var/lib/tailscale/tailscaled.state ts-backup/tailscaled.state || true
+
+      - name: Upload Tailscale state (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-state
+          path: ts-backup/
+          retention-days: 3
+
+      # --- Final log ---
+      - name: Completion summary
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║                  🎉 VPS SESSION COMPLETED                    ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "🎉 ================================="
+          echo "✅ VPS SESSION COMPLETED"
+          echo "🎉 ================================="
           echo ""
-          echo "📊 Session Details:"
-          echo "  • Hostname: ${{ env.VPS_HOSTNAME }}"
-          echo "  • Started: $(date -d @${{ env.START_TIME }} -u) UTC"
-          echo "  • Ended: $(date -u) UTC"
-          echo "  • Duration: ${{ env.SESSION_DURATION_MIN }} minutes"
-          echo "  • Tailscale IP: ${{ env.TAILSCALE_IP }}"
-          echo ""
-          echo "💾 Backup Information:"
-          echo "  • Backup created only at session end or cancellation"
-          echo "  • Backup stored as GitHub artifact: vps-backup-${{ env.TIMESTAMP }}"
-          echo "  • Artifact retention: 30 days"
-          echo "  • Download from Actions tab → Artifacts section"
-          echo ""
-          echo "🔗 Next Session:"
-          echo "  • Download the backup artifact from this run"
-          echo "  • Extract and commit 'vps-backup' folder to your repository"
-          echo "  • Run workflow again to restore previous session data"
-          echo "  • Or use 'workflow_dispatch' for fresh session"
-          echo ""
-          echo "✨ Thank you for using VPS Operations!"
+          echo "📦 Backups stored as GitHub Artifacts:"
+          echo "   - vps-backup-latest"
+          echo "   - tailscale-state"
