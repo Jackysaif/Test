@@ -30,7 +30,7 @@ jobs:
       - name: Setup system
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq pv bc software-properties-common
+          sudo apt install -y curl tmate jq bc software-properties-common
           echo "🚀 System tools installed"
 
       # ===== SECURE SETUP =====
@@ -204,11 +204,12 @@ jobs:
           echo "🌐 Web: $TMATE_WEB"
           echo "📝 Session started at: $(date)"
           
-          # Keep alive with heartbeat
-          for i in $(seq 1 $((SESSION_TIMEOUT_MINUTES * 60 / 30))); do
-            sleep 30
-            echo "💓 Session heartbeat: $(date)"
-          done
+          # Calculate timeout in seconds
+          TIMEOUT_SECONDS=$(( {{ env.SESSION_TIMEOUT_MINUTES }} * 60 ))
+          echo "⏳ Session will timeout in $TIMEOUT_SECONDS seconds"
+          
+          # Keep session alive
+          sleep $TIMEOUT_SECONDS
 
       # ===== INTELLIGENT BACKUP =====
       - name: Create smart backup
@@ -320,11 +321,11 @@ EOF
           
           # Delete backups older than retention period
           CURRENT_TIME=$(date +%s)
-          RETENTION_SECONDS=$(({{ env.BACKUP_RETENTION_DAYS }} * 24 * 60 * 60))
+          RETENTION_SECONDS=$((${{ env.BACKUP_RETENTION_DAYS }} * 24 * 60 * 60))
           
           echo "$OLD_BACKUPS" | while read -r tag date; do
-            BACKUP_TIME=$(date -d "$date" +%s)
-            if [ $((CURRENT_TIME - BACKUP_TIME)) -gt $RETENTION_SECONDS ]; then
+            BACKUP_TIME=$(date -d "$date" +%s 2>/dev/null || echo "0")
+            if [ $BACKUP_TIME -ne 0 ] && [ $((CURRENT_TIME - BACKUP_TIME)) -gt $RETENTION_SECONDS ]; then
               echo "🗑️ Deleting old backup: $tag"
               gh release delete "$tag" --yes --repo "${{ github.repository }}" || true
             fi
