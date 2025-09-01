@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y curl tmate
+          sudo apt install -y curl tmate jq
 
       # 2. Create jacky:root WITH SUDO PRIVILEGES
       - name: Create restricted user with sudo access
@@ -39,15 +39,32 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "Hostname set to $(hostname)"
 
-      # 4. Download and restore backup from previous workflow artifact
-      - name: Download previous backup artifact
+      # 4. Find and download latest backup artifact from any workflow run
+      - name: Find latest backup artifact
+        id: find-artifact
+        run: |
+          # Get the latest artifact ID for vps-backup
+          ARTIFACT_ID=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?name=vps-backup" \
+            | jq '.artifacts | sort_by(.updated_at) | reverse | .[0].id' 2>/dev/null || echo "")
+          
+          if [ -n "$ARTIFACT_ID" ] && [ "$ARTIFACT_ID" != "null" ]; then
+            echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+            echo "📦 Found latest backup artifact ID: $ARTIFACT_ID"
+          else
+            echo "⚠️ No previous backup artifact found"
+          fi
+
+      # 5. Download the latest backup artifact
+      - name: Download latest backup artifact
+        if: steps.find-artifact.outputs.artifact_id != ''
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: restore/
-        continue-on-error: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 5. Restore backup if exists
+      # 6. Restore backup if exists
       - name: Restore backup if exists
         run: |
           if [ -f "restore/latest.tar.gz" ]; then
@@ -80,7 +97,7 @@ jobs:
             echo "⚠️ No previous backup found, starting fresh"
           fi
 
-      # 6. Setup Tailscale
+      # 7. Setup Tailscale
       - name: Setup Tailscale
         run: |
           # Install using official script
@@ -106,7 +123,7 @@ jobs:
           echo "Tailscale status:"
           tailscale status || echo "Status check failed - may need more time to initialize"
 
-      # 7. Start tmate session
+      # 8. Start tmate session
       - name: Start tmate session
         run: |
           echo "🔗 Starting tmate session..."
@@ -117,7 +134,7 @@ jobs:
           # Start tmate in foreground mode to keep the workflow running
           tmate -F -S /tmp/tmate.sock
 
-      # 8. Backup ALL user data when session ends
+      # 9. Backup ALL user data when session ends
       - name: Backup VPS data on session end
         if: always() && !cancelled()
         run: |
@@ -155,7 +172,7 @@ jobs:
           echo "Backup contents:"
           ls -lh backup/
 
-      # 9. Upload backup as GitHub artifact when session ends
+      # 10. Upload backup as GitHub artifact when session ends
       - name: Upload backup as GitHub artifact
         if: always() && !cancelled()
         uses: actions/upload-artifact@v4
@@ -165,7 +182,7 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      # 10. Backup on workflow cancellation
+      # 11. Backup on workflow cancellation
       - name: Backup on workflow cancellation
         if: cancelled()
         run: |
@@ -202,7 +219,7 @@ jobs:
           
           echo "📦 Uploading backup as artifact..."
 
-      # 11. Upload final backup on cancellation
+      # 12. Upload final backup on cancellation
       - name: Upload final backup on cancellation
         if: cancelled()
         uses: actions/upload-artifact@v4
@@ -212,7 +229,7 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      # 12. Display session results - FIXED: Proper GitHub Actions syntax
+      # 13. Display session results
       - name: Display session results
         if: always()
         run: |
