@@ -1,9 +1,9 @@
-name: Persistent VPS with Backup & Restore (Lightweight)
+name: Persistent VPS with MEGA Backup
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *" # Run every 6 hours
+    - cron: "0 */6 * * *"   # Every 6 hours
 
 jobs:
   vps:
@@ -14,143 +14,85 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y unzip zip curl tmate neofetch tar
+          curl https://rclone.org/install.sh | sudo bash
+
       # === Restore Section ===
-      - name: Download latest backup
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup
-          path: backup
-        continue-on-error: true
-
-      - name: Restore VPS data & Tailscale state
+      - name: Restore backup from MEGA
         run: |
-          if ls backup/vps-backup-*.tar.gz 1>/dev/null 2>&1; then
-            echo "📦 Restoring VPS data..."
-            sudo tar -xzf backup/vps-backup-*.tar.gz -C / || true
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = rajeeshsksbx7@gmail.com
+          pass = Rajesh123580
+          EOF
 
-            # Ensure restored files are accessible
-            if [ -d /home/jacky ]; then
-              sudo chown -R jacky:jacky /home/jacky
-            fi
+          mkdir -p backup
+          rclone copy mega:vps-backups/latest-backup.tar.gz backup/ || true
 
-            # If root SSH keys exist, copy them to jacky
-            if [ -d /root/.ssh ]; then
-              sudo mkdir -p /home/jacky/.ssh
-              sudo cp -a /root/.ssh/* /home/jacky/.ssh/ || true
-              sudo chown -R jacky:jacky /home/jacky/.ssh
-              sudo chmod 700 /home/jacky/.ssh
-              sudo chmod 600 /home/jacky/.ssh/* || true
-              echo "🔑 SSH keys copied to jacky"
-            fi
-
-            # Restart tailscale if state was restored
-            if [ -f /var/lib/tailscale/tailscaled.state ]; then
-              echo "🔄 Restoring Tailscale state..."
-              sudo systemctl restart tailscaled || sudo pkill -f tailscaled || true
-              sleep 3
-            fi
+          if [ -f backup/latest-backup.tar.gz ]; then
+            echo "📦 Found backup on MEGA, restoring..."
+            sudo tar -xzf backup/latest-backup.tar.gz -C /
           else
-            echo "ℹ️ No previous backup found, starting fresh."
+            echo "ℹ️ No backup found, starting fresh."
           fi
 
-      # === Setup User & Tailscale ===
-      - name: Create restricted user
+      # === VPS Setup ===
+      - name: Setup user jacky
         run: |
-          if ! id -u jacky >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "jacky:root" | sudo chpasswd
-            echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-            echo "✅ User 'jacky' created with password 'root'"
-          else
-            echo "jacky:root" | sudo chpasswd
-            echo "✅ Password updated for existing user 'jacky'"
-          fi
-
-      - name: Install & Start Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable tailscaled
-          sudo tailscaled &
-          sleep 5
-          tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --ssh
-
-      - name: Show Tailscale Connection Info
-        run: |
-          echo "=== Tailscale Status ==="
-          tailscale ip -4 || true
-          tailscale ip -6 || true
-          tailscale status || true
-          echo ""
-          echo "=== User Credentials ==="
+          sudo useradd -m jacky || true
+          echo "jacky:root" | sudo chpasswd
+          echo "👤 User Info:"
           echo "Username: jacky"
           echo "Password: root"
 
-      - name: System Info
+      - name: Start Tailscale
         run: |
-          echo "=== System Information ==="
-          uname -a
-          echo "User: $(whoami)"
-          id
-          df -h
-          free -m
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey tskey-auth-kodgmRrzjh11CNTRL-JTL6FCKJPCC6gMwL6o7HCCJVk67E9VU7 --hostname gha-vps
+          echo "🌐 Tailscale IP: $(tailscale ip -4)"
 
-      # === Interactive Access ===
-      - name: Keep VPS alive
+      - name: VPS Session (SSH over tmate)
         uses: mxschmitt/action-tmate@v3
-        timeout-minutes: 300
+        timeout-minutes: 240
 
-      # === Backup Section ===
-      - name: Backup VPS data and Tailscale state
+      # === Backup Section (always runs, even on cancel/fail) ===
+      - name: Create and upload backup
         if: always()
         run: |
-          mkdir -p backup
-          TEMP_BACKUP=$(mktemp -d)
+          BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+          BACKUP_DIR="/opt/vps-backup"
+          sudo mkdir -p "$BACKUP_DIR"
 
-          BACKUP_ITEMS=(
-            "/etc"
-            "/home"
-            "/var/lib/tailscale/tailscaled.state"
-            "/root/.ssh"
-            "/opt"
-          )
+          echo "🗂 Collecting backup data..."
 
-          for item in "${BACKUP_ITEMS[@]}"; do
-            if [ -e "$item" ]; then
-              sudo mkdir -p "$TEMP_BACKUP$(dirname "$item")"
-              sudo cp -a "$item" "$TEMP_BACKUP$(dirname "$item")/"
-            fi
-          done
+          # Backup jacky’s home
+          sudo cp -r /home/jacky "$BACKUP_DIR/"
 
-          # Optional: backup aaPanel data if installed
-          if [ -d "/www/server" ]; then
-            echo "📦 Backing up aaPanel data..."
-            sudo mkdir -p "$TEMP_BACKUP/www"
-            sudo cp -a /www/server "$TEMP_BACKUP/www/"
+          # Backup Tailscale state
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo mkdir -p "$BACKUP_DIR/tailscale"
+            sudo cp /var/lib/tailscale/tailscaled.state "$BACKUP_DIR/tailscale/"
           fi
 
-          BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-          sudo tar -czf "$BACKUP_FILE" -C "$TEMP_BACKUP" .
-
-          # Ensure artifact is owned by runner so it's downloadable next session
-          sudo chown runner:runner "$BACKUP_FILE"
-          sudo rm -rf "$TEMP_BACKUP"
-
-          echo "✅ Backup created: $BACKUP_FILE"
-          du -sh "$BACKUP_FILE"
-
-      - name: Upload VPS backup artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup
-          path: backup/*.tar.gz
-          retention-days: 7
-          compression-level: 0
-
-      - name: Completion Summary
-        if: always()
-        run: |
-          echo "🎉 VPS Backup & Restore Workflow Completed"
-          if compgen -G "backup/*.tar.gz" > /dev/null; then
-            du -h backup/*.tar.gz
+          # Optional: Backup aaPanel if installed
+          if [ -d /www/server/panel ]; then
+            echo "📦 aaPanel found, backing up..."
+            sudo cp -r /www/server/panel "$BACKUP_DIR/aapanel"
+          else
+            echo "ℹ️ aaPanel not installed, skipping..."
           fi
+
+          # Pack backup
+          sudo tar -czf "$BACKUP_FILE" -C /opt vps-backup
+
+          # Upload to MEGA
+          echo "📤 Uploading backup to MEGA..."
+          rclone copy "$BACKUP_FILE" mega:vps-backups/
+          rclone copy "$BACKUP_FILE" mega:vps-backups/latest-backup.tar.gz --copy-links
+
+          echo "✅ Backup completed: $BACKUP_FILE"
