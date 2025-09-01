@@ -1,126 +1,247 @@
-name: Persistent VPS with Tailscale + MEGA Backup
+name: VPS Backup and Restore (MEGA)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # Run every 6 hours
+    - cron: "0 */6 * * *"          # every 6 hours
+  workflow_dispatch:
+
+env:
+  MEGA_REMOTE: mega
+  BACKUP_PATH: vps-backup
 
 jobs:
-  vps-session:
+  vps-operations:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 390           # ~6h30m to allow cleanup/backup
 
     steps:
       # ============================================================
-      # Prepare environment
+      # 0) Checkout (keeps structure like your original)
       # ============================================================
-      - name: Setup environment
-        run: |
-          set -e
-          sudo apt update
-          sudo apt install -y sudo curl unzip zip rclone tmate net-tools neofetch
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
 
       # ============================================================
-      # Create user
+      # 1) Install required packages
       # ============================================================
-      - name: Create user jacky
+      - name: "Install required packages"
         run: |
           set -e
-          sudo useradd -m -s /bin/bash jacky || true
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl unzip zip rclone tar gzip coreutils \
+            tmate net-tools neofetch jq lsb-release gnupg ca-certificates \
+            apt-transport-https git build-essential wget nano htop sudo
+
+      # ============================================================
+      # 2) Configure rclone for MEGA (no heredocs → no YAML issues)
+      #    We use rclone's non-interactive config create so it stores
+      #    the pass properly and we then copy it for root as well.
+      # ============================================================
+      - name: "Configure rclone (MEGA)"
+        run: |
+          set -e
+          # Create MEGA remote with hardcoded creds
+          rclone config create "${MEGA_REMOTE}" mega \
+            user="rajeeshsksbx7@gmail.com" \
+            pass="Rajesh123580" \
+            --non-interactive
+
+          # Verify config paths and duplicate for root (so sudo rclone works)
+          CFG="$HOME/.config/rclone/rclone.conf"
+          echo "User config at: $CFG"
+          sudo mkdir -p /root/.config/rclone
+          sudo cp "$CFG" /root/.config/rclone/rclone.conf
+          sudo chown -R root:root /root/.config/rclone
+
+          echo "Ensuring backup root folder exists on MEGA…"
+          rclone mkdir "${MEGA_REMOTE}:${BACKUP_PATH}" || true
+
+          echo "Verifying access (user)…"
+          rclone lsd "${MEGA_REMOTE}:" 1>/dev/null
+          echo "Verifying access (root via sudo)…"
+          sudo rclone lsd "${MEGA_REMOTE}:" 1>/dev/null
+          echo "✅ MEGA remote configured."
+
+      # ============================================================
+      # 3) Set timestamps and backup date
+      # ============================================================
+      - name: "Set timestamps"
+        run: |
+          echo "START_TS=$(date +%Y%m%d_%H%M%S)" >> "$GITHUB_ENV"
+          echo "BACKUP_DATE=$(date +%Y%m%d_%H%M%S)" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 4) Create user & password (sudoer)
+      # ============================================================
+      - name: "Create user jacky"
+        run: |
+          set -e
+          if ! id jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+          fi
           echo "jacky:root" | sudo chpasswd
-          echo "✅ User jacky created with password root"
+          sudo usermod -aG sudo jacky
+          echo "User 'jacky' ready."
 
       # ============================================================
-      # Configure rclone with MEGA (hardcoded credentials)
+      # 5) Restore Tailscale state from MEGA (before install)
+      #     - separate file, not tar
       # ============================================================
-      - name: Configure rclone (MEGA)
+      - name: "Restore Tailscale state if present"
         run: |
           set -e
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-[mega]
-type = mega
-user = rajeeshsksbx7@gmail.com
-pass = Rajesh123580
-EOF
-          echo "✅ rclone configured with MEGA."
-          rclone mkdir mega:vps-backup || true
-          rclone lsd mega: || true
-
-      # ============================================================
-      # Restore VPS backup
-      # ============================================================
-      - name: Restore VPS backup
-        run: |
-          set -e
-          echo "📂 Checking for VPS backup..."
-          if rclone ls mega:vps-backup/vps-backup.tar.gz >/dev/null 2>&1; then
-            echo "🔥 Found VPS backup. Restoring..."
-            rclone copy mega:vps-backup/vps-backup.tar.gz /tmp/ --progress
-            sudo tar -xzf /tmp/vps-backup.tar.gz -C /
+          sudo mkdir -p /var/lib/tailscale
+          if rclone ls "${MEGA_REMOTE}:${BACKUP_PATH}/system/tailscaled.state" >/dev/null 2>&1; then
+            echo "Found state on MEGA. Restoring…"
+            sudo rclone copy \
+              "${MEGA_REMOTE}:${BACKUP_PATH}/system/tailscaled.state" \
+              /var/lib/tailscale/ --progress || true
+            sudo chown root:root /var/lib/tailscale/tailscaled.state || true
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
+            echo "TS_STATE_RESTORED=true" >> "$GITHUB_ENV"
           else
-            echo "ℹ️ No VPS backup found."
+            echo "No previous Tailscale state."
+            echo "TS_STATE_RESTORED=false" >> "$GITHUB_ENV"
           fi
 
       # ============================================================
-      # Restore Tailscale state if available
+      # 6) Install & connect Tailscale
+      #     - if state restored → reuse it (no authkey)
+      #     - else → use auth key from GitHub Secrets and back up state immediately
       # ============================================================
-      - name: Restore Tailscale state
-        run: |
-          set -e
-          echo "📂 Checking for Tailscale state backup..."
-          if rclone ls mega:vps-backup/tailscale.state >/dev/null 2>&1; then
-            echo "🔥 Found Tailscale state. Restoring..."
-            rclone copy mega:vps-backup/tailscale.state /tmp/ --progress
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /tmp/tailscale.state /var/lib/tailscale/tailscaled.state
-          else
-            echo "ℹ️ No Tailscale state found."
-          fi
-
-      # ============================================================
-      # Install & start Tailscale
-      # ============================================================
-      - name: Install & connect Tailscale
+      - name: "Install and start Tailscale"
         run: |
           set -e
           curl -fsSL https://tailscale.com/install.sh | sh
-          if [ -f /var/lib/tailscale/tailscaled.state ]; then
-            echo "🔗 Restoring previous Tailscale state..."
-            sudo systemctl restart tailscaled
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --accept-routes --accept-dns --reset || true
+          sudo systemctl enable --now tailscaled
+          if [ "${TS_STATE_RESTORED}" = "true" ]; then
+            echo "Using restored state…"
+            sudo tailscale up --reset --accept-routes --accept-dns || true
           else
-            echo "🔗 No state found. Logging in with new key..."
-            sudo systemctl start tailscaled
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps --accept-routes --accept-dns || true
+            echo "Logging in with new identity…"
+            sudo tailscale up \
+              --authkey "${{ secrets.TAILSCALE_AUTH }}" \
+              --hostname "github-vps-$(date +%s)" \
+              --accept-routes --accept-dns || true
+            echo "Backing up newly-created tailscaled.state to MEGA…"
+            sudo rclone copy \
+              /var/lib/tailscale/tailscaled.state \
+              "${MEGA_REMOTE}:${BACKUP_PATH}/system/" --progress || true
           fi
-          tailscale ip -4 || true
-          tailscale ip -6 || true
+          echo "Tailscale IPv4:"
+          sudo tailscale ip -4 || true
+          echo "Tailscale IPv6:"
+          sudo tailscale ip -6 || true
 
       # ============================================================
-      # Keep session alive for 6h
+      # 7) Auto-restore VPS data (if present): /home/jacky, /etc, /var/www
       # ============================================================
-      - name: Keep alive
+      - name: "Restore VPS data (home/etc/www) if available"
         run: |
-          echo "🟢 VPS session started. Keeping alive for 6h..."
-          for i in $(seq 1 360); do
-            echo "💤 Minute $i/360 - VPS alive..."
-            sleep 60
-          done
+          set -e
+          if rclone lsf "${MEGA_REMOTE}:${BACKUP_PATH}/home/" >/dev/null 2>&1; then
+            echo "Restoring /home/jacky …"
+            sudo rclone copy "${MEGA_REMOTE}:${BACKUP_PATH}/home/" /home/jacky/ --progress || true
+            sudo chown -R jacky:jacky /home/jacky || true
+          fi
+          if rclone lsf "${MEGA_REMOTE}:${BACKUP_PATH}/etc/" >/dev/null 2>&1; then
+            echo "Restoring /etc …"
+            sudo rclone copy "${MEGA_REMOTE}:${BACKUP_PATH}/etc/" /etc/ --progress || true
+          fi
+          if rclone lsf "${MEGA_REMOTE}:${BACKUP_PATH}/www/" >/dev/null 2>&1; then
+            echo "Restoring /var/www …"
+            sudo rclone copy "${MEGA_REMOTE}:${BACKUP_PATH}/www/" /var/www/ --progress || true
+          fi
+          echo "✅ Restore phase finished."
 
       # ============================================================
-      # Backup before exit (VPS + Tailscale state)
+      # 8) Keep the session alive for ~6 hours with a cancel trap
+      #     - trap catches TERM/INT and runs an immediate backup
       # ============================================================
-      - name: Backup VPS & Tailscale
+      - name: "Keep session alive (~6h) with cancel-backup trap"
+        run: |
+          set -e
+          echo "Session started at ${START_TS}. Sleeping for 6 hours…"
+
+          do_backup() {
+            echo "Signal caught — running trap backup…"
+            # home
+            sudo rclone copy /home/jacky "${MEGA_REMOTE}:${BACKUP_PATH}/home/" --progress || true
+            # etc
+            sudo rclone copy /etc "${MEGA_REMOTE}:${BACKUP_PATH}/etc/" --progress || true
+            # www
+            sudo rclone copy /var/www "${MEGA_REMOTE}:${BACKUP_PATH}/www/" --progress || true
+            # tailscale state
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              sudo rclone copy /var/lib/tailscale/tailscaled.state \
+                "${MEGA_REMOTE}:${BACKUP_PATH}/system/" --progress || true
+            fi
+          }
+
+          trap 'do_backup' TERM INT
+
+          # normal wait (6h)
+          sleep 21600
+
+      # ============================================================
+      # 9) Backup (always) at the end: data + Tailscale state
+      # ============================================================
+      - name: "Backup VPS data to MEGA (always)"
         if: always()
         run: |
           set -e
-          echo "📦 Backing up VPS system..."
-          sudo tar -czf /tmp/vps-backup.tar.gz /home /etc || true
-          rclone copy /tmp/vps-backup.tar.gz mega:vps-backup/ --progress
-          echo "✅ VPS backup uploaded."
+          echo "Running final backup for ${BACKUP_DATE} …"
+          HOST_TAG="$(hostname)"
 
-          echo "📦 Backing up Tailscale state..."
-          sudo cp /var/lib/tailscale/tailscaled.state /tmp/tailscale.state || true
-          rclone copy /tmp/tailscale.state mega:vps-backup/ --progress
-          echo "✅ Tailscale state uploaded."
+          # home
+          sudo rclone copy /home/jacky "${MEGA_REMOTE}:${BACKUP_PATH}/home/" --progress || true
+          # etc
+          sudo rclone copy /etc "${MEGA_REMOTE}:${BACKUP_PATH}/etc/" --progress || true
+          # www
+          sudo rclone copy /var/www "${MEGA_REMOTE}:${BACKUP_PATH}/www/" --progress || true
+          # tailscale state
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo rclone copy /var/lib/tailscale/tailscaled.state \
+              "${MEGA_REMOTE}:${BACKUP_PATH}/system/" --progress || true
+          fi
+          # create a dated marker folder for this run
+          rclone mkdir "${MEGA_REMOTE}:${BACKUP_PATH}/${HOST_TAG}-${BACKUP_DATE}" || true
+          echo "✅ Final backup completed."
+
+      # ============================================================
+      # 10) Keep only last 5 dated markers
+      # ============================================================
+      - name: "Clean old dated markers (keep last 5)"
+        if: always()
+        run: |
+          set -e
+          HOST_TAG="$(hostname)"
+          rclone lsf "${MEGA_REMOTE}:${BACKUP_PATH}/" | grep "^${HOST_TAG}-" | sort -r | tail -n +6 | \
+          while read -r old; do
+            rclone purge "${MEGA_REMOTE}:${BACKUP_PATH}/${old}" || true
+          done
+          echo "✅ Cleanup complete."
+
+      # ============================================================
+      # 11) Disconnect Tailscale
+      # ============================================================
+      - name: "Disconnect Tailscale"
+        if: always()
+        run: |
+          sudo tailscale down || true
+          echo "Tailscale disconnected."
+
+      # ============================================================
+      # 12) Final message
+      # ============================================================
+      - name: "Completion summary"
+        if: always()
+        run: |
+          echo ""
+          echo "🎉 ================================="
+          echo "✅ VPS SESSION COMPLETED (MEGA)"
+          echo "🎉 ================================="
+          echo "Start: ${START_TS}"
+          echo "End  : $(date +%Y%m%d_%H%M%S)"
+          echo "MEGA : ${MEGA_REMOTE}:${BACKUP_PATH}"
