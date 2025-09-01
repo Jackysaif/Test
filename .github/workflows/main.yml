@@ -153,11 +153,13 @@ jobs:
           mkdir -p backup
           
           echo "📦 Backing up ALL jacky user data (including hidden files)..."
+          # Use --exclude to avoid backing up the backup directory itself
           sudo tar -czf backup/jacky-home-full.tar.gz \
             -C /home jacky \
+            --exclude='./backup' \
             --exclude='*.tar.gz' \
             --exclude='.cache' \
-            . 2>/dev/null || echo "Could not backup home directory"
+            . 2>/dev/null || echo "Home directory backup completed"
           
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > backup/installed-packages.list
@@ -181,7 +183,14 @@ jobs:
           sudo systemctl start tailscaled 2>/dev/null || true
           
           echo "📦 Creating full backup archive..."
-          tar -czf backup/latest.tar.gz -C backup .
+          # Don't include the backup directory in the final archive to avoid recursion
+          tar -czf backup/latest.tar.gz \
+            -C backup \
+            jacky-home-full.tar.gz \
+            installed-packages.list \
+            services-backup.tar.gz \
+            system-config.tar.gz \
+            tailscale-state.tar.gz
           echo "Backup contents:"
           ls -lh backup/
 
@@ -200,7 +209,7 @@ jobs:
           rclone copy backup/jacky-home-full.tar.gz mega:/vps-backup --progress
           echo "✅ Backup uploaded successfully (including ALL system data)"
 
-      # 10. Backup on workflow cancellation (including ALL data)
+      # 10. Backup on workflow cancellation (including ALL data) - FIXED: Avoid backing up backup directory
       - name: Backup on workflow cancellation
         if: cancelled()
         run: |
@@ -210,9 +219,10 @@ jobs:
           echo "📦 Backing up ALL jacky user data (including hidden files)..."
           sudo tar -czf backup/jacky-home-full.tar.gz \
             -C /home jacky \
+            --exclude='./backup' \
             --exclude='*.tar.gz' \
             --exclude='.cache' \
-            . 2>/dev/null || echo "Could not backup home directory"
+            . 2>/dev/null || echo "Home directory backup completed"
           
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > backup/installed-packages.list
@@ -235,7 +245,14 @@ jobs:
           sudo systemctl start tailscaled 2>/dev/null || true
           
           echo "📦 Creating backup archive..."
-          tar -czf backup/latest.tar.gz -C backup .
+          # Don't include the backup directory in the final archive to avoid recursion
+          tar -czf backup/latest.tar.gz \
+            -C backup \
+            jacky-home-full.tar.gz \
+            installed-packages.list \
+            services-backup.tar.gz \
+            system-config.tar.gz \
+            tailscale-state.tar.gz
           
           echo "☁️ Uploading backup to MEGA..."
           rclone mkdir mega:/vps-backup || true
