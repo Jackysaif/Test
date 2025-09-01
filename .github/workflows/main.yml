@@ -15,6 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y unzip curl
+          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -a rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          sudo chown root:root /usr/bin/rclone
+          sudo chmod 755 /usr/bin/rclone
+          rclone version
+
       - name: Create restricted user
         run: |
           if ! id -u jacky >/dev/null 2>&1; then
@@ -34,6 +46,10 @@ jobs:
           user = rajeeshsksbx7@gmail.com
           pass = EfABK_S7bUsZtacq8JlaxYackzNv7KmZAQ1mpA
           EOF
+
+          echo "🔑 MEGA rclone configured successfully!"
+          echo "📂 Listing MEGA remote root to confirm:"
+          rclone ls mega:/ || echo "⚠️ Could not list MEGA (maybe empty?)"
 
       - name: Download latest backup from MEGA
         run: |
@@ -76,7 +92,9 @@ jobs:
           BACKUP_FILE="latest.tar.gz"
           tar --exclude='*.tar.gz' -czf $BACKUP_FILE -C backup .
           rclone mkdir mega:/vps-backup || true
+          echo "☁️ Uploading backup to MEGA..."
           rclone copy $BACKUP_FILE mega:/vps-backup --progress
+          echo "✅ Backup uploaded to MEGA"
 
       - name: Final backup on cancel
         if: cancelled()
