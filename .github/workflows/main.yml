@@ -1,263 +1,153 @@
-name: VPS Session (Artifacts, Cancel-Safe)
+name: Persistent VPS with Backup
 
 on:
   workflow_dispatch:
+  push:
   schedule:
-    - cron: "0 */6 * * *"    # every 6 hours
+    - cron: "0 */6 * * *"
 
 jobs:
   vps-session:
     runs-on: ubuntu-22.04
-    timeout-minutes: 370
-
+    timeout-minutes: 720 # 12 hours
     steps:
-      # ------------------------------------------------------------
-      # 0) Checkout (so artifact downloads have a workspace)
-      # ------------------------------------------------------------
-      - name: Checkout repository
+
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # 1) Prep environment & base tools
-      # ------------------------------------------------------------
-      - name: Install base packages
-        run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            curl ca-certificates unzip zip tar gzip jq \
-            neofetch net-tools tmate
-
-          # timestamp variables
-          TS="$(date +%Y%m%d_%H%M%S)"
-          echo "STAMP=${TS}" >> "$GITHUB_ENV"
-          echo "START_UNIX=$(date -u +%s)" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 2) Create host user FIRST
-      # ------------------------------------------------------------
-      - name: Create host user (jacky)
-        run: |
-          set -e
-          sudo useradd -m -s /bin/bash jacky || true
-          echo 'jacky:root' | sudo chpasswd
-          sudo mkdir -p /home/jacky/{projects,downloads,scripts}
-          sudo chown -R jacky:jacky /home/jacky
-          echo "✅ User 'jacky' created and ready"
-
-      # ------------------------------------------------------------
-      # 3) Try to restore previous VPS backup from artifacts
-      #    (these artifacts will contain tarballs we created earlier)
-      # ------------------------------------------------------------
-      - name: Download VPS backup artifact (if any)
+      # ===============================
+      # Restore Previous VPS Backup
+      # ===============================
+      - name: Download VPS backup if exists
         uses: actions/download-artifact@v4
         with:
           name: vps-backup-latest
-          path: restore
+          path: backup
         continue-on-error: true
 
-      - name: Restore VPS from tarballs (if present)
+      - name: Restore VPS files
         run: |
           set -e
-          if [ -d restore ]; then
-            echo "📦 Found artifact folder 'restore'. Checking tarballs..."
-            sudo mkdir -p /tmp/restore
-            # etc
-            if ls restore/etc_*.tar.gz >/dev/null 2>&1; then
-              echo "♻️ Restoring /etc ..."
-              for f in restore/etc_*.tar.gz; do
-                sudo tar -xzf "$f" -C /
-              done
-            fi
-            # home/jacky only (avoid runner home)
-            if ls restore/home-jacky_*.tar.gz >/dev/null 2>&1; then
-              echo "♻️ Restoring /home/jacky ..."
-              for f in restore/home-jacky_*.tar.gz; do
-                sudo tar -xzf "$f" -C /
-              done
-              sudo chown -R jacky:jacky /home/jacky || true
-            fi
-            # web root
-            if ls restore/www_*.tar.gz >/dev/null 2>&1; then
-              echo "♻️ Restoring /var/www ..."
-              sudo mkdir -p /var/www
-              for f in restore/www_*.tar.gz; do
-                sudo tar -xzf "$f" -C /
-              done
-            fi
-            echo "✅ Restoration step completed"
+          if [ -f backup/vps-backup-latest.tar.gz ]; then
+            echo "Restoring VPS backup..."
+            sudo tar -xzf backup/vps-backup-latest.tar.gz -C /
           else
-            echo "ℹ️ No previous 'vps-backup-latest' artifact found. Fresh session."
+            echo "No VPS backup found."
           fi
 
-      # ------------------------------------------------------------
-      # 4) Restore Tailscale state (if it exists)
-      # ------------------------------------------------------------
-      - name: Download Tailscale state (if any)
+      # ===============================
+      # Restore Tailscale State
+      # ===============================
+      - name: Download Tailscale state if exists
         uses: actions/download-artifact@v4
         with:
           name: tailscale-state
-          path: ts-restore
+          path: ts-backup
         continue-on-error: true
 
-      - name: Stage restored Tailscale state (do not fail if missing)
+      - name: Restore Tailscale state
         run: |
           set -e
-          sudo mkdir -p /var/lib/tailscale
-          if [ -f ts-restore/tailscaled.state ]; then
-            echo "♻️ Tailscale state found in artifact. Staging it..."
-            # Put it in place with correct perms
-            sudo cp ts-restore/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chown root:root /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            echo "TS_STATE=restored" >> "$GITHUB_ENV"
+          if [ -f ts-backup/tailscale-state.tar.gz ]; then
+            echo "Restoring Tailscale state..."
+            sudo mkdir -p /var/lib/tailscale
+            sudo tar -xzf ts-backup/tailscale-state.tar.gz -C /var/lib/tailscale || true
           else
-            echo "ℹ️ No previous Tailscale state found."
-            echo "TS_STATE=absent" >> "$GITHUB_ENV"
+            echo "No Tailscale state found."
           fi
 
-      # ------------------------------------------------------------
-      # 5) Install & start Tailscale (state will be used if present)
-      # ------------------------------------------------------------
-      - name: Install & connect Tailscale
+      # ===============================
+      # Install Packages
+      # ===============================
+      - name: Install dependencies
         run: |
           set -e
-          if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
-            echo "❌ Missing secrets.TAILSCALE_AUTHKEY"; exit 1
-          fi
+          sudo apt update
+          sudo apt install -y sudo curl unzip zip tmate net-tools neofetch
 
-          # Install
+      - name: Install Tailscale
+        run: |
+          set -e
           curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname github-vps || true
 
-          # Ensure daemon is running (this also creates /var/lib/tailscale)
-          sudo systemctl enable --now tailscaled
-          sleep 4
-
-          # Connect; if state exists, tailscale will reuse it
-          HOST="gh-${{ github.run_id }}"
-          sudo tailscale up \
-            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-            --hostname="${HOST}" \
-            --ssh --accept-routes --accept-dns || true
-
-          echo "Tailscale IPs:"
-          sudo tailscale ip -4 || true
-          sudo tailscale ip -6 || true
-          # mark that daemon ran so the state file will exist later
-          if sudo test -f /var/lib/tailscale/tailscaled.state; then
-            echo "TS_READY=true" >> "$GITHUB_ENV"
-          else
-            echo "TS_READY=false" >> "$GITHUB_ENV"
-          fi
-
-      # ------------------------------------------------------------
-      # 6) Show quick system info
-      # ------------------------------------------------------------
-      - name: System information
+      - name: System Info
         run: |
           set -e
-          echo "🖥️ System:"
-          neofetch --stdout || true
-          echo "🌐 Network:"
-          ip -4 addr show | grep inet || true
-          echo "💾 Disk:"
-          df -h / || true
+          neofetch || true
+          ifconfig || true
+          whoami
 
-      # ------------------------------------------------------------
-      # 7) Keep session alive (~6h) with a cancel-safe backup trap
-      # ------------------------------------------------------------
-      - name: Keep session alive (~6h)
+      # ===============================
+      # Keep VPS Alive
+      # ===============================
+      - name: Keep VPS alive
         run: |
-          set -Eeuo pipefail
+          set -e
+          echo "Starting tmate session..."
+          sudo tmate -S /tmp/tmate.sock new-session -d
+          sudo tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔗 SSH session: $(sudo tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "🌍 Web session: $(sudo tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          sleep 43200 || true  # 12 hours
+        continue-on-error: true
 
-          make_backup() {
-            echo "⏳ Creating final backup (cancel-safe)..."
-            sudo mkdir -p /tmp/backup /tmp/backup/tailscale
+      # ===============================
+      # Backup VPS (Always Run)
+      # ===============================
+      - name: Create VPS backup
+        if: always()
+        run: |
+          set -e
+          echo "Creating VPS backup..."
+          sudo mkdir -p backup
+          sudo tar -czf backup/vps-backup-latest.tar.gz \
+            --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp \
+            --exclude=/run --exclude=/mnt --exclude=/media --exclude=/lost+found \
+            /
 
-            # tar /etc (root-only)
-            echo "🗜️  Packing /etc ..."
-            sudo tar --numeric-owner -czf /tmp/backup/etc_${STAMP}.tar.gz -C / etc \
-              --exclude=proc --exclude=sys --exclude=dev || true
-            # tar /home/jacky only (avoid runner’s home)
-            if [ -d /home/jacky ]; then
-              echo "🗜️  Packing /home/jacky ..."
-              sudo tar --numeric-owner -czf /tmp/backup/home-jacky_${STAMP}.tar.gz -C / home/jacky || true
-            fi
-            # tar /var/www if exists
-            if [ -d /var/www ]; then
-              echo "🗜️  Packing /var/www ..."
-              sudo tar --numeric-owner -czf /tmp/backup/www_${STAMP}.tar.gz -C / var/www || true
-            fi
-
-            # Tailscale state (only if present)
-            if sudo test -f /var/lib/tailscale/tailscaled.state; then
-              echo "🧩 Saving Tailscale state..."
-              sudo cp /var/lib/tailscale/tailscaled.state /tmp/backup/tailscale/tailscaled.state
-              sudo tailscale status --json > /tmp/backup/tailscale/status.json 2>/dev/null || true
-            else
-              echo "ℹ️  No Tailscale state file to back up."
-            fi
-
-            # Session summary
-            cat > /tmp/backup/session_summary.txt <<EOF
-VPS Session Summary
-===================
-Start (UTC): $(date -u -d @${START_UNIX} +"%F %T")
-End   (UTC): $(date -u +"%F %T")
-Run ID     : ${{ github.run_id }}
-Run Number : ${{ github.run_number }}
-TS State   : ${{ env.TS_STATE }}
-EOF
-
-            # ensure uploadable by runner
-            sudo chown -R $USER:$USER /tmp/backup
-            echo "✅ Final backup prepared at /tmp/backup"
-            ls -lh /tmp/backup || true
-          }
-
-          trap make_backup EXIT
-
-          echo "🔗 Starting tmate (read-only + web)…"
-          sudo tmate -F &
-          # 6 hours sleep (21600s)
-          sleep 21600
-
-      # ------------------------------------------------------------
-      # 8) Upload artifacts (always – works on cancel too)
-      # ------------------------------------------------------------
-      - name: Upload VPS backup (tarballs)
+      - name: Upload VPS backup
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup-latest
-          path: /tmp/backup/*
-          retention-days: 30
-          if-no-files-found: warn
-          compression-level: 6
-          overwrite: true
+          path: backup/vps-backup-latest.tar.gz
+          retention-days: 3
 
-      - name: Upload Tailscale state (separate)
+      # ===============================
+      # Backup Tailscale State
+      # ===============================
+      - name: Backup Tailscale state
+        if: always()
+        run: |
+          set -e
+          echo "Backing up Tailscale state..."
+          sudo mkdir -p ts-backup
+          if [ -d /var/lib/tailscale ]; then
+            sudo tar -czf ts-backup/tailscale-state.tar.gz -C /var/lib/tailscale .
+          else
+            echo "No tailscale state found, skipping."
+          fi
+
+      - name: Upload Tailscale state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-state
-          path: /tmp/backup/tailscale/
-          retention-days: 30
-          if-no-files-found: ignore
-          overwrite: true
+          path: ts-backup/tailscale-state.tar.gz
+          retention-days: 3
 
-      # ------------------------------------------------------------
-      # 9) Final summary
-      # ------------------------------------------------------------
+      # ===============================
+      # Completion Summary
+      # ===============================
       - name: Completion summary
         if: always()
         run: |
           echo ""
-          echo "🎉 ================================================"
-          echo "✅ VPS SESSION COMPLETED (or Cancelled — Backup Saved)"
-          echo "🎉 ================================================"
-          echo "📦 Artifacts uploaded:"
-          echo "  • vps-backup-latest  (contains etc/home-jacky/www tarballs + summary)"
-          echo "  • tailscale-state    (contains tailscaled.state + status.json if present)"
+          echo "🎉 ================================="
+          echo "✅ VPS SESSION COMPLETED (or Cancelled – Backup Saved)"
+          echo "🎉 ================================="
           echo ""
-          echo "ℹ️ GitHub UI will provide a ZIP for each artifact; inside you’ll find the .tar.gz files."
+          echo "📦 Artifacts saved:"
+          echo " - vps-backup-latest"
+          echo " - tailscale-state"
