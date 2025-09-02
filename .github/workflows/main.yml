@@ -452,7 +452,7 @@ jobs:
 
           # 9. Create backup manifest
           echo "📝 Creating backup manifest..."
-          cat > backup/manifest.txt << 'EOF'
+          cat > backup/manifest.txt << EOF
 Backup created: $(date)
 Components backed up:
 - User home directory
