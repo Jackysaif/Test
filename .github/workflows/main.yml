@@ -5,9 +5,10 @@
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'  # Daily backup at midnight
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+  
 
 env:
   BACKUP_STORE: /var/backups/vps
