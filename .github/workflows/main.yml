@@ -118,7 +118,7 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-      # 7. Final Backup (always runs)
+            # 7. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
@@ -136,21 +136,8 @@ jobs:
             /var/lib/tailscale \
             /opt \
             /srv \
-            /var/www 2>/dev/null || true
+            /var/www \
+            /etc/ssh \
+            /home/jacky/.ssh 2>/dev/null || true
           
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
-
-      - name: ☁️ Upload Final Backup to MEGA
-        if: always()
-        run: |
-          echo "🚀 Uploading final backup to MEGA..."
-          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
-          echo "✅ Final backup uploaded successfully."
-
-      - name: 📝 Final Status Report
-        if: always()
-        run: |
-          echo "=== VPS Session Ended ==="
-          echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-          echo "========================="
