@@ -1,14 +1,19 @@
-name: Persistent VPS with Complete Backup
+name: Persistent VPS with GitHub Artifact Backup
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_restore:
+        description: 'Skip restoration from backup (fresh start)'
+        required: false
+        default: 'false'
+        type: boolean
   workflow_call:
 
 env:
   VPS_USER: jacky
   VPS_PASSWORD: root
   VPS_HOSTNAME: github-vps
-  BACKUP_DIR: vps-backup
   SESSION_TIMEOUT: 6h
 
 jobs:
@@ -24,7 +29,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate
+          sudo apt install -y curl tmate jq
 
       # ===== RCLONE SETUP =====
       - name: Install and configure rclone
@@ -66,62 +71,217 @@ jobs:
           sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
           echo "🏷️ Hostname set to $(hostname)"
 
-      # ===== COMPLETE BACKUP RESTORATION =====
-      - name: Restore from previous backup
+      # ===== CHECK FOR ARTIFACT LINK IN MEGA =====
+      - name: Check for artifact link in MEGA
+        if: ${{ inputs.skip_restore != true }}
+        id: check-mega-link
         run: |
           mkdir -p restore
-          echo "🔄 Restoring previous session state..."
+          echo "🔍 Checking for artifact link in MEGA..."
           
-          # List of backup components to restore
-          backup_components=(
-            "user-home.tar.gz 🏠 User data"
-            "system-packages.list 📦 System packages" 
-            "webserver-config.tar.gz 🌐 Web server config"
-            "webserver-data.tar.gz 💾 Website data"
-            "all-databases.sql.gz 🗄️ Databases"
-            "aapanel-config.tar.gz ⚙️ aaPanel config"
-            "php-config.tar.gz 🐘 PHP config"
-            "system-services.tar.gz 🔧 System services"
-          )
-          
-          # Restore each component
-          for component in "${backup_components[@]}"; do
-            file=$(echo $component | awk '{print $1}')
-            description=$(echo $component | cut -d' ' -f2-)
-            
-            if rclone copy mega:${{ env.BACKUP_DIR }}/$file restore/ --progress 2>/dev/null; then
-              echo "$description restoring..."
+          # Try to download artifact link file from MEGA
+          if rclone copy mega:artifact-link.txt restore/ --progress 2>/dev/null; then
+            if [ -f "restore/artifact-link.txt" ]; then
+              DIRECT_LINK=$(cat restore/artifact-link.txt | tr -d '\n\r' | xargs)
+              echo "📋 Found artifact link: $DIRECT_LINK"
               
-              case $file in
-                *.tar.gz)
-                  sudo tar -xzf restore/$file -C /
-                  ;;
-                *.list)
-                  if [ "$file" = "system-packages.list" ]; then
-                    sudo apt-get update
-                    sudo dpkg --set-selections < restore/$file
-                    sudo apt-get upgrade -y
-                    sudo apt-get dselect-upgrade -y
-                  fi
-                  ;;
-                *.sql.gz)
-                  if command -v mysql >/dev/null 2>&1; then
-                    gunzip -c restore/$file | sudo mysql
-                  fi
-                  ;;
-              esac
-              echo "✅ $description restored"
+              # Extract artifact ID from direct link
+              ARTIFACT_ID=$(echo "$DIRECT_LINK" | grep -o 'artifacts/[0-9]*' | cut -d'/' -f2)
+              
+              if [ -n "$ARTIFACT_ID" ]; then
+                echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+                echo "direct_link=$DIRECT_LINK" >> $GITHUB_OUTPUT
+                echo "link_found=true" >> $GITHUB_OUTPUT
+                echo "✅ Valid artifact link found with ID: $ARTIFACT_ID"
+              else
+                echo "⚠️ Invalid artifact link format"
+                echo "link_found=false" >> $GITHUB_OUTPUT
+              fi
             else
-              echo "⚠️ $description not found (fresh install)"
+              echo "⚠️ artifact-link.txt file is empty"
+              echo "link_found=false" >> $GITHUB_OUTPUT
             fi
-          done
+          else
+            echo "⚠️ No artifact-link.txt found in MEGA (fresh start)"
+            echo "link_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ===== FIND LATEST ARTIFACT (FALLBACK) =====
+      - name: Find latest backup artifact (fallback)
+        if: ${{ inputs.skip_restore != true && steps.check-mega-link.outputs.link_found != 'true' }}
+        id: find-artifact
+        run: |
+          echo "🔍 Searching for latest backup artifact as fallback..."
           
-          # Start services if they were restored
+          # Get latest workflow runs
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=completed&per_page=10")
+          
+          # Find the most recent successful run with artifacts
+          RUN_ID=$(echo "$RESPONSE" | jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' | head -1)
+          
+          if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+            echo "🔍 Checking run $RUN_ID for artifacts..."
+            
+            # Get artifacts from that run
+            ARTIFACTS_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts")
+            
+            ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.name == "vps-backup") | .id')
+            
+            if [ -n "$ARTIFACT_ID" ] && [ "$ARTIFACT_ID" != "null" ]; then
+              echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+              echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+              echo "📦 Found backup artifact: $ARTIFACT_ID from run $RUN_ID"
+            else
+              echo "⚠️ No backup artifact found in recent runs"
+              echo "artifact_id=" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "⚠️ No successful workflow runs found"
+            echo "artifact_id=" >> $GITHUB_OUTPUT
+          fi
+
+      # ===== DOWNLOAD ARTIFACT FROM MEGA LINK =====
+      - name: Download backup from MEGA link
+        if: ${{ steps.check-mega-link.outputs.link_found == 'true' }}
+        id: download-from-mega-link
+        run: |
+          ARTIFACT_ID=${{ steps.check-mega-link.outputs.artifact_id }}
+          DIRECT_LINK="${{ steps.check-mega-link.outputs.direct_link }}"
+          echo "📥 Downloading artifact $ARTIFACT_ID from MEGA stored link..."
+          echo "🔗 Using link: $DIRECT_LINK"
+          
+          # Download using direct GitHub API
+          HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+          
+          if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+            echo "📦 Extracting backup..."
+            cd restore
+            unzip -o backup.zip
+            rm backup.zip
+            cd ..
+            echo "✅ Backup downloaded and extracted from MEGA link"
+            echo "download_success=true" >> $GITHUB_OUTPUT
+            ls -la restore/
+          else
+            echo "❌ Failed to download backup from MEGA link (HTTP: $HTTP_CODE)"
+            echo "⚠️ Link might be expired or invalid"
+            echo "download_success=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ===== DOWNLOAD ARTIFACT DIRECTLY (FALLBACK) =====
+      - name: Download backup artifact (API fallback)
+        if: ${{ steps.check-mega-link.outputs.link_found != 'true' && steps.find-artifact.outputs.artifact_id != '' && steps.find-artifact.outputs.artifact_id != null }}
+        id: download-artifact
+        run: |
+          ARTIFACT_ID=${{ steps.find-artifact.outputs.artifact_id }}
+          echo "📥 Downloading artifact $ARTIFACT_ID via API fallback..."
+          
+          # Download using direct GitHub API
+          HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+          
+          if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+            echo "📦 Extracting backup..."
+            cd restore
+            unzip -o backup.zip
+            rm backup.zip
+            cd ..
+            echo "✅ Backup downloaded and extracted via API"
+            echo "download_success=true" >> $GITHUB_OUTPUT
+            ls -la restore/
+          else
+            echo "❌ Failed to download backup via API (HTTP: $HTTP_CODE)"
+            echo "download_success=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ===== RESTORE FROM BACKUP =====
+      - name: Restore from backup
+        if: ${{ steps.download-from-mega-link.outputs.download_success == 'true' || steps.download-artifact.outputs.download_success == 'true' }}
+        run: |
+          echo "🔄 Restoring system from backup..."
+          
+          # Restore user data
+          if [ -f "restore/user-home.tar.gz" ]; then
+            echo "🏠 Restoring user data..."
+            sudo tar -xzf restore/user-home.tar.gz -C / --no-same-owner
+          fi
+          
+          # Restore system packages
+          if [ -f "restore/system-packages.list" ]; then
+            echo "📦 Restoring packages..."
+            sudo apt-get update
+            sudo dpkg --set-selections < restore/system-packages.list || true
+            sudo apt-get upgrade -y || true
+            sudo apt-get dselect-upgrade -y || true
+          fi
+          
+          # Restore web server configs
+          if [ -f "restore/webserver-config.tar.gz" ]; then
+            echo "🌐 Restoring web server config..."
+            sudo tar -xzf restore/webserver-config.tar.gz -C / --no-same-owner || true
+          fi
+          
+          # Restore website data
+          if [ -f "restore/webserver-data.tar.gz" ]; then
+            echo "💾 Restoring website data..."
+            sudo tar -xzf restore/webserver-data.tar.gz -C / --no-same-owner || true
+          fi
+          
+          # Restore databases
+          if [ -f "restore/all-databases.sql.gz" ]; then
+            echo "🗄️ Restoring databases..."
+            # Check if MySQL is installed and running
+            if command -v mysql >/dev/null 2>&1; then
+              # Try to start MySQL service first
+              sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null || true
+              sleep 5
+              
+              # Test MySQL connection before restoration
+              if mysql -e "SELECT 1;" 2>/dev/null; then
+                echo "✅ MySQL connection successful, restoring databases..."
+                gunzip -c restore/all-databases.sql.gz | mysql || echo "⚠️ Database restoration failed"
+              else
+                echo "⚠️ MySQL connection failed, skipping database restoration"
+              fi
+            else
+              echo "⚠️ MySQL not installed, skipping database restoration"
+            fi
+          fi
+          
+          # Restore aaPanel config
+          if [ -f "restore/aapanel-config.tar.gz" ]; then
+            echo "⚙️ Restoring aaPanel config..."
+            sudo tar -xzf restore/aapanel-config.tar.gz -C / --no-same-owner || true
+          fi
+          
+          # Restore PHP config
+          if [ -f "restore/php-config.tar.gz" ]; then
+            echo "🐘 Restoring PHP config..."
+            sudo tar -xzf restore/php-config.tar.gz -C / --no-same-owner || true
+          fi
+          
+          # Restore system services
+          if [ -f "restore/system-services.tar.gz" ]; then
+            echo "🔧 Restoring system services..."
+            sudo tar -xzf restore/system-services.tar.gz -C / --no-same-owner || true
+          fi
+          
+          # Start restored services
+          sudo systemctl daemon-reload || true
           sudo systemctl start mysql 2>/dev/null || true
           sudo systemctl start apache2 2>/dev/null || true
           sudo systemctl start nginx 2>/dev/null || true
           
-          echo "✅ Restoration completed"
+          echo "✅ System restoration completed"
 
       # ===== TAILSCALE SETUP =====
       - name: Setup Tailscale
@@ -160,104 +320,228 @@ jobs:
           
           # 1. Backup user home directory
           echo "📁 Backing up user data..."
-          sudo tar -czf backup/user-home.tar.gz \
-            -C /home ${{ env.VPS_USER }} \
-            --exclude='.cache' \
-            --exclude='node_modules' \
-            --exclude='*.tmp' \
-            --exclude='*.log' \
-            --warning=no-file-changed \
-            . 2>/dev/null || echo "⚠️ User data backup incomplete"
+          if [ -d "/home/${{ env.VPS_USER }}" ]; then
+            sudo tar -czf backup/user-home.tar.gz \
+              -C /home \
+              --exclude='.cache' \
+              --exclude='node_modules' \
+              --exclude='*.tmp' \
+              --exclude='*.log' \
+              --warning=no-file-changed \
+              ${{ env.VPS_USER }} 2>/dev/null || echo "⚠️ User data backup incomplete"
+          fi
 
           # 2. Backup system packages
           echo "📦 Backing up installed packages..."
           dpkg --get-selections > backup/system-packages.list
           apt-mark showauto > backup/auto-packages.list
 
-          # 3. Backup web server configurations (Apache/Nginx)
+          # 3. Backup web server configurations
           echo "🌐 Backing up web server configs..."
-          sudo tar -czf backup/webserver-config.tar.gz \
-            --ignore-failed-read \
-            /etc/apache2 /etc/nginx /etc/letsencrypt \
-            2>/dev/null || echo "⚠️ Web server config not found"
+          CONFIG_DIRS=""
+          [ -d "/etc/apache2" ] && CONFIG_DIRS="$CONFIG_DIRS /etc/apache2"
+          [ -d "/etc/nginx" ] && CONFIG_DIRS="$CONFIG_DIRS /etc/nginx"
+          [ -d "/etc/letsencrypt" ] && CONFIG_DIRS="$CONFIG_DIRS /etc/letsencrypt"
+          
+          if [ -n "$CONFIG_DIRS" ]; then
+            sudo tar -czf backup/webserver-config.tar.gz \
+              --ignore-failed-read \
+              $CONFIG_DIRS \
+              2>/dev/null || echo "⚠️ Web server config backup incomplete"
+          else
+            # Create empty tar file
+            tar -czf backup/webserver-config.tar.gz --files-from /dev/null 2>/dev/null || true
+            echo "ℹ️ No web server configs found, created empty backup"
+          fi
 
           # 4. Backup website data
           echo "💾 Backing up website data..."
-          sudo tar -czf backup/webserver-data.tar.gz \
-            --ignore-failed-read \
-            /var/www /home/${{ env.VPS_USER }}/www \
-            /home/${{ env.VPS_USER }}/public_html \
-            2>/dev/null || echo "⚠️ Website data not found"
+          # Create empty tar if no directories exist
+          WEBSITE_DIRS=""
+          [ -d "/var/www" ] && WEBSITE_DIRS="$WEBSITE_DIRS /var/www"
+          [ -d "/home/${{ env.VPS_USER }}/www" ] && WEBSITE_DIRS="$WEBSITE_DIRS /home/${{ env.VPS_USER }}/www"
+          [ -d "/home/${{ env.VPS_USER }}/public_html" ] && WEBSITE_DIRS="$WEBSITE_DIRS /home/${{ env.VPS_USER }}/public_html"
+          
+          if [ -n "$WEBSITE_DIRS" ]; then
+            sudo tar -czf backup/webserver-data.tar.gz \
+              --ignore-failed-read \
+              $WEBSITE_DIRS \
+              2>/dev/null || echo "⚠️ Website data backup incomplete"
+          else
+            # Create empty tar file to maintain consistency
+            tar -czf backup/webserver-data.tar.gz --files-from /dev/null 2>/dev/null || true
+            echo "ℹ️ No website directories found, created empty backup"
+          fi
 
-          # 5. Backup databases (MySQL/MariaDB)
+          # 5. Backup databases
           echo "🗄️ Backing up databases..."
           if command -v mysql >/dev/null 2>&1; then
-            # Backup all databases (simplified command)
-            sudo mysqldump --all-databases --single-transaction > backup/all-databases.sql 2>/dev/null || \
-              echo "⚠️ Could not backup databases"
-            # Compress database backup
-            gzip -f backup/all-databases.sql || true
+            # Ensure MySQL is running
+            sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null || true
+            sleep 3
+            
+            # Test connection before backup
+            if mysql -e "SELECT 1;" 2>/dev/null; then
+              echo "✅ MySQL connection successful, creating backup..."
+              mysqldump --all-databases --single-transaction > backup/all-databases.sql 2>/dev/null && \
+                gzip -f backup/all-databases.sql && echo "✅ Database backup completed" || \
+                echo "⚠️ Database backup failed"
+            else
+              echo "⚠️ MySQL connection failed, creating empty backup"
+              touch backup/all-databases.sql && gzip backup/all-databases.sql
+            fi
           else
-            echo "⚠️ MySQL not installed, skipping database backup"
+            echo "ℹ️ MySQL not installed, creating empty backup"
+            touch backup/all-databases.sql && gzip backup/all-databases.sql
           fi
 
           # 6. Backup aaPanel configuration
           echo "⚙️ Backing up aaPanel config..."
-          sudo tar -czf backup/aapanel-config.tar.gz \
-            --ignore-failed-read \
-            /www/server/panel /www/server/data \
-            /www/server/nginx /www/server/apache \
-            /www/server/php /www/server/mysql \
-            2>/dev/null || echo "⚠️ aaPanel not installed"
+          AAPANEL_DIRS=""
+          [ -d "/www/server/panel" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/panel"
+          [ -d "/www/server/data" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/data"
+          [ -d "/www/server/nginx" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/nginx"
+          [ -d "/www/server/apache" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/apache"
+          [ -d "/www/server/php" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/php"
+          [ -d "/www/server/mysql" ] && AAPANEL_DIRS="$AAPANEL_DIRS /www/server/mysql"
+          
+          if [ -n "$AAPANEL_DIRS" ]; then
+            sudo tar -czf backup/aapanel-config.tar.gz \
+              --ignore-failed-read \
+              $AAPANEL_DIRS \
+              2>/dev/null || echo "⚠️ aaPanel backup incomplete"
+          else
+            tar -czf backup/aapanel-config.tar.gz --files-from /dev/null 2>/dev/null || true
+            echo "ℹ️ aaPanel not installed, created empty backup"
+          fi
 
           # 7. Backup PHP configuration
           echo "🐘 Backing up PHP config..."
-          sudo tar -czf backup/php-config.tar.gz \
-            --ignore-failed-read \
-            /etc/php /usr/lib/php /usr/local/php \
-            2>/dev/null || echo "⚠️ PHP config not found"
+          PHP_DIRS=""
+          [ -d "/etc/php" ] && PHP_DIRS="$PHP_DIRS /etc/php"
+          [ -d "/usr/lib/php" ] && PHP_DIRS="$PHP_DIRS /usr/lib/php"
+          [ -d "/usr/local/php" ] && PHP_DIRS="$PHP_DIRS /usr/local/php"
+          
+          if [ -n "$PHP_DIRS" ]; then
+            sudo tar -czf backup/php-config.tar.gz \
+              --ignore-failed-read \
+              $PHP_DIRS \
+              2>/dev/null || echo "⚠️ PHP config backup incomplete"
+          else
+            tar -czf backup/php-config.tar.gz --files-from /dev/null 2>/dev/null || true
+            echo "ℹ️ PHP config not found, created empty backup"
+          fi
 
           # 8. Backup system services
           echo "🔧 Backing up system services..."
-          sudo tar -czf backup/system-services.tar.gz \
-            --ignore-failed-read \
-            /etc/systemd/system /lib/systemd/system \
-            /etc/init.d /etc/default \
-            2>/dev/null || echo "⚠️ System services backup incomplete"
+          SERVICE_DIRS=""
+          [ -d "/etc/systemd/system" ] && SERVICE_DIRS="$SERVICE_DIRS /etc/systemd/system"
+          [ -d "/lib/systemd/system" ] && SERVICE_DIRS="$SERVICE_DIRS /lib/systemd/system"
+          [ -d "/etc/init.d" ] && SERVICE_DIRS="$SERVICE_DIRS /etc/init.d"
+          [ -d "/etc/default" ] && SERVICE_DIRS="$SERVICE_DIRS /etc/default"
+          
+          if [ -n "$SERVICE_DIRS" ]; then
+            sudo tar -czf backup/system-services.tar.gz \
+              --ignore-failed-read \
+              $SERVICE_DIRS \
+              2>/dev/null || echo "⚠️ System services backup incomplete"
+          else
+            tar -czf backup/system-services.tar.gz --files-from /dev/null 2>/dev/null || true
+            echo "ℹ️ System services not found, created empty backup"
+          fi
 
           # 9. Create backup manifest
           echo "📝 Creating backup manifest..."
-          cat > backup/manifest.txt << EOF
-          Backup created: $(date)
-          Components backed up:
-          - User home directory
-          - System packages
-          - Web server configurations
-          - Website data
-          - Databases
-          - aaPanel configuration
-          - PHP configuration
-          - System services
-          EOF
+          cat > backup/manifest.txt << 'EOF'
+Backup created: $(date)
+Components backed up:
+- User home directory
+- System packages  
+- Web server configurations
+- Website data
+- Databases
+- aaPanel configuration
+- PHP configuration
+- System services
+EOF
 
-          echo "✅ Complete backup created: $(du -sh backup)"
+          echo "✅ Complete backup created: $(du -sh backup 2>/dev/null || echo 'Size calculation failed')"
 
-      # ===== UPLOAD COMPLETE BACKUP =====
-      - name: Upload complete backup to MEGA
+      # ===== UPLOAD TO GITHUB ARTIFACTS =====
+      - name: Upload backup as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ===== SAVE ARTIFACT LINK TO MEGA =====
+      - name: Save artifact link to MEGA
         if: always()
         run: |
-          echo "☁️ Uploading complete backup to MEGA..."
-          rclone mkdir mega:${{ env.BACKUP_DIR }} || true
+          echo "☁️ Saving new artifact link to MEGA..."
           
-          # Upload all backup components
-          for backup_file in backup/*; do
-            if [ -f "$backup_file" ]; then
-              echo "⬆️ Uploading $(basename $backup_file)..."
-              rclone copy "$backup_file" mega:${{ env.BACKUP_DIR }} --progress --no-traverse
+          # Get current run ID and construct artifact link
+          RUN_ID="${{ github.run_id }}"
+          
+          # Wait a moment for artifact to be processed
+          sleep 30
+          
+          # Get artifact ID from current run
+          ARTIFACTS_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts")
+          
+          ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.name == "vps-backup") | .id')
+          
+          if [ -n "$ARTIFACT_ID" ] && [ "$ARTIFACT_ID" != "null" ]; then
+            # Create direct artifact link
+            ARTIFACT_LINK="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
+            echo "🔗 New artifact link: $ARTIFACT_LINK"
+            
+            # Save to file
+            echo "$ARTIFACT_LINK" > artifact-link.txt
+            
+            # Upload to MEGA
+            rclone copy artifact-link.txt mega: --progress || echo "⚠️ Failed to upload link to MEGA"
+            
+            echo "✅ Artifact link saved to MEGA for next session"
+          else
+            echo "⚠️ Could not get artifact ID for current run"
+            echo "📋 Manual link format: https://github.com/${{ github.repository }}/actions/runs/$RUN_ID/artifacts/ARTIFACT_ID"
+          fi
+
+      # ===== DISPLAY RESTORATION INFO =====
+      - name: Show restoration summary
+        if: always()
+        run: |
+          echo "=================================="
+          echo "📦 Backup & Restoration Summary"
+          echo "=================================="
+          
+          if [ "${{ steps.check-mega-link.outputs.link_found }}" = "true" ]; then
+            echo "🔗 Source: MEGA stored link"
+            if [ "${{ steps.download-from-mega-link.outputs.download_success }}" = "true" ]; then
+              echo "✅ Restoration: SUCCESS"
+            else
+              echo "❌ Restoration: FAILED (link expired/invalid)"
             fi
-          done
+          elif [ "${{ steps.download-artifact.outputs.download_success }}" = "true" ]; then
+            echo "🔗 Source: API discovery"
+            echo "✅ Restoration: SUCCESS"
+          else
+            echo "🆕 Source: Fresh installation"
+            echo "ℹ️ No previous backup found or restoration failed"
+          fi
           
-          echo "✅ Complete backup uploaded to MEGA"
+          echo "=================================="
+          echo "💾 New backup saved to:"
+          echo "   - GitHub Artifacts (7 days)"
+          echo "   - MEGA link file (persistent)"
+          echo "🔄 Next session will auto-restore from MEGA link"
+          echo "=================================="
 
       # ===== FINAL REPORT =====
       - name: Session report
@@ -267,7 +551,7 @@ jobs:
           echo "VPS Session Completed"
           echo "=================================="
           echo "Status: ${{ job.status }}"
-          echo "Backup: ✅ Complete system snapshot uploaded"
-          echo "Includes: User data, Packages, Websites, Databases, Configs"
-          echo "Next session will restore exact same state"
+          echo "Backup: ✅ Uploaded to GitHub Artifacts"
+          echo "Link: ✅ Saved to MEGA for persistence"
+          echo "Next session will auto-restore this exact state"
           echo "=================================="
