@@ -1,4 +1,8 @@
-name: 🕷️ Spidey Persistent VPS - Fixed Backup
+# 🕷️ Spidey Persistent VPS - Optimized Workflow
+# This version improves logic by separating the initial setup from the restore process,
+# eliminating redundant steps and ensuring a cleaner execution flow.
+
+name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
   workflow_dispatch:
@@ -6,9 +10,9 @@ on:
     - cron: '0 0 * * *'  # Daily backup at midnight
 
 env:
-  PERSISTENT_DIR: /opt/persistent-vps
-  BACKUP_STORE: /var/backups/vps  # Separate location for backups
+  BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
+  MEGA_REMOTE: mega:vps-backup # Rclone remote path
 
 jobs:
   vps:
@@ -16,23 +20,16 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 🕸️ Checkout Repo
-      - name: 🕸️ Checkout
+      # 1. Basic Setup & Tool Installation
+      - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
-      # ⚡ Install Required Tools
-      - name: ⚡ Install System Tools
+      - name: ⚡ Install System Tools & Rclone
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc lsof screen
-
-      # ⚡ Install Rclone
-      - name: ⚡ Install Rclone
-        run: |
+          sudo apt-get install -y curl wget unzip tar psmisc screen
           curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version
 
-      # ☁️ Configure Rclone MEGA
       - name: ☁️ Configure Rclone (MEGA)
         run: |
           mkdir -p ~/.config/rclone
@@ -43,151 +40,81 @@ jobs:
           pass = ${{ secrets.MEGA_PASS }}
           EOF
 
-      # ♻️ Restore VPS from Backup (if exists)
-      - name: ♻️ Restore From MEGA
+      # 2. Restore or Initialize System
+      - name: ♻️ Restore from Backup OR Initialize
+        id: restore
         run: |
-          echo "🔍 Checking for existing backup..."
-          if rclone ls mega:vps-backup/$BACKUP_NAME >/dev/null 2>&1; then
-            echo "📥 Downloading VPS backup..."
-            rclone copy mega:vps-backup/$BACKUP_NAME /tmp/
-            
-            echo "🛑 Stopping services that might interfere with restore..."
-            sudo pkill -f "tmate" || true
-            sudo pkill -f "tailscale" || true
-            
-            echo "🔓 Unpacking backup to root..."
-            sudo tar -xzf /tmp/$BACKUP_NAME -C /
-            
-            # Ensure our directories exist
-            sudo mkdir -p $PERSISTENT_DIR $BACKUP_STORE
-            echo "✅ Restore complete"
+          echo "🔍 Checking for existing backup on MEGA..."
+          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
+            echo "✅ Backup found. Restoring system state..."
+            rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
+            sudo tar -xzf /tmp/${BACKUP_NAME} -C /
+            echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No previous backup found. Starting fresh!"
-            sudo mkdir -p $PERSISTENT_DIR $BACKUP_STORE
+            echo "ℹ️ No backup found. This will be a fresh installation."
+            sudo mkdir -p /home/jacky /opt /srv /var/www
+            echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 👤 Create Jacky User + Set Hostname
-      - name: 👤 Setup User & Hostname
+      # 3. First-Time Setup (only runs if no backup was found)
+      - name: 👤 Create User & Set Hostname (First Run Only)
+        if: steps.restore.outputs.is_new_install == 'true'
         run: |
-          if ! id -u jacky >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "jacky:root" | sudo chpasswd
-            sudo usermod -aG sudo jacky
-          fi
-          
-          # Restore home directory if it exists in backup
-          if [ -d "$PERSISTENT_DIR/home/jacky" ]; then
-            echo "🔄 Restoring jacky home directory..."
-            sudo rsync -a $PERSISTENT_DIR/home/jacky/ /home/jacky/
-            sudo chown -R jacky:jacky /home/jacky
-          fi
-          
+          echo "🚀 Performing first-time user and hostname setup..."
+          sudo useradd -m -s /bin/bash jacky
+          echo "jacky:root" | sudo chpasswd
+          sudo usod -aG sudo jacky
           sudo hostnamectl set-hostname github-vps
-          echo "✅ User jacky ready (password: root)"
-          echo "✅ Hostname set to github-vps"
+          echo "✅ User 'jacky' created with password 'root'"
 
-      # 🕸️ Tailscale Setup with State Restoration
-      - name: 🕸️ Tailscale Setup
+      - name: 🕸️ Initial Tailscale Setup (First Run Only)
+        if: steps.restore.outputs.is_new_install == 'true'
         run: |
+          echo "🚀 Performing first-time Tailscale setup..."
           curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps
+
+      # 4. Runtime Configuration (runs every time)
+      - name: 🚀 Start System Services
+        run: |
+          echo "🔄 (Re)loading system services..."
+          sudo systemctl daemon-reload
+          # Enable any specific services you backed up, e.g.:
+          # sudo systemctl enable --now my-persistent-app.service || true
+          
+          echo "🔄 Starting Tailscale service..."
           sudo systemctl enable --now tailscaled
-
-          # Restore Tailscale state if available
-          if [ -d "$PERSISTENT_DIR/var/lib/tailscale" ]; then
-            echo "♻️ Restoring Tailscale state..."
-            sudo systemctl stop tailscaled
-            sudo rsync -a $PERSISTENT_DIR/var/lib/tailscale/ /var/lib/tailscale/
-            sudo systemctl start tailscaled
-            sleep 3
-            sudo tailscale up --hostname=github-vps --reset || true
-          else
-            echo "🆕 No Tailscale state found, using fresh auth key..."
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps || true
-          fi
-
-          echo "✅ Tailscale setup complete"
+          sudo tailscale up --hostname=github-vps --reset || true
+          
+          echo "✅ Services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
 
-      # 🔧 Restore System Services
-      - name: 🔧 Restore System Services
-        run: |
-          echo "🔧 Restoring system services..."
-          
-          # Restore systemd services if they exist
-          if [ -d "$PERSISTENT_DIR/etc/systemd/system" ]; then
-            sudo rsync -a $PERSISTENT_DIR/etc/systemd/system/ /etc/systemd/system/
-            sudo systemctl daemon-reload
-          fi
-          
-          # Start common services that should persist
-          if [ -f "/etc/systemd/system/persistent-service.service" ]; then
-            sudo systemctl enable --now persistent-service.service
-          fi
-          
-          echo "✅ Services restored"
-
-      # 🛰️ Start Tmate Session in Background
       - name: 🛰️ Start Tmate Session
         run: |
-          # Install tmate
           sudo apt-get install -y tmate
-          
-          # Start tmate in a screen session that will persist
+          # Start tmate in a detached screen as the 'jacky' user
           sudo -u jacky screen -dmS tmate-session tmate
           sleep 3
-          
-          # Get connection information
-          echo "Tmate session started in background screen session"
-          echo "Use 'sudo -u jacky screen -r tmate-session' to attach"
+          echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 💾 Create Immediate Backup
-      - name: 💾 Create Initial Backup
-        run: |
-          echo "📦 Creating initial backup..."
-          
-          # Create backup in temporary location
-          sudo tar --ignore-failed-read -czf /tmp/backup.tar.gz \
-            /home/jacky \
-            /etc/hostname \
-            /etc/hosts \
-            /etc/systemd/system \
-            /var/lib/tailscale \
-            /opt \
-            /srv \
-            /var/www 2>/dev/null || true
-          
-          # Move to backup store directory
-          sudo mkdir -p $BACKUP_STORE
-          sudo mv /tmp/backup.tar.gz $BACKUP_STORE/$BACKUP_NAME
-          echo "✅ Initial backup created at $BACKUP_STORE/$BACKUP_NAME"
-
-      # ☁️ Upload Initial Backup to MEGA
-      - name: ☁️ Upload Initial Backup
-        run: |
-          echo "🚀 Uploading initial backup to MEGA..."
-          rclone copy $BACKUP_STORE/$BACKUP_NAME mega:vps-backup/ --progress
-          echo "✅ Initial backup uploaded"
-
-      # ⏳ Main Wait Loop
+      # 5. Maintain the Session
       - name: ⏳ Maintain VPS Session
         run: |
-          echo "🖥️ VPS is now running and maintained"
-          echo "The system will automatically backup before termination"
-          echo "Session will timeout after 6 hours or press Ctrl+C to stop early"
-          
-          # Wait for most of the timeout period (leaving time for backup)
-          sleep 1m
+          echo "🖥️ VPS is now running."
+          echo "Session will time out after 6 hours. Final backup will run automatically."
+          sleep 354m
 
-      # 💾 Final Backup
+      # 6. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
-          echo "🛑 Preparing system for backup..."
+          echo "🛑 Stopping services for a clean backup..."
           sudo systemctl stop tailscaled || true
           sudo pkill -f "tmate" || true
           
           echo "📦 Creating final backup archive..."
-          sudo tar --ignore-failed-read -czf /tmp/backup.tar.gz \
+          sudo mkdir -p ${{ env.BACKUP_STORE }}
+          sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
             /home/jacky \
             /etc/hostname \
             /etc/hosts \
@@ -197,26 +124,19 @@ jobs:
             /srv \
             /var/www 2>/dev/null || true
           
-          sudo mkdir -p $BACKUP_STORE
-          sudo mv /tmp/backup.tar.gz $BACKUP_STORE/$BACKUP_NAME
-          echo "✅ Final backup created: $BACKUP_STORE/$BACKUP_NAME"
+          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
-      # ☁️ Upload Final Backup to MEGA
       - name: ☁️ Upload Final Backup to MEGA
         if: always()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
-          rclone copy $BACKUP_STORE/$BACKUP_NAME mega:vps-backup/ --progress
-          echo "✅ Final backup uploaded successfully"
+          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
+          echo "✅ Final backup uploaded successfully."
 
-      # 📝 Final Status Report
-      - name: 📝 Status Report
+      - name: 📝 Final Status Report
         if: always()
         run: |
-          echo "=== VPS STATUS REPORT ==="
-          echo "Hostname: $(hostname)"
-          echo "User: jacky (password: root)"
-          echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Not configured')"
-          echo "Backup Status: ${{ job.status }}"
-          echo "Backup Location: $BACKUP_STORE/$BACKUP_NAME"
+          echo "=== VPS Session Ended ==="
+          echo "Final job status: ${{ job.status }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           echo "========================="
