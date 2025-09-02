@@ -1,4 +1,4 @@
-name: 🕷️ Spidey Persistent VPS - Enhanced
+name: 🕷️ Spidey Persistent VPS - Fixed Backup
 
 on:
   workflow_dispatch:
@@ -7,6 +7,7 @@ on:
 
 env:
   PERSISTENT_DIR: /opt/persistent-vps
+  BACKUP_STORE: /var/backups/vps  # Separate location for backups
   BACKUP_NAME: vps-backup-latest.tar.gz
 
 jobs:
@@ -23,7 +24,7 @@ jobs:
       - name: ⚡ Install System Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc lsof
+          sudo apt-get install -y curl wget unzip tar psmisc lsof screen
 
       # ⚡ Install Rclone
       - name: ⚡ Install Rclone
@@ -48,29 +49,21 @@ jobs:
           echo "🔍 Checking for existing backup..."
           if rclone ls mega:vps-backup/$BACKUP_NAME >/dev/null 2>&1; then
             echo "📥 Downloading VPS backup..."
-            rclone copy mega:vps-backup/$BACKUP_NAME .
+            rclone copy mega:vps-backup/$BACKUP_NAME /tmp/
             
             echo "🛑 Stopping services that might interfere with restore..."
             sudo pkill -f "tmate" || true
             sudo pkill -f "tailscale" || true
             
-            echo "🔓 Unpacking backup..."
-            sudo mkdir -p $PERSISTENT_DIR
-            sudo tar -xzf $BACKUP_NAME -C $PERSISTENT_DIR
+            echo "🔓 Unpacking backup to root..."
+            sudo tar -xzf /tmp/$BACKUP_NAME -C /
             
-            # Restore system files
-            if [ -f "$PERSISTENT_DIR/etc/hostname" ]; then
-              sudo cp $PERSISTENT_DIR/etc/hostname /etc/hostname
-            fi
-            
-            if [ -f "$PERSISTENT_DIR/etc/hosts" ]; then
-              sudo cp $PERSISTENT_DIR/etc/hosts /etc/hosts
-            fi
-            
+            # Ensure our directories exist
+            sudo mkdir -p $PERSISTENT_DIR $BACKUP_STORE
             echo "✅ Restore complete"
           else
             echo "ℹ️ No previous backup found. Starting fresh!"
-            sudo mkdir -p $PERSISTENT_DIR
+            sudo mkdir -p $PERSISTENT_DIR $BACKUP_STORE
           fi
 
       # 👤 Create Jacky User + Set Hostname
@@ -133,57 +126,26 @@ jobs:
           
           echo "✅ Services restored"
 
-      # 🛰️ Start Tmate Session with Persistent Socket
-      - name: 🛰️ Start Persistent Tmate Session
+      # 🛰️ Start Tmate Session in Background
+      - name: 🛰️ Start Tmate Session
         run: |
           # Install tmate
           sudo apt-get install -y tmate
           
-          # Set up tmate with persistent socket
-          TMATE_SOCK="/tmp/tmate.sock"
-          TMATE_SESSION_NAME="github-vps-$(date +%s)"
-          
-          # Kill any existing tmate sessions
-          sudo pkill -f "tmate" || true
-          
-          # Start tmate in a background screen session with persistent socket
-          sudo -u jacky bash -c "cd /home/jacky && tmate -S $TMATE_SOCK new-session -d -s $TMATE_SESSION_NAME"
+          # Start tmate in a screen session that will persist
+          sudo -u jacky screen -dmS tmate-session tmate
           sleep 3
           
-          # Display connection information
-          sudo -u jacky bash -c "tmate -S $TMATE_SOCK display -p '#{tmate_ssh}'" | head -1
-          sudo -u jacky bash -c "tmate -S $TMATE_SOCK display -p '#{tmate_web}'" | head -1
-          
-          # Keep the session alive in background
-          echo "🛰️ Tmate session started with persistent socket: $TMATE_SOCK"
+          # Get connection information
+          echo "Tmate session started in background screen session"
+          echo "Use 'sudo -u jacky screen -r tmate-session' to attach"
 
-      # 🕐 Keep Alive Mechanism
-      - name: 🕐 Keep Session Alive
+      # 💾 Create Immediate Backup
+      - name: 💾 Create Initial Backup
         run: |
-          # This step will run for the duration of the job timeout
-          echo "⏰ Session keep-alive active. Press Ctrl+C to stop the session."
-          echo "📝 The VPS will be automatically backed up when the session ends."
+          echo "📦 Creating initial backup..."
           
-          # Infinite loop to keep the job running
-          while true; do
-            sleep 300
-            echo "🔄 Session heartbeat: $(date)"
-          done
-
-      # 💾 Create Backup (on success or failure)
-      - name: 💾 Create Backup
-        if: always()
-        run: |
-          echo "🛑 Preparing system for backup..."
-          
-          # Stop services that might interfere with backup
-          sudo systemctl stop tailscaled || true
-          sudo pkill -f "tmate" || true
-          
-          echo "📦 Creating backup archive..."
-          sudo mkdir -p $PERSISTENT_DIR
-          
-          # Backup important directories
+          # Create backup in temporary location
           sudo tar --ignore-failed-read -czf /tmp/backup.tar.gz \
             /home/jacky \
             /etc/hostname \
@@ -194,17 +156,58 @@ jobs:
             /srv \
             /var/www 2>/dev/null || true
           
-          # Move to persistent directory
-          sudo mv /tmp/backup.tar.gz $PERSISTENT_DIR/$BACKUP_NAME
-          echo "✅ Backup created: $PERSISTENT_DIR/$BACKUP_NAME"
+          # Move to backup store directory
+          sudo mkdir -p $BACKUP_STORE
+          sudo mv /tmp/backup.tar.gz $BACKUP_STORE/$BACKUP_NAME
+          echo "✅ Initial backup created at $BACKUP_STORE/$BACKUP_NAME"
 
-      # ☁️ Upload Backup to MEGA
-      - name: ☁️ Upload Backup to MEGA
+      # ☁️ Upload Initial Backup to MEGA
+      - name: ☁️ Upload Initial Backup
+        run: |
+          echo "🚀 Uploading initial backup to MEGA..."
+          rclone copy $BACKUP_STORE/$BACKUP_NAME mega:vps-backup/ --progress
+          echo "✅ Initial backup uploaded"
+
+      # ⏳ Main Wait Loop
+      - name: ⏳ Maintain VPS Session
+        run: |
+          echo "🖥️ VPS is now running and maintained"
+          echo "The system will automatically backup before termination"
+          echo "Session will timeout after 6 hours or press Ctrl+C to stop early"
+          
+          # Wait for most of the timeout period (leaving time for backup)
+          sleep 1m
+
+      # 💾 Final Backup
+      - name: 💾 Create Final Backup
         if: always()
         run: |
-          echo "🚀 Uploading backup to MEGA..."
-          rclone copy $PERSISTENT_DIR/$BACKUP_NAME mega:vps-backup/ --progress
-          echo "✅ Backup uploaded successfully"
+          echo "🛑 Preparing system for backup..."
+          sudo systemctl stop tailscaled || true
+          sudo pkill -f "tmate" || true
+          
+          echo "📦 Creating final backup archive..."
+          sudo tar --ignore-failed-read -czf /tmp/backup.tar.gz \
+            /home/jacky \
+            /etc/hostname \
+            /etc/hosts \
+            /etc/systemd/system \
+            /var/lib/tailscale \
+            /opt \
+            /srv \
+            /var/www 2>/dev/null || true
+          
+          sudo mkdir -p $BACKUP_STORE
+          sudo mv /tmp/backup.tar.gz $BACKUP_STORE/$BACKUP_NAME
+          echo "✅ Final backup created: $BACKUP_STORE/$BACKUP_NAME"
+
+      # ☁️ Upload Final Backup to MEGA
+      - name: ☁️ Upload Final Backup to MEGA
+        if: always()
+        run: |
+          echo "🚀 Uploading final backup to MEGA..."
+          rclone copy $BACKUP_STORE/$BACKUP_NAME mega:vps-backup/ --progress
+          echo "✅ Final backup uploaded successfully"
 
       # 📝 Final Status Report
       - name: 📝 Status Report
@@ -215,4 +218,5 @@ jobs:
           echo "User: jacky (password: root)"
           echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Not configured')"
           echo "Backup Status: ${{ job.status }}"
+          echo "Backup Location: $BACKUP_STORE/$BACKUP_NAME"
           echo "========================="
