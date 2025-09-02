@@ -36,7 +36,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq zip unzip pigz rsync
+          sudo apt install -y curl tmate jq zip unzip pigz rsync pv
 
       - name: Validate required secrets
         run: |
@@ -72,9 +72,6 @@ jobs:
             sudo usermod -aG sudo ${{ env.VPS_USER }}
             echo "${{ env.VPS_USER }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ env.VPS_USER }}
             echo "✅ User ${{ env.VPS_USER }} created with sudo access"
-            
-            # Create default directories
-            sudo -u ${{ env.VPS_USER }} mkdir -p /home/${{ env.VPS_USER }}/{www,projects,scripts,backups}
           else
             echo "🔁 User ${{ env.VPS_USER }} already exists"
           fi
@@ -135,12 +132,12 @@ jobs:
           DOWNLOAD_SUCCESS=false
           
           while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ] && [ "$DOWNLOAD_SUCCESS" = false ]; do
-            HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.tar.gz \
+            HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
             
-            if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.tar.gz" ]; then
+            if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
               DOWNLOAD_SUCCESS=true
               break
             else
@@ -151,13 +148,15 @@ jobs:
           done
           
           if [ "$DOWNLOAD_SUCCESS" = true ]; then
-            echo "📦 Extracting backup..."
+            echo "📦 Extracting backup ZIP file..."
             cd restore
-            tar -xzf backup.tar.gz
-            rm backup.tar.gz
+            unzip -o backup.zip
+            rm backup.zip
             cd ..
             echo "✅ Backup downloaded and extracted from MEGA link"
             echo "download_success=true" >> $GITHUB_OUTPUT
+            echo "📁 Restore directory contents:"
+            ls -la restore/
           else
             echo "❌ Failed to download backup from MEGA link after ${{ env.MAX_RETRIES }} attempts"
             echo "download_success=false" >> $GITHUB_OUTPUT
@@ -169,18 +168,17 @@ jobs:
         run: |
           echo "🔄 Restoring complete system from backup..."
           
-          # Restore user home directory first
+          # Check what files we have in the restore directory
+          echo "📁 Files available for restoration:"
+          ls -la restore/
+          
+          # Restore user home directory first (excluding unnecessary files)
           if [ -f "restore/user-home.tar.gz" ]; then
             echo "🏠 Restoring user home directory..."
             sudo tar -xzpvf restore/user-home.tar.gz -C / --numeric-owner
             echo "✅ User home directory restored"
-          fi
-          
-          # Restore system files
-          if [ -f "restore/system-backup.tar.gz" ]; then
-            echo "💾 Restoring system files..."
-            sudo tar -xzpvf restore/system-backup.tar.gz -C / --numeric-owner
-            echo "✅ System files restored"
+          else
+            echo "⚠️ user-home.tar.gz not found in backup"
           fi
           
           # Restore packages
@@ -189,13 +187,8 @@ jobs:
             sudo apt-get update
             xargs sudo apt-get install -y < restore/packages.list
             echo "✅ Packages restored"
-          fi
-          
-          # Restore application data
-          if [ -f "restore/app-data.tar.gz" ]; then
-            echo "📱 Restoring application data..."
-            sudo tar -xzpvf restore/app-data.tar.gz -C / --numeric-owner
-            echo "✅ Application data restored"
+          else
+            echo "⚠️ packages.list not found in backup"
           fi
           
           # Fix permissions
@@ -283,56 +276,62 @@ jobs:
           
           sleep $TIMEOUT_SECONDS
 
-      # ===== COMPLETE SYSTEM BACKUP =====
-      - name: Create complete system backup
+      # ===== OPTIMIZED SYSTEM BACKUP =====
+      - name: Create optimized system backup
         if: always()
+        timeout-minutes: 30
         run: |
           mkdir -p backup
-          echo "💾 Creating complete system backup..."
+          echo "💾 Creating optimized system backup..."
           
-          # 1. Backup user home directory (MOST IMPORTANT)
-          echo "🏠 Backing up user home directory..."
+          # 1. Backup user home directory (EXCLUDE UNNECESSARY FILES)
+          echo "🏠 Backing up user home directory (excluding cache and node_modules)..."
           sudo tar -czpvf backup/user-home.tar.gz \
             --exclude=/home/${{ env.VPS_USER }}/.cache \
+            --exclude=/home/${{ env.VPS_USER }}/.npm \
+            --exclude=/home/${{ env.VPS_USER }}/.node-gyp \
+            --exclude=/home/${{ env.VPS_USER }}/.nvm/versions \
+            --exclude=/home/${{ env.VPS_USER }}/.nvm/test \
+            --exclude=/home/${{ env.VPS_USER }}/.nvm/.git \
             --exclude=/home/${{ env.VPS_USER }}/node_modules \
             --exclude=/home/${{ env.VPS_USER }}/tmp \
+            --exclude=/home/${{ env.VPS_USER }}/.local/share/Trash \
+            --exclude=/home/${{ env.VPS_USER }}/.thumbnails \
             --numeric-owner \
             /home/${{ env.VPS_USER }}
           
-          # 2. Backup system files and configurations
-          echo "⚙️ Backing up system configurations..."
-          sudo tar -czpvf backup/system-backup.tar.gz \
-            --numeric-owner \
-            /etc \
-            /var/lib \
-            /usr/local \
-            /opt \
-            /root 2>/dev/null || true
+          # 2. Backup package list only (not entire system)
+          echo "📦 Backing up installed packages..."
+          dpkg --get-selections > backup/packages.list
+          apt-mark showauto > backup/auto-packages.list
           
-          # 3. Backup application data
+          # 3. Backup important configurations only
+          echo "⚙️ Backing up important configurations..."
+          sudo tar -czpvf backup/config-backup.tar.gz \
+            --numeric-owner \
+            /etc/ssh \
+            /etc/network \
+            /etc/systemd \
+            /etc/apt/sources.list* \
+            /etc/hosts \
+            /etc/hostname \
+            /etc/fstab \
+            /etc/profile \
+            /etc/bash.bashrc \
+            2>/dev/null || true
+          
+          # 4. Backup application data (only important directories)
           echo "📱 Backing up application data..."
           sudo tar -czpvf backup/app-data.tar.gz \
             --numeric-owner \
             /var/www \
             /srv \
-            /var/lib/mysql \
-            /var/lib/postgresql \
-            /var/lib/docker 2>/dev/null || true
-          
-          # 4. Backup package list
-          echo "📦 Backing up installed packages..."
-          dpkg --get-selections > backup/packages.list
-          apt-mark showauto > backup/auto-packages.list
-          snap list > backup/snap-list.txt 2>/dev/null || true
-          
-          # 5. Backup service configurations
-          echo "🔧 Backing up service configurations..."
-          systemctl list-unit-files --type=service --state=enabled > backup/enabled-services.list
-          systemctl list-unit-files --type=service > backup/all-services.list
+            /opt \
+            2>/dev/null || true
           
           # Create detailed manifest
           cat > backup/manifest.txt << EOF
-          Complete System Backup
+          Optimized System Backup
           ======================
           Created: $(date)
           Workflow: ${{ github.run_id }}
@@ -341,22 +340,25 @@ jobs:
           Tailscale IP: $(tailscale ip -4)
           
           Backup Includes:
-          - User Home: /home/${{ env.VPS_USER }} (all user files)
-          - System Configs: /etc, /var/lib
-          - Application Data: /var/www, /srv, databases
+          - User Home: /home/${{ env.VPS_USER }} (excluding cache and node_modules)
+          - System Configs: /etc/ssh, /etc/network, /etc/systemd
+          - Application Data: /var/www, /srv, /opt
           - Installed Packages: $(dpkg --get-selections | wc -l) packages
-          - Service Configurations
           
-          User Files Backed Up:
-          $(find /home/${{ env.VPS_USER }} -type f -name "*" | head -20 | sed 's/^/  - /')
-          $(if [ $(find /home/${{ env.VPS_USER }} -type f | wc -l) -gt 20 ]; then echo "  - ... and more"; fi)
+          Excluded to save space:
+          - Cache directories (.cache, .npm, .node-gyp)
+          - Node.js versions in .nvm/versions
+          - node_modules directories
+          - Temporary files
+          - Test directories
           ======================
           EOF
           
-          # Show backup contents
+          # Show backup contents and size
           echo "📊 Backup contents:"
           du -sh backup/*
-          echo "✅ Complete system backup created"
+          TOTAL_SIZE=$(du -sh backup | cut -f1)
+          echo "✅ Optimized backup created: Total size: $TOTAL_SIZE"
 
       # ===== UPLOAD TO GITHUB ARTIFACTS =====
       - name: Upload complete backup
@@ -408,14 +410,11 @@ jobs:
           # Check if user home exists and has content
           if [ -d "/home/${{ env.VPS_USER }}" ]; then
             echo "✅ User home directory exists"
-            echo "📁 Contents:"
-            ls -la /home/${{ env.VPS_USER }}/
+            echo "📁 Important contents:"
+            ls -la /home/${{ env.VPS_USER }}/ | grep -E '\.(bash|profile|git|ssh|config)'
             echo ""
             echo "💾 Disk usage:"
             du -sh /home/${{ env.VPS_USER }}
-            echo ""
-            echo "📋 File count:"
-            find /home/${{ env.VPS_USER }} -type f | wc -l
           else
             echo "❌ User home directory missing!"
           fi
@@ -437,12 +436,8 @@ jobs:
           echo ""
           echo "📊 User Data:"
           echo "Home Size: $(du -sh /home/${{ env.VPS_USER }} 2>/dev/null | cut -f1 || echo 'Missing')"
-          echo "Files: $(find /home/${{ env.VPS_USER }} -type f 2>/dev/null | wc -l || echo '0')"
           echo ""
           echo "🔧 Services Status:"
-          systemctl is-active mysql 2>/dev/null && echo "✅ MySQL: Running" || echo "❌ MySQL: Not running"
-          systemctl is-active apache2 2>/dev/null && echo "✅ Apache: Running" || echo "❌ Apache: Not running"
-          systemctl is-active nginx 2>/dev/null && echo "✅ Nginx: Running" || echo "❌ Nginx: Not running"
           systemctl is-active tailscale 2>/dev/null && echo "✅ Tailscale: Running" || echo "❌ Tailscale: Not running"
           echo "=================================="
 
