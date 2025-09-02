@@ -109,6 +109,9 @@ jobs:
           sudo systemctl stop tailscaled || true
           sudo pkill -f "tmate" || true
           
+          # This is the crucial fix: create the backup store directory
+          sudo mkdir -p ${{ env.BACKUP_STORE }}
+          
           echo "📦 Creating final backup archive..."
           sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
             --absolute-names \
