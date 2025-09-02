@@ -1,4 +1,4 @@
-name: Persistent VPS with Complete System Backup
+name: Persistent VPS with User Data Backup
 
 on:
   workflow_dispatch:
@@ -36,32 +36,15 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq zip unzip pigz rsync pv
+          sudo apt install -y curl tmate jq zip unzip
 
       - name: Validate required secrets
         run: |
-          if [ -z "${{ secrets.MEGA_USER }}" ] || [ -z "${{ secrets.MEGA_PASS }}" ]; then
-            echo "❌ MEGA credentials not configured"
-            exit 1
-          fi
           if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
             echo "❌ Tailscale auth key not configured"
             exit 1
           fi
           echo "✅ All required secrets are configured"
-
-      # ===== RCLONE SETUP =====
-      - name: Install and configure rclone
-        run: |
-          curl https://rclone.org/install.sh | sudo bash
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
-          echo "✅ Rclone configured with MEGA"
 
       # ===== USER SETUP =====
       - name: Create user with sudo access
@@ -81,146 +64,130 @@ jobs:
           sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
           echo "🏷️ Hostname set to $(hostname)"
 
-      # ===== CHECK FOR ARTIFACT LINK IN MEGA =====
-      - name: Check for artifact link in MEGA
+      # ===== CHECK FOR BACKUP =====
+      - name: Check for existing backup
         if: ${{ inputs.skip_restore != true }}
-        id: check-mega-link
+        id: check-backup
         run: |
-          mkdir -p restore
-          echo "🔍 Checking for artifact link in MEGA..."
-          
-          RETRY_COUNT=0
-          while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
-            if rclone copy mega:artifact-link.txt restore/ --progress 2>/dev/null; then
-              break
-            fi
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            sleep 5
-          done
-          
-          if [ -f "restore/artifact-link.txt" ]; then
-            DIRECT_LINK=$(cat restore/artifact-link.txt | tr -d '\n\r' | xargs)
-            echo "📋 Found artifact link: $DIRECT_LINK"
-            
-            ARTIFACT_ID=$(echo "$DIRECT_LINK" | grep -o 'artifacts/[0-9]*' | cut -d'/' -f2)
-            
-            if [ -n "$ARTIFACT_ID" ]; then
-              echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
-              echo "direct_link=$DIRECT_LINK" >> $GITHUB_OUTPUT
-              echo "link_found=true" >> $GITHUB_OUTPUT
-              echo "✅ Valid artifact link found with ID: $ARTIFACT_ID"
-            else
-              echo "⚠️ Invalid artifact link format"
-              echo "link_found=false" >> $GITHUB_OUTPUT
-            fi
+          echo "🔍 Checking for existing backup..."
+          if curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+             -H "Accept: application/vnd.github.v3+json" \
+             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts" | \
+             jq -e '.artifacts[] | select(.name == "vps-user-backup")' > /dev/null; then
+            echo "backup_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Backup found"
           else
-            echo "⚠️ No artifact-link.txt found in MEGA (fresh start)"
-            echo "link_found=false" >> $GITHUB_OUTPUT
+            echo "backup_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No backup found, fresh start"
           fi
 
-      # ===== DOWNLOAD ARTIFACT FROM MEGA LINK =====
-      - name: Download backup from MEGA link
-        if: ${{ steps.check-mega-link.outputs.link_found == 'true' }}
-        id: download-from-mega-link
+      # ===== DOWNLOAD BACKUP =====
+      - name: Download previous backup
+        if: ${{ inputs.skip_restore != true && steps.check-backup.outputs.backup_exists == 'true' }}
+        id: download-backup
         run: |
-          ARTIFACT_ID=${{ steps.check-mega-link.outputs.artifact_id }}
-          echo "📥 Downloading artifact $ARTIFACT_ID from MEGA stored link..."
+          echo "📥 Downloading previous backup..."
+          
+          # Get latest artifact
+          ARTIFACT_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?name=vps-user-backup&per_page=1")
+          
+          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.artifacts[0].id')
+          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID.zip"
+          
+          echo "📦 Downloading artifact ID: $ARTIFACT_ID"
           
           mkdir -p restore
+          curl -L -o restore/backup.zip \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "$ARTIFACT_URL"
           
-          RETRY_COUNT=0
-          DOWNLOAD_SUCCESS=false
-          
-          while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ] && [ "$DOWNLOAD_SUCCESS" = false ]; do
-            HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
-            
-            if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
-              DOWNLOAD_SUCCESS=true
-              break
-            else
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "⚠️ Download attempt $RETRY_COUNT failed (HTTP: $HTTP_CODE), retrying..."
-              sleep 10
-            fi
-          done
-          
-          if [ "$DOWNLOAD_SUCCESS" = true ]; then
-            echo "📦 Extracting backup ZIP file..."
+          if [ -f "restore/backup.zip" ]; then
+            echo "📦 Extracting backup..."
             cd restore
             unzip -o backup.zip
             rm backup.zip
             cd ..
-            echo "✅ Backup downloaded and extracted from MEGA link"
+            echo "✅ Backup downloaded and extracted"
             echo "download_success=true" >> $GITHUB_OUTPUT
-            echo "📁 Restore directory contents:"
+            echo "📁 Restore contents:"
             ls -la restore/
           else
-            echo "❌ Failed to download backup from MEGA link after ${{ env.MAX_RETRIES }} attempts"
+            echo "❌ Failed to download backup"
             echo "download_success=false" >> $GITHUB_OUTPUT
           fi
 
-      # ===== COMPLETE SYSTEM RESTORATION =====
-      - name: Restore complete system
-        if: ${{ steps.download-from-mega-link.outputs.download_success == 'true' }}
+      # ===== RESTORE USER ENVIRONMENT =====
+      - name: Restore user environment
+        if: ${{ inputs.skip_restore != true && steps.download-backup.outputs.download_success == 'true' }}
         run: |
-          echo "🔄 Restoring complete system from backup..."
+          echo "🔄 Restoring user environment..."
           
-          # Check what files we have in the restore directory
-          echo "📁 Files available for restoration:"
-          ls -la restore/
-          
-          # Restore user home directory first (excluding unnecessary files)
+          # Restore user home directory
           if [ -f "restore/user-home.tar.gz" ]; then
-            echo "🏠 Restoring user home directory..."
-            sudo tar -xzpvf restore/user-home.tar.gz -C / --numeric-owner
-            echo "✅ User home directory restored"
-          else
-            echo "⚠️ user-home.tar.gz not found in backup"
+            echo "🏠 Restoring user home files..."
+            sudo tar -xzf restore/user-home.tar.gz -C / --numeric-owner
+            echo "✅ User home restored"
           fi
           
-          # Restore packages
+          # Restore installed packages
           if [ -f "restore/packages.list" ]; then
-            echo "📦 Restoring packages..."
-            sudo apt-get update
+            echo "📦 Restoring installed packages..."
+            sudo apt update
             xargs sudo apt-get install -y < restore/packages.list
             echo "✅ Packages restored"
-          else
-            echo "⚠️ packages.list not found in backup"
           fi
           
-          # Fix permissions
+          # Restore Tailscale state for same IP
+          if [ -f "restore/tailscale-state.tar.gz" ]; then
+            echo "🌐 Restoring Tailscale state..."
+            sudo tar -xzf restore/tailscale-state.tar.gz -C / --numeric-owner
+            echo "✅ Tailscale state restored"
+          fi
+          
+          # Restore application data
+          if [ -f "restore/app-data.tar.gz" ]; then
+            echo "📱 Restoring application data..."
+            sudo tar -xzf restore/app-data.tar.gz -C / --numeric-owner
+            echo "✅ Application data restored"
+          fi
+          
+          # Fix permissions with sudo
           echo "🔧 Fixing file permissions..."
           sudo chown -R ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}
           sudo chmod 700 /home/${{ env.VPS_USER }}
-          
-          # Restore systemd services
-          sudo systemctl daemon-reload
-          
-          echo "✅ Complete system restoration finished"
+          echo "✅ User environment restored"
 
-      # ===== TAILSCALE SETUP WITH PERSISTENT IP =====
-      - name: Setup Tailscale with persistent IP
+      # ===== SETUP TAILSCALE WITH PERSISTENT STATE =====
+      - name: Setup Tailscale with persistent state
         run: |
+          echo "🌐 Setting up Tailscale..."
+          
+          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
           
-          sudo tailscale up \
-            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
-            --hostname ${{ env.VPS_HOSTNAME }} \
-            --ssh \
-            --advertise-exit-node \
-            --accept-dns=false \
-            --advertise-tags=tag:github-vps
+          # Check if we have existing state, otherwise use authkey
+          if [ -f "/var/lib/tailscale/tailscale.state" ]; then
+            echo "🔁 Using existing Tailscale state..."
+            sudo systemctl start tailscaled
+            sleep 5
+          else
+            echo "🔑 Using Tailscale authkey for new connection..."
+            sudo tailscale up \
+              --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
+              --hostname ${{ env.VPS_HOSTNAME }} \
+              --ssh \
+              --advertise-exit-node \
+              --accept-dns=false
+            sleep 10
+          fi
           
-          sleep 10
+          TAILSCALE_IP=$(sudo tailscale ip -4)
+          echo "✅ Tailscale IP: $TAILSCALE_IP"
           
-          TAILSCALE_IP=$(tailscale ip -4)
-          echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          
-          # Save connection info
-          cat > /home/${{ env.VPS_USER }}/connection-info.txt << EOF
+          # Save connection info with proper permissions
+          sudo bash -c "cat > /home/${{ env.VPS_USER }}/connection-info.txt << EOF
           VPS Connection Information
           ==========================
           Tailscale IP: $TAILSCALE_IP
@@ -228,11 +195,10 @@ jobs:
           Username: ${{ env.VPS_USER }}
           Password: ${{ env.VPS_PASSWORD }}
           Hostname: ${{ env.VPS_HOSTNAME }}
-          Home Directory: /home/${{ env.VPS_USER }}
           ==========================
-          EOF
+          EOF"
           
-          chown ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}/connection-info.txt
+          sudo chown ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}/connection-info.txt
 
       # ===== VPS SESSION =====
       - name: Start VPS session
@@ -241,16 +207,17 @@ jobs:
           echo "========================"
           echo "👤 User: ${{ env.VPS_USER }}"
           echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
-          echo "🏠 Home: /home/${{ env.VPS_USER }}"
-          echo "🌐 Tailscale IP: $(tailscale ip -4)"
+          echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
           echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
           echo "========================"
           
-          # Show user directory contents
-          echo "📁 User directory contents:"
-          ls -la /home/${{ env.VPS_USER }}/
-          echo "========================"
+          # Show user environment with sudo
+          echo "📁 User home contents:"
+          sudo ls -la /home/${{ env.VPS_USER }}/
+          echo ""
+          echo "🐚 User shell environment ready!"
           
+          # Calculate timeout
           TIMEOUT=${{ env.SESSION_TIMEOUT }}
           if [[ "$TIMEOUT" =~ ^([0-9]+)([hms])$ ]]; then
             VALUE=${BASH_REMATCH[1]}
@@ -265,6 +232,7 @@ jobs:
             TIMEOUT_SECONDS=21600
           fi
           
+          # Start session
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           
@@ -276,128 +244,78 @@ jobs:
           
           sleep $TIMEOUT_SECONDS
 
-      # ===== OPTIMIZED SYSTEM BACKUP =====
-      - name: Create optimized system backup
+      # ===== CREATE USER DATA BACKUP =====
+      - name: Create user data backup
         if: always()
-        timeout-minutes: 30
+        timeout-minutes: 10
         run: |
           mkdir -p backup
-          echo "💾 Creating optimized system backup..."
+          echo "💾 Creating user data backup..."
           
-          # 1. Backup user home directory (EXCLUDE UNNECESSARY FILES)
-          echo "🏠 Backing up user home directory (excluding cache and node_modules)..."
-          sudo tar -czpvf backup/user-home.tar.gz \
+          # 1. Backup user home directory (most important)
+          echo "🏠 Backing up user home files..."
+          sudo tar -czf backup/user-home.tar.gz \
             --exclude=/home/${{ env.VPS_USER }}/.cache \
-            --exclude=/home/${{ env.VPS_USER }}/.npm \
-            --exclude=/home/${{ env.VPS_USER }}/.node-gyp \
-            --exclude=/home/${{ env.VPS_USER }}/.nvm/versions \
-            --exclude=/home/${{ env.VPS_USER }}/.nvm/test \
-            --exclude=/home/${{ env.VPS_USER }}/.nvm/.git \
             --exclude=/home/${{ env.VPS_USER }}/node_modules \
             --exclude=/home/${{ env.VPS_USER }}/tmp \
-            --exclude=/home/${{ env.VPS_USER }}/.local/share/Trash \
-            --exclude=/home/${{ env.VPS_USER }}/.thumbnails \
             --numeric-owner \
             /home/${{ env.VPS_USER }}
           
-          # 2. Backup package list only (not entire system)
-          echo "📦 Backing up installed packages..."
-          dpkg --get-selections > backup/packages.list
-          apt-mark showauto > backup/auto-packages.list
-          
-          # 3. Backup important configurations only
-          echo "⚙️ Backing up important configurations..."
-          sudo tar -czpvf backup/config-backup.tar.gz \
+          # 2. Backup Tailscale state for persistent IP
+          echo "🌐 Backing up Tailscale state..."
+          sudo tar -czf backup/tailscale-state.tar.gz \
             --numeric-owner \
-            /etc/ssh \
-            /etc/network \
-            /etc/systemd \
-            /etc/apt/sources.list* \
-            /etc/hosts \
-            /etc/hostname \
-            /etc/fstab \
-            /etc/profile \
-            /etc/bash.bashrc \
-            2>/dev/null || true
+            /var/lib/tailscale 2>/dev/null || echo "⚠️ Tailscale state not available"
           
-          # 4. Backup application data (only important directories)
+          # 3. Backup installed packages
+          echo "📦 Backing up installed packages..."
+          sudo dpkg --get-selections > backup/packages.list
+          sudo apt-mark showauto > backup/auto-packages.list
+          
+          # 4. Backup application data
           echo "📱 Backing up application data..."
-          sudo tar -czpvf backup/app-data.tar.gz \
+          sudo tar -czf backup/app-data.tar.gz \
             --numeric-owner \
             /var/www \
-            /srv \
             /opt \
-            2>/dev/null || true
+            /srv 2>/dev/null || echo "⚠️ Some app data not available"
           
-          # Create detailed manifest
-          cat > backup/manifest.txt << EOF
-          Optimized System Backup
-          ======================
+          # Create manifest
+          sudo bash -c "cat > backup/manifest.txt << EOF
+          User Data Backup
+          ================
           Created: $(date)
           Workflow: ${{ github.run_id }}
-          Repository: ${{ github.repository }}
-          Hostname: $(hostname)
-          Tailscale IP: $(tailscale ip -4)
+          User: ${{ env.VPS_USER }}
+          Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo "Unknown")
           
-          Backup Includes:
-          - User Home: /home/${{ env.VPS_USER }} (excluding cache and node_modules)
-          - System Configs: /etc/ssh, /etc/network, /etc/systemd
-          - Application Data: /var/www, /srv, /opt
-          - Installed Packages: $(dpkg --get-selections | wc -l) packages
+          Includes:
+          - User home files and configurations
+          - Installed package list
+          - Tailscale state (for persistent IP)
+          - Application data (/var/www, /opt, /srv)
           
-          Excluded to save space:
-          - Cache directories (.cache, .npm, .node-gyp)
-          - Node.js versions in .nvm/versions
-          - node_modules directories
+          Excludes:
+          - Cache files
+          - node_modules
           - Temporary files
-          - Test directories
-          ======================
-          EOF
+          ================
+          EOF"
           
-          # Show backup contents and size
-          echo "📊 Backup contents:"
-          du -sh backup/*
-          TOTAL_SIZE=$(du -sh backup | cut -f1)
-          echo "✅ Optimized backup created: Total size: $TOTAL_SIZE"
+          # Fix backup file permissions
+          sudo chown -R $USER:$USER backup/
+          
+          echo "✅ User data backup created"
+          echo "📊 Backup size: $(sudo du -sh backup | cut -f1)"
 
-      # ===== UPLOAD TO GITHUB ARTIFACTS =====
-      - name: Upload complete backup
+      # ===== UPLOAD BACKUP =====
+      - name: Upload user data backup
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vps-complete-backup
+          name: vps-user-backup
           path: backup/
           retention-days: ${{ env.BACKUP_RETENTION_DAYS }}
-
-      # ===== SAVE ARTIFACT LINK TO MEGA =====
-      - name: Save artifact link to MEGA
-        if: always()
-        run: |
-          echo "☁️ Saving artifact link to MEGA..."
-          
-          RUN_ID="${{ github.run_id }}"
-          sleep 30
-          
-          ARTIFACTS_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts")
-          
-          ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r '.artifacts[] | select(.name == "vps-complete-backup") | .id')
-          
-          if [ -n "$ARTIFACT_ID" ]; then
-            ARTIFACT_LINK="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
-            echo "$ARTIFACT_LINK" > artifact-link.txt
-            
-            RETRY_COUNT=0
-            while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
-              if rclone copy artifact-link.txt mega: --progress; then
-                echo "✅ Artifact link saved to MEGA"
-                break
-              fi
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              sleep 10
-            done
-          fi
 
       # ===== USER DATA VERIFICATION =====
       - name: Verify user data backup
@@ -407,14 +325,17 @@ jobs:
           echo "User: ${{ env.VPS_USER }}"
           echo "Home Directory: /home/${{ env.VPS_USER }}"
           
-          # Check if user home exists and has content
-          if [ -d "/home/${{ env.VPS_USER }}" ]; then
+          # Check if user home exists and has content with sudo
+          if sudo [ -d "/home/${{ env.VPS_USER }}" ]; then
             echo "✅ User home directory exists"
             echo "📁 Important contents:"
-            ls -la /home/${{ env.VPS_USER }}/ | grep -E '\.(bash|profile|git|ssh|config)'
+            sudo ls -la /home/${{ env.VPS_USER }}/ | grep -E '\.(bash|profile|git|ssh|config)' | head -10
             echo ""
             echo "💾 Disk usage:"
-            du -sh /home/${{ env.VPS_USER }}
+            sudo du -sh /home/${{ env.VPS_USER }}
+            echo ""
+            echo "📋 File count:"
+            sudo find /home/${{ env.VPS_USER }} -type f | wc -l
           else
             echo "❌ User home directory missing!"
           fi
@@ -427,18 +348,19 @@ jobs:
           echo "🖥️  VPS System Status Report"
           echo "=================================="
           echo "Hostname: $(hostname)"
-          echo "Tailscale IP: $(tailscale ip -4)"
+          echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Not connected')"
           echo "User: ${{ env.VPS_USER }}"
           echo "Home Directory: /home/${{ env.VPS_USER }}"
           echo "Session Duration: ${{ env.SESSION_TIMEOUT }}"
-          echo "Backup Size: $(du -sh backup 2>/dev/null | cut -f1)"
+          echo "Backup Size: $(sudo du -sh backup 2>/dev/null | cut -f1 || echo 'Unknown')"
           echo "Status: ${{ job.status }}"
           echo ""
           echo "📊 User Data:"
-          echo "Home Size: $(du -sh /home/${{ env.VPS_USER }} 2>/dev/null | cut -f1 || echo 'Missing')"
+          echo "Home Size: $(sudo du -sh /home/${{ env.VPS_USER }} 2>/dev/null | cut -f1 || echo 'Missing')"
+          echo "Files: $(sudo find /home/${{ env.VPS_USER }} -type f 2>/dev/null | wc -l || echo '0')"
           echo ""
           echo "🔧 Services Status:"
-          systemctl is-active tailscale 2>/dev/null && echo "✅ Tailscale: Running" || echo "❌ Tailscale: Not running"
+          sudo systemctl is-active tailscale 2>/dev/null && echo "✅ Tailscale: Running" || echo "❌ Tailscale: Not running"
           echo "=================================="
 
       # ===== CLEANUP =====
@@ -446,5 +368,5 @@ jobs:
         if: always()
         run: |
           echo "🧹 Cleaning up temporary files..."
-          sudo rm -rf restore/ backup/ artifact-link.txt
+          sudo rm -rf restore/ backup/
           echo "✅ Cleanup completed"
