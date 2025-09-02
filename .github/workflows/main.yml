@@ -2,215 +2,120 @@ name: 🕷️ Spidey Persistent VPS
 
 on:
   workflow_dispatch:
-    inputs:
-      session_timeout:
-        description: 'Session timeout (e.g., 1h, 2h, 6h)'
-        required: false
-        default: '6h'
-        type: string
-
-env:
-  VPS_USER: jacky
-  VPS_PASSWORD: root
-  VPS_HOSTNAME: github-vps
-  SESSION_TIMEOUT: ${{ inputs.session_timeout || '6h' }}
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 360  # 6 hours max
 
     steps:
-      # 🕸️ Checkout Repo
-      - name: 🕸️ Checkout
-        uses: actions/checkout@v4
+    # --- Setup ---
+    - name: 🕸️ Checkout
+      uses: actions/checkout@v4
 
-      # ⚡ Install System Tools
-      - name: ⚡ Install System Tools
-        run: |
-          sudo apt update
-          sudo apt install -y curl tmate jq zip unzip
+    - name: ⚡ Install System Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          curl wget unzip tar openssh-client \
+          tmux tmate tailscale
 
-      # ⚡ Install Rclone
-      - name: ⚡ Install Rclone
-        run: |
-          curl https://rclone.org/install.sh | sudo bash
-          rclone version
+    # --- Rclone + MEGA ---
+    - name: ⚡ Install Rclone
+      run: |
+        curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+        unzip rclone-current-linux-amd64.zip
+        cd rclone-*-linux-amd64
+        sudo cp rclone /usr/bin/
+        rclone version
 
-      # ☁️ Configure Rclone MEGA
-      - name: ☁️ Configure Rclone (MEGA)
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
+    - name: ☁️ Configure Rclone (MEGA)
+      run: |
+        mkdir -p ~/.config/rclone
+        cat > ~/.config/rclone/rclone.conf <<EOF
+        [mega]
+        type = mega
+        user = ${MEGA_USER}
+        pass = ${MEGA_PASS}
+        EOF
 
-      # 👤 Create Jacky User + Set Hostname
-      - name: 👤 Setup User & Hostname
-        run: |
-          if ! id -u ${{ env.VPS_USER }} >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash ${{ env.VPS_USER }}
-            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
-            sudo usermod -aG sudo ${{ env.VPS_USER }}
-            echo "${{ env.VPS_USER }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ env.VPS_USER }}
-          fi
-          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
-          echo "✅ User ${{ env.VPS_USER }} ready (password: ${{ env.VPS_PASSWORD }})"
-          echo "✅ Hostname set to ${{ env.VPS_HOSTNAME }}"
+    # --- User + Hostname ---
+    - name: 🧑‍💻 Setup User & Hostname
+      run: |
+        if ! id -u jacky >/dev/null 2>&1; then
+          sudo useradd -m -s /bin/bash jacky
+          echo 'jacky:root' | sudo chpasswd
+        fi
+        sudo hostnamectl set-hostname github-vps
+        echo "127.0.0.1 github-vps" | sudo tee -a /etc/hosts
 
-      # ♻️ Restore VPS from Backup (if exists)
-      - name: ♻️ Restore From MEGA
-        run: |
-          mkdir -p restore
-          echo "🔍 Checking for backup in MEGA..."
-          
-          # Check for latest backup
-          if rclone ls mega:vps-backup/vps-backup-latest.tar.gz >/dev/null 2>&1; then
-            echo "📥 Restoring VPS from backup..."
-            rclone copy mega:vps-backup/vps-backup-latest.tar.gz restore/
-            sudo tar -xzf restore/vps-backup-latest.tar.gz -C / --numeric-owner
-            echo "✅ Restore complete"
-            
-            # Fix permissions after restore
-            sudo chown -R ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}
-          else
-            echo "ℹ️ No previous backup found. Starting fresh!"
-          fi
+    # --- Restore (Tailscale + Data) ---
+    - name: ♻️ Restore From MEGA
+      run: |
+        echo "🕷️ Checking for backup on MEGA..."
+        if rclone ls mega:vps-backup/vps-backup.tar.gz >/dev/null 2>&1; then
+          rclone copy mega:vps-backup/vps-backup.tar.gz .
+          mkdir -p restore && tar -xpf vps-backup.tar.gz -C restore || true
+          sudo rsync -a restore/home/jacky/ /home/jacky/ || true
+          sudo rsync -a restore/var/lib/tailscale/ /var/lib/tailscale/ || true
+          echo "✅ Restore complete"
+        else
+          echo "ℹ️ No previous backup found, fresh start."
+        fi
 
-      # 🕸️ Tailscale Setup
-      - name: 🕸️ Tailscale Setup
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Use authkey for consistent IP
-          sudo tailscale up \
-            --authkey=${{ secrets.TAILSCALE_AUTHKEY }} \
-            --hostname=${{ env.VPS_HOSTNAME }} \
-            --ssh \
-            --advertise-exit-node \
-            --accept-dns=false
-          
-          sleep 10
-          TAILSCALE_IP=$(sudo tailscale ip -4)
-          echo "✅ Tailscale setup complete - IP: $TAILSCALE_IP"
+    # --- Tailscale ---
+    - name: 🔗 Tailscale Setup
+      run: |
+        sudo systemctl enable --now tailscaled
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps || true
+        echo "✅ Tailscale is running"
 
-      # 🛰️ Start VPS Session
-      - name: 🛰️ Start VPS Session
-        run: |
-          echo "🚀 VPS Session Started"
-          echo "========================"
-          echo "👤 User: ${{ env.VPS_USER }}"
-          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
-          echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
-          echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
-          echo "========================"
-          
-          # Show user environment
-          echo "📁 User home contents:"
-          sudo ls -la /home/${{ env.VPS_USER }}/
-          echo ""
-          echo "🐚 User shell environment ready!"
-          
-          # Calculate timeout
-          TIMEOUT=${{ env.SESSION_TIMEOUT }}
-          if [[ "$TIMEOUT" =~ ^([0-9]+)([hms])$ ]]; then
-            VALUE=${BASH_REMATCH[1]}
-            UNIT=${BASH_REMATCH[2]}
-            case $UNIT in
-              h) TIMEOUT_SECONDS=$((VALUE * 3600)) ;;
-              m) TIMEOUT_SECONDS=$((VALUE * 60)) ;;
-              s) TIMEOUT_SECONDS=$VALUE ;;
-              *) TIMEOUT_SECONDS=21600 ;;
-            esac
-          else
-            TIMEOUT_SECONDS=21600
-          fi
-          
-          # Start tmate session
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "🔗 SSH Connect: $TMATE_SSH"
-          echo "🌐 Web Connect: $TMATE_WEB"
-          
-          # Save connection info
-          sudo bash -c "cat > /home/${{ env.VPS_USER }}/connection-info.txt << EOF
-          VPS Connection Information
-          ==========================
-          Tailscale IP: $(tailscale ip -4)
-          SSH Command: $TMATE_SSH
-          Web Connect: $TMATE_WEB
-          Username: ${{ env.VPS_USER }}
-          Password: ${{ env.VPS_PASSWORD }}
-          Hostname: ${{ env.VPS_HOSTNAME }}
-          ==========================
-          EOF"
-          sudo chown ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}/connection-info.txt
-          
-          sleep $TIMEOUT_SECONDS
+    # --- Start VPS (tmate) ---
+    - name: 🕸️ Start VPS Session
+      run: |
+        echo "🌍 Starting tmate session..."
+        tmate -F &
+        sleep 10
+        tmate display -p '#{tmate_ssh}'
+        echo "✅ VPS ready for 6 hours"
+        sleep 21600  # keep alive 6h
 
-      # 💾 Create Backup
-      - name: 💾 Create Backup
-        if: always()
-        run: |
-          set -e
-          mkdir -p backup
-          BACKUP_FILE="backup/vps-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    # --- Backup (runs after tmate) ---
+    - name: 🕸️ Create Backup
+      if: always()
+      run: |
+        echo "📦 Archiving important data..."
+        mkdir -p backup
+        cd /
 
-          echo "📦 Archiving important data..."
-          sudo tar --ignore-failed-read --numeric-owner -czf "$BACKUP_FILE" \
-            /home/${{ env.VPS_USER }} \
-            /etc/hostname \
-            /etc/hosts \
-            /var/lib/tailscale \
-            /opt \
-            /srv \
-            /var/www 2>/dev/null || true
+        sudo tar --warning=no-file-changed \
+          --use-compress-program="nice -n 19 ionice -c2 -n7 gzip -c" \
+          -cpf $GITHUB_WORKSPACE/backup/vps-backup.tar.gz \
+          home/jacky \
+          var/lib/tailscale \
+          etc/hostname \
+          etc/hosts || true
 
-          # Create latest symlink
-          cd backup
-          ln -sf "$(basename $BACKUP_FILE)" vps-backup-latest.tar.gz
-          cd ..
-          
-          echo "✅ Backup ready: $BACKUP_FILE"
-          echo "📊 Backup size: $(sudo du -sh $BACKUP_FILE | cut -f1)"
+        dpkg --get-selections > $GITHUB_WORKSPACE/backup/package-list.txt || true
+        echo "✅ Backup archive created"
 
-      # ☁️ Upload Backup to MEGA
-      - name: ☁️ Upload Backup to MEGA
-        if: always()
-        run: |
-          echo "🚀 Uploading backup to MEGA..."
-          rclone copy backup/ mega:vps-backup --progress
-          echo "✅ Backup uploaded successfully"
+    - name: ☁️ Upload Backup to MEGA
+      if: always()
+      run: |
+        echo "☁️ Uploading backup to MEGA..."
+        rclone mkdir mega:vps-backup || true
+        rclone copy $GITHUB_WORKSPACE/backup/ mega:vps-backup/ --progress
+        echo "✅ Backup uploaded"
 
-      # 🧹 Cleanup
-      - name: 🧹 Cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up temporary files..."
-          sudo rm -rf restore/ backup/
-          echo "✅ Cleanup completed"
+    # --- Cleanup & Report ---
+    - name: 🧹 Cleanup
+      if: always()
+      run: |
+        rm -rf backup restore vps-backup.tar.gz || true
 
-      # 📊 Final Report
-      - name: 📊 Final Report
-        if: always()
-        run: |
-          echo "=================================="
-          echo "🕷️ Spidey VPS Session Complete"
-          echo "=================================="
-          echo "Status: ${{ job.status }}"
-          echo "User: ${{ env.VPS_USER }}"
-          echo "Hostname: ${{ env.VPS_HOSTNAME }}"
-          echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Disconnected')"
-          echo "Session Duration: ${{ env.SESSION_TIMEOUT }}"
-          echo ""
-          echo "✅ Next session will restore from this backup"
-          echo "✅ Tailscale IP will remain consistent"
-          echo "✅ All user data preserved"
-          echo "=================================="
+    - name: 📊 Final Report
+      if: always()
+      run: |
+        echo "🎉 VPS session completed!"
+        echo "✅ Backup stored on MEGA: vps-backup/"
+        echo "🕷️ Spidey saved the day!"
