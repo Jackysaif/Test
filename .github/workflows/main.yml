@@ -63,7 +63,7 @@ jobs:
           echo "🚀 Performing first-time user and hostname setup..."
           sudo useradd -m -s /bin/bash jacky
           echo "jacky:root" | sudo chpasswd
-          sudo usod -aG sudo jacky
+          sudo usermod -aG sudo jacky
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created with password 'root'"
 
