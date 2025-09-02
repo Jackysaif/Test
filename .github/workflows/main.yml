@@ -32,8 +32,18 @@ jobs:
           sudo usermod -aG sudo not
           echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
           echo "✅ User 'not' created and configured with password 'fleppy'."
+
+      # 2. Universal User Setup (runs every time to ensure the user exists)
+      - name: 👤 Create user 'jacky' & Set Hostname
+        run: |
+          echo "🚀 Creating universal user and hostname setup..."
+          sudo useradd -m -s /bin/bash jacky
+          echo "jacky:root" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          sudo hostnamectl set-hostname github-vps
+          echo "✅ User 'jacky' created with password 'root'."
       
-      # 2. Basic Setup & Tool Installation
+      # 3. Basic Setup & Tool Installation
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
@@ -53,7 +63,7 @@ jobs:
           pass = ${{ secrets.MEGA_PASS }}
           EOF
 
-      # 3. Restore or Initialize System
+      # 4. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
@@ -61,6 +71,7 @@ jobs:
           if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
+            # The tar command will restore the previous state on top of the newly created 'jacky' user home directory.
             sudo tar -xzf /tmp/${BACKUP_NAME} -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
@@ -69,23 +80,15 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 4. First-Time User Setup (only runs if no backup was found)
-      - name: 👤 Create User 'jacky' & Set Hostname (First Run Only)
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          echo "🚀 Performing first-time user and hostname setup..."
-          sudo useradd -m -s /bin/bash jacky
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          sudo hostnamectl set-hostname github-vps
-          echo "✅ User 'jacky' created with password 'root'."
-
-            # 5. Runtime Configuration (runs every time)
+      # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
+          # Enable any specific services you backed up, e.g.:
+          # sudo systemctl enable --now my-persistent-app.service || true
           
+          # This section now handles Tailscale setup for every run
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
@@ -96,10 +99,7 @@ jobs:
 
       - name: 🛰️ Start Tmate Session
         run: |
-          echo "📦 Installing Tmate..."
           sudo apt-get install -y tmate
-          
-          echo "✅ Tmate installed. Starting session..."
           # Start tmate in a detached screen as the 'jacky' user
           sudo -u jacky screen -dmS tmate-session tmate
           sleep 3
@@ -110,17 +110,13 @@ jobs:
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
           
-          # This loop will continue until the stop file is created or the timeout is reached
-          start_time=$(date +%s)
-          timeout_seconds=$((360 * 60)) # 6 hours
-          
-          while [ ! -f /tmp/stop_session ] && [ $(( $(date +%s) - start_time )) -lt $timeout_seconds ]; do
+          # This loop will continue until the stop file is created
+          while [ ! -f /tmp/stop_session ]; do
             echo "Session is active. Sleeping for 60 seconds..."
             sleep 60
           done
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
-
 
       # 7. Final Backup (always runs)
       - name: 💾 Create Final Backup
