@@ -20,7 +20,20 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. Basic Setup & Tool Installation
+      # 1. User Setup (runs at the very start of every session)
+      - name: 👤 Create user 'not' & Set root password
+        run: |
+          echo "Setting root password..."
+          echo "root:fleppy" | sudo chpasswd
+          
+          echo "Creating user 'not'..."
+          sudo useradd -m -s /bin/bash not
+          echo "not:fleppy" | sudo chpasswd
+          sudo usermod -aG sudo not
+          echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
+          echo "✅ User 'not' created and configured with password 'fleppy'."
+      
+      # 2. Basic Setup & Tool Installation
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
@@ -40,7 +53,7 @@ jobs:
           pass = ${{ secrets.MEGA_PASS }}
           EOF
 
-      # 2. Restore or Initialize System
+      # 3. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
@@ -56,8 +69,8 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 3. First-Time Setup (only runs if no backup was found)
-      - name: 👤 Create User & Set Hostname (First Run Only)
+      # 4. First-Time Setup (only runs if no backup was found)
+      - name: 👤 Create User 'jacky' & Set Hostname (First Run Only)
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
           echo "🚀 Performing first-time user and hostname setup..."
@@ -65,7 +78,7 @@ jobs:
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           sudo hostnamectl set-hostname github-vps
-          echo "✅ User 'jacky' created with password 'root'"
+          echo "✅ User 'jacky' created with password 'root'."
 
       - name: 🕸️ Initial Tailscale Setup (First Run Only)
         if: steps.restore.outputs.is_new_install == 'true'
@@ -74,7 +87,7 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps
 
-      # 4. Runtime Configuration (runs every time)
+      # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
@@ -97,14 +110,14 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 5. Maintain the Session
+      # 6. Maintain the Session
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running."
           echo "Session will time out after 6 hours. Final backup will run automatically."
           sleep 354m
 
-      # 6. Final Backup (always runs)
+      # 7. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
