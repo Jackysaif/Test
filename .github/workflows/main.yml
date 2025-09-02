@@ -1,372 +1,83 @@
-name: Persistent VPS with User Data Backup
+name: Persistent VPS with Backup & Restore (Simple)
 
 on:
   workflow_dispatch:
-    inputs:
-      skip_restore:
-        description: 'Skip restoration from backup (fresh start)'
-        required: false
-        default: 'false'
-        type: boolean
-      session_timeout:
-        description: 'Session timeout (e.g., 1h, 2h, 6h)'
-        required: false
-        default: '6h'
-        type: string
   workflow_call:
-
-env:
-  VPS_USER: jacky
-  VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || 'ChangeMe123!' }}
-  VPS_HOSTNAME: github-vps
-  SESSION_TIMEOUT: ${{ inputs.session_timeout || '6h' }}
-  BACKUP_RETENTION_DAYS: 30
-  MAX_RETRIES: 3
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 360  # 6 hours
 
     steps:
-      # ===== INITIALIZATION =====
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system tools
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq zip unzip
+          sudo apt install -y curl unzip zip tmate net-tools neofetch
 
-      - name: Validate required secrets
+      - name: Install rclone
         run: |
-          if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
-            echo "❌ Tailscale auth key not configured"
-            exit 1
-          fi
-          echo "✅ All required secrets are configured"
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          unzip -q rclone-current-linux-amd64.zip
+          cd rclone-*-linux-amd64
+          sudo cp rclone /usr/bin/
+          rclone version
 
-      # ===== USER SETUP =====
-      - name: Create user with sudo access
+      - name: Configure rclone with MEGA
         run: |
-          if ! id -u ${{ env.VPS_USER }} >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash ${{ env.VPS_USER }}
-            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
-            sudo usermod -aG sudo ${{ env.VPS_USER }}
-            echo "${{ env.VPS_USER }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ env.VPS_USER }}
-            echo "✅ User ${{ env.VPS_USER }} created with sudo access"
-          else
-            echo "🔁 User ${{ env.VPS_USER }} already exists"
-          fi
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [mega]
+          type = mega
+          user = ${MEGA_USER}
+          pass = ${MEGA_PASS}
+          EOF
+        env:
+          MEGA_USER: ${{ secrets.MEGA_USER }}
+          MEGA_PASS: ${{ secrets.MEGA_PASS }}
 
-      - name: Set hostname
+      - name: Create user jacky
         run: |
-          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
-          echo "🏷️ Hostname set to $(hostname)"
+          if ! id -u jacky >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:root" | sudo chpasswd
+            echo "Created user jacky with password root"
+          fi
+          sudo hostnamectl set-hostname github-vps
+          echo "127.0.0.1 github-vps" | sudo tee -a /etc/hosts
 
-      # ===== CHECK FOR BACKUP =====
-      - name: Check for existing backup
-        if: ${{ inputs.skip_restore != true }}
-        id: check-backup
+      - name: Restore Tailscale state if available
         run: |
-          echo "🔍 Checking for existing backup..."
-          if curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-             -H "Accept: application/vnd.github.v3+json" \
-             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts" | \
-             jq -e '.artifacts[] | select(.name == "vps-user-backup")' > /dev/null; then
-            echo "backup_exists=true" >> $GITHUB_OUTPUT
-            echo "✅ Backup found"
-          else
-            echo "backup_exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ No backup found, fresh start"
-          fi
-
-      # ===== DOWNLOAD BACKUP =====
-      - name: Download previous backup
-        if: ${{ inputs.skip_restore != true && steps.check-backup.outputs.backup_exists == 'true' }}
-        id: download-backup
-        run: |
-          echo "📥 Downloading previous backup..."
-          
-          # Get latest artifact
-          ARTIFACT_JSON=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?name=vps-user-backup&per_page=1")
-          
-          ARTIFACT_ID=$(echo "$ARTIFACT_JSON" | jq -r '.artifacts[0].id')
-          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID.zip"
-          
-          echo "📦 Downloading artifact ID: $ARTIFACT_ID"
-          
-          mkdir -p restore
-          curl -L -o restore/backup.zip \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "$ARTIFACT_URL"
-          
-          if [ -f "restore/backup.zip" ]; then
-            echo "📦 Extracting backup..."
-            cd restore
-            unzip -o backup.zip
-            rm backup.zip
-            cd ..
-            echo "✅ Backup downloaded and extracted"
-            echo "download_success=true" >> $GITHUB_OUTPUT
-            echo "📁 Restore contents:"
-            ls -la restore/
-          else
-            echo "❌ Failed to download backup"
-            echo "download_success=false" >> $GITHUB_OUTPUT
-          fi
-
-      # ===== RESTORE USER ENVIRONMENT =====
-      - name: Restore user environment
-        if: ${{ inputs.skip_restore != true && steps.download-backup.outputs.download_success == 'true' }}
-        run: |
-          echo "🔄 Restoring user environment..."
-          
-          # Restore user home directory
-          if [ -f "restore/user-home.tar.gz" ]; then
-            echo "🏠 Restoring user home files..."
-            sudo tar -xzf restore/user-home.tar.gz -C / --numeric-owner
-            echo "✅ User home restored"
-          fi
-          
-          # Restore installed packages
-          if [ -f "restore/packages.list" ]; then
-            echo "📦 Restoring installed packages..."
-            sudo apt update
-            xargs sudo apt-get install -y < restore/packages.list
-            echo "✅ Packages restored"
-          fi
-          
-          # Restore Tailscale state for same IP
-          if [ -f "restore/tailscale-state.tar.gz" ]; then
-            echo "🌐 Restoring Tailscale state..."
-            sudo tar -xzf restore/tailscale-state.tar.gz -C / --numeric-owner
-            echo "✅ Tailscale state restored"
-          fi
-          
-          # Restore application data
-          if [ -f "restore/app-data.tar.gz" ]; then
-            echo "📱 Restoring application data..."
-            sudo tar -xzf restore/app-data.tar.gz -C / --numeric-owner
-            echo "✅ Application data restored"
-          fi
-          
-          # Fix permissions with sudo
-          echo "🔧 Fixing file permissions..."
-          sudo chown -R ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}
-          sudo chmod 700 /home/${{ env.VPS_USER }}
-          echo "✅ User environment restored"
-
-      # ===== SETUP TAILSCALE WITH PERSISTENT STATE =====
-      - name: Setup Tailscale with persistent state
-        run: |
-          echo "🌐 Setting up Tailscale..."
-          
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Check if we have existing state, otherwise use authkey
-          if [ -f "/var/lib/tailscale/tailscale.state" ]; then
-            echo "🔁 Using existing Tailscale state..."
-            sudo systemctl start tailscaled
+          mkdir -p tailscale_state
+          if rclone copy mega:vps-backup/tailscale_state ./tailscale_state --ignore-existing; then
+            echo "Restoring previous Tailscale state"
+            sudo tailscaled --state=tailscale_state/state.json &
             sleep 5
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} || true
           else
-            echo "🔑 Using Tailscale authkey for new connection..."
-            sudo tailscale up \
-              --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
-              --hostname ${{ env.VPS_HOSTNAME }} \
-              --ssh \
-              --advertise-exit-node \
-              --accept-dns=false
-            sleep 10
+            echo "No previous state found, fresh setup"
+            sudo tailscaled --state=tailscale_state/state.json &
+            sleep 5
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }}
+            rclone copy ./tailscale_state mega:vps-backup/tailscale_state
           fi
-          
-          TAILSCALE_IP=$(sudo tailscale ip -4)
-          echo "✅ Tailscale IP: $TAILSCALE_IP"
-          
-          # Save connection info with proper permissions
-          sudo bash -c "cat > /home/${{ env.VPS_USER }}/connection-info.txt << EOF
-          VPS Connection Information
-          ==========================
-          Tailscale IP: $TAILSCALE_IP
-          SSH Command: ssh ${{ env.VPS_USER }}@$TAILSCALE_IP
-          Username: ${{ env.VPS_USER }}
-          Password: ${{ env.VPS_PASSWORD }}
-          Hostname: ${{ env.VPS_HOSTNAME }}
-          ==========================
-          EOF"
-          
-          sudo chown ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}/connection-info.txt
 
-      # ===== VPS SESSION =====
-      - name: Start VPS session
+      - name: Start tmate session
         run: |
-          echo "🚀 VPS Session Started"
-          echo "========================"
-          echo "👤 User: ${{ env.VPS_USER }}"
-          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
-          echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
-          echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
-          echo "========================"
-          
-          # Show user environment with sudo
-          echo "📁 User home contents:"
-          sudo ls -la /home/${{ env.VPS_USER }}/
-          echo ""
-          echo "🐚 User shell environment ready!"
-          
-          # Calculate timeout
-          TIMEOUT=${{ env.SESSION_TIMEOUT }}
-          if [[ "$TIMEOUT" =~ ^([0-9]+)([hms])$ ]]; then
-            VALUE=${BASH_REMATCH[1]}
-            UNIT=${BASH_REMATCH[2]}
-            case $UNIT in
-              h) TIMEOUT_SECONDS=$((VALUE * 3600)) ;;
-              m) TIMEOUT_SECONDS=$((VALUE * 60)) ;;
-              s) TIMEOUT_SECONDS=$VALUE ;;
-              *) TIMEOUT_SECONDS=21600 ;;
-            esac
-          else
-            TIMEOUT_SECONDS=21600
-          fi
-          
-          # Start session
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "🔗 SSH Connect: $TMATE_SSH"
-          echo "🌐 Web Connect: $TMATE_WEB"
-          
-          sleep $TIMEOUT_SECONDS
+          echo "Starting tmate..."
+          tmate -F &
 
-      # ===== CREATE USER DATA BACKUP =====
-      - name: Create user data backup
-        if: always()
-        timeout-minutes: 10
+      - name: Wait to keep session alive
+        run: sleep $((360*60))  # 6 hours
+
+      - name: Backup data on cancel
+        if: cancelled()
         run: |
+          echo "Backing up jacky home and installed packages..."
           mkdir -p backup
-          echo "💾 Creating user data backup..."
-          
-          # 1. Backup user home directory (most important)
-          echo "🏠 Backing up user home files..."
-          sudo tar -czf backup/user-home.tar.gz \
-            --exclude=/home/${{ env.VPS_USER }}/.cache \
-            --exclude=/home/${{ env.VPS_USER }}/node_modules \
-            --exclude=/home/${{ env.VPS_USER }}/tmp \
-            --numeric-owner \
-            /home/${{ env.VPS_USER }}
-          
-          # 2. Backup Tailscale state for persistent IP
-          echo "🌐 Backing up Tailscale state..."
-          sudo tar -czf backup/tailscale-state.tar.gz \
-            --numeric-owner \
-            /var/lib/tailscale 2>/dev/null || echo "⚠️ Tailscale state not available"
-          
-          # 3. Backup installed packages
-          echo "📦 Backing up installed packages..."
-          sudo dpkg --get-selections > backup/packages.list
-          sudo apt-mark showauto > backup/auto-packages.list
-          
-          # 4. Backup application data
-          echo "📱 Backing up application data..."
-          sudo tar -czf backup/app-data.tar.gz \
-            --numeric-owner \
-            /var/www \
-            /opt \
-            /srv 2>/dev/null || echo "⚠️ Some app data not available"
-          
-          # Create manifest
-          sudo bash -c "cat > backup/manifest.txt << EOF
-          User Data Backup
-          ================
-          Created: $(date)
-          Workflow: ${{ github.run_id }}
-          User: ${{ env.VPS_USER }}
-          Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo "Unknown")
-          
-          Includes:
-          - User home files and configurations
-          - Installed package list
-          - Tailscale state (for persistent IP)
-          - Application data (/var/www, /opt, /srv)
-          
-          Excludes:
-          - Cache files
-          - node_modules
-          - Temporary files
-          ================
-          EOF"
-          
-          # Fix backup file permissions
-          sudo chown -R $USER:$USER backup/
-          
-          echo "✅ User data backup created"
-          echo "📊 Backup size: $(sudo du -sh backup | cut -f1)"
-
-      # ===== UPLOAD BACKUP =====
-      - name: Upload user data backup
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-user-backup
-          path: backup/
-          retention-days: ${{ env.BACKUP_RETENTION_DAYS }}
-
-      # ===== USER DATA VERIFICATION =====
-      - name: Verify user data backup
-        if: always()
-        run: |
-          echo "🔍 Verifying user data backup..."
-          echo "User: ${{ env.VPS_USER }}"
-          echo "Home Directory: /home/${{ env.VPS_USER }}"
-          
-          # Check if user home exists and has content with sudo
-          if sudo [ -d "/home/${{ env.VPS_USER }}" ]; then
-            echo "✅ User home directory exists"
-            echo "📁 Important contents:"
-            sudo ls -la /home/${{ env.VPS_USER }}/ | grep -E '\.(bash|profile|git|ssh|config)' | head -10
-            echo ""
-            echo "💾 Disk usage:"
-            sudo du -sh /home/${{ env.VPS_USER }}
-            echo ""
-            echo "📋 File count:"
-            sudo find /home/${{ env.VPS_USER }} -type f | wc -l
-          else
-            echo "❌ User home directory missing!"
-          fi
-
-      # ===== FINAL SYSTEM REPORT =====
-      - name: System status report
-        if: always()
-        run: |
-          echo "=================================="
-          echo "🖥️  VPS System Status Report"
-          echo "=================================="
-          echo "Hostname: $(hostname)"
-          echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Not connected')"
-          echo "User: ${{ env.VPS_USER }}"
-          echo "Home Directory: /home/${{ env.VPS_USER }}"
-          echo "Session Duration: ${{ env.SESSION_TIMEOUT }}"
-          echo "Backup Size: $(sudo du -sh backup 2>/dev/null | cut -f1 || echo 'Unknown')"
-          echo "Status: ${{ job.status }}"
-          echo ""
-          echo "📊 User Data:"
-          echo "Home Size: $(sudo du -sh /home/${{ env.VPS_USER }} 2>/dev/null | cut -f1 || echo 'Missing')"
-          echo "Files: $(sudo find /home/${{ env.VPS_USER }} -type f 2>/dev/null | wc -l || echo '0')"
-          echo ""
-          echo "🔧 Services Status:"
-          sudo systemctl is-active tailscale 2>/dev/null && echo "✅ Tailscale: Running" || echo "❌ Tailscale: Not running"
-          echo "=================================="
-
-      # ===== CLEANUP =====
-      - name: Cleanup temporary files
-        if: always()
-        run: |
-          echo "🧹 Cleaning up temporary files..."
-          sudo rm -rf restore/ backup/
-          echo "✅ Cleanup completed"
+          sudo tar -czf backup/jacky_home.tar.gz /home/jacky
+          dpkg --get-selections > backup/packages.list
+          rclone copy backup mega:vps-backup/backup-$(date +%Y%m%d-%H%M%S) --transfers=4
