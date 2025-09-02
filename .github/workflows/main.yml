@@ -36,18 +36,25 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq zip unzip
+          sudo apt install -y curl tmate jq zip unzip pigz
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.MEGA_USER }}" ] || [ -z "${{ secrets.MEGA_PASS }}" ]; then
+            echo "❌ MEGA credentials not configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+            echo "❌ Tailscale auth key not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets are configured"
 
       # ===== RCLONE SETUP =====
       - name: Install and configure rclone
         run: |
-          # Install rclone
-          curl -Of https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -a rclone-current-linux-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo cp rclone /usr/bin/
-          sudo chown root:root /usr/bin/rclone
-          sudo chmod 755 /usr/bin/rclone
+          # Install rclone using official method
+          curl https://rclone.org/install.sh | sudo bash
           
           # Configure MEGA
           mkdir -p ~/.config/rclone
@@ -87,26 +94,31 @@ jobs:
           mkdir -p restore
           echo "🔍 Checking for artifact link in MEGA..."
           
-          # Try to download artifact link file from MEGA
-          if rclone copy mega:artifact-link.txt restore/ --progress 2>/dev/null; then
-            if [ -f "restore/artifact-link.txt" ]; then
-              DIRECT_LINK=$(cat restore/artifact-link.txt | tr -d '\n\r' | xargs)
-              echo "📋 Found artifact link: $DIRECT_LINK"
-              
-              # Extract artifact ID from direct link
-              ARTIFACT_ID=$(echo "$DIRECT_LINK" | grep -o 'artifacts/[0-9]*' | cut -d'/' -f2)
-              
-              if [ -n "$ARTIFACT_ID" ]; then
-                echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
-                echo "direct_link=$DIRECT_LINK" >> $GITHUB_OUTPUT
-                echo "link_found=true" >> $GITHUB_OUTPUT
-                echo "✅ Valid artifact link found with ID: $ARTIFACT_ID"
-              else
-                echo "⚠️ Invalid artifact link format"
-                echo "link_found=false" >> $GITHUB_OUTPUT
-              fi
+          # Try to download artifact link file from MEGA with retry
+          RETRY_COUNT=0
+          while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
+            if rclone copy mega:artifact-link.txt restore/ --progress 2>/dev/null; then
+              break
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "⚠️ Download attempt $RETRY_COUNT failed, retrying..."
+            sleep 5
+          done
+          
+          if [ -f "restore/artifact-link.txt" ]; then
+            DIRECT_LINK=$(cat restore/artifact-link.txt | tr -d '\n\r' | xargs)
+            echo "📋 Found artifact link: $DIRECT_LINK"
+            
+            # Extract artifact ID from direct link
+            ARTIFACT_ID=$(echo "$DIRECT_LINK" | grep -o 'artifacts/[0-9]*' | cut -d'/' -f2)
+            
+            if [ -n "$ARTIFACT_ID" ]; then
+              echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+              echo "direct_link=$DIRECT_LINK" >> $GITHUB_OUTPUT
+              echo "link_found=true" >> $GITHUB_OUTPUT
+              echo "✅ Valid artifact link found with ID: $ARTIFACT_ID"
             else
-              echo "⚠️ artifact-link.txt file is empty"
+              echo "⚠️ Invalid artifact link format"
               echo "link_found=false" >> $GITHUB_OUTPUT
             fi
           else
@@ -124,7 +136,7 @@ jobs:
           # Get latest workflow runs
           RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=completed&per_page=10")
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=completed&per_page=20")
           
           # Find the most recent successful run with artifacts
           RUN_ID=$(echo "$RESPONSE" | jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' | head -1)
@@ -160,17 +172,30 @@ jobs:
           ARTIFACT_ID=${{ steps.check-mega-link.outputs.artifact_id }}
           DIRECT_LINK="${{ steps.check-mega-link.outputs.direct_link }}"
           echo "📥 Downloading artifact $ARTIFACT_ID from MEGA stored link..."
-          echo "🔗 Using link: $DIRECT_LINK"
           
           mkdir -p restore
           
-          # Download using direct GitHub API
-          HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+          # Download using direct GitHub API with retry
+          RETRY_COUNT=0
+          DOWNLOAD_SUCCESS=false
           
-          if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+          while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ] && [ "$DOWNLOAD_SUCCESS" = false ]; do
+            HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+            
+            if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+              DOWNLOAD_SUCCESS=true
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "⚠️ Download attempt $RETRY_COUNT failed (HTTP: $HTTP_CODE), retrying..."
+              sleep 10
+            fi
+          done
+          
+          if [ "$DOWNLOAD_SUCCESS" = true ]; then
             echo "📦 Extracting backup..."
             cd restore
             unzip -o backup.zip
@@ -180,8 +205,7 @@ jobs:
             echo "download_success=true" >> $GITHUB_OUTPUT
             ls -la restore/
           else
-            echo "❌ Failed to download backup from MEGA link (HTTP: $HTTP_CODE)"
-            echo "⚠️ Link might be expired or invalid"
+            echo "❌ Failed to download backup from MEGA link after ${{ env.MAX_RETRIES }} attempts"
             echo "download_success=false" >> $GITHUB_OUTPUT
           fi
 
@@ -195,13 +219,27 @@ jobs:
           
           mkdir -p restore
           
-          # Download using direct GitHub API
-          HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+          # Download using direct GitHub API with retry
+          RETRY_COUNT=0
+          DOWNLOAD_SUCCESS=false
           
-          if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+          while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ] && [ "$DOWNLOAD_SUCCESS" = false ]; do
+            HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip")
+            
+            if [ "$HTTP_CODE" = "200" ] && [ -f "restore/backup.zip" ]; then
+              DOWNLOAD_SUCCESS=true
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              echo "⚠️ Download attempt $RETRY_COUNT failed (HTTP: $HTTP_CODE), retrying..."
+              sleep 10
+            fi
+          done
+          
+          if [ "$DOWNLOAD_SUCCESS" = true ]; then
             echo "📦 Extracting backup..."
             cd restore
             unzip -o backup.zip
@@ -211,7 +249,7 @@ jobs:
             echo "download_success=true" >> $GITHUB_OUTPUT
             ls -la restore/
           else
-            echo "❌ Failed to download backup via API (HTTP: $HTTP_CODE)"
+            echo "❌ Failed to download backup via API after ${{ env.MAX_RETRIES }} attempts"
             echo "download_success=false" >> $GITHUB_OUTPUT
           fi
 
@@ -252,21 +290,23 @@ jobs:
             echo "✅ Website data restored"
           fi
           
-          # Restore databases
+          # Restore databases securely
           if [ -f "restore/all-databases.sql.gz" ]; then
             echo "🗄️ Restoring databases..."
-            # Check if MySQL is installed and running
+            # Check if MySQL is installed
             if command -v mysql >/dev/null 2>&1; then
-              # Try to start MySQL service first
+              # Try to start MySQL service
               sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null || true
-              sleep 5
+              sleep 10
               
-              # Test MySQL connection before restoration
-              if mysql -e "SELECT 1;" 2>/dev/null; then
+              # Test MySQL connection with timeout
+              if timeout 30s mysql -e "SELECT 1;" 2>/dev/null; then
                 echo "✅ MySQL connection successful, restoring databases..."
-                gunzip -c restore/all-databases.sql.gz | mysql || echo "⚠️ Database restoration failed"
+                gunzip -c restore/all-databases.sql.gz | mysql -f 2>/dev/null && \
+                echo "✅ Database restoration completed" || \
+                echo "⚠️ Database restoration had errors (non-critical)"
               else
-                echo "⚠️ MySQL connection failed, skipping database restoration"
+                echo "⚠️ MySQL not responding, skipping database restoration"
               fi
             else
               echo "⚠️ MySQL not installed, skipping database restoration"
@@ -338,19 +378,35 @@ jobs:
           Tailscale IP: $TAILSCALE_IP
           SSH Command: ssh ${{ env.VPS_USER }}@$TAILSCALE_IP
           Username: ${{ env.VPS_USER }}
+          Password: [Protected]
           Hostname: ${{ env.VPS_HOSTNAME }}
           EOF
 
       # ===== VPS SESSION =====
-      - name: Start VPS session
+      - name: Start VPS session with proper timeout
         run: |
           echo "🚀 VPS Session Started"
           echo "========================"
           echo "👤 User: ${{ env.VPS_USER }}"
-          echo "🔑 Pass: [Protected]"
+          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
           echo "🌐 IP: $(tailscale ip -4 2>/dev/null || echo 'Tailscale not ready')"
           echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
           echo "========================"
+          
+          # Calculate timeout properly
+          TIMEOUT=${{ env.SESSION_TIMEOUT }}
+          if [[ "$TIMEOUT" =~ ^([0-9]+)([hms])$ ]]; then
+            VALUE=${BASH_REMATCH[1]}
+            UNIT=${BASH_REMATCH[2]}
+            case $UNIT in
+              h) TIMEOUT_SECONDS=$((VALUE * 3600)) ;;
+              m) TIMEOUT_SECONDS=$((VALUE * 60)) ;;
+              s) TIMEOUT_SECONDS=$VALUE ;;
+              *) TIMEOUT_SECONDS=21600 ;; # Default 6 hours
+            esac
+          else
+            TIMEOUT_SECONDS=21600
+          fi
           
           # Start tmate session
           tmate -S /tmp/tmate.sock new-session -d
@@ -363,15 +419,23 @@ jobs:
           echo "🔗 SSH Connect: $TMATE_SSH"
           echo "🌐 Web Connect: $TMATE_WEB"
           
-          # Calculate timeout in seconds
-          TIMEOUT_SECONDS=21600  # Default 6 hours
-          if [[ "${{ env.SESSION_TIMEOUT }}" =~ ^([0-9]+)h$ ]]; then
-            TIMEOUT_SECONDS=$((${BASH_REMATCH[1]} * 3600))
-          fi
+          # Start background resource monitor
+          while true; do
+            echo "=== Resource Status ==="
+            echo "CPU: $(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}')%"
+            echo "Memory: $(free -m | awk 'NR==2{printf "%.1f%%", $3*100/$2}')"
+            echo "Disk: $(df -h / | awk 'NR==2{print $5}')"
+            sleep 300
+          done &
+          
+          MONITOR_PID=$!
           
           # Keep session alive
-          echo "⏳ Session will remain active for ${{ env.SESSION_TIMEOUT }}"
+          echo "⏳ Session will remain active for $TIMEOUT_SECONDS seconds"
           sleep $TIMEOUT_SECONDS
+          
+          # Cleanup monitor
+          kill $MONITOR_PID 2>/dev/null || true
 
       # ===== COMPLETE BACKUP CREATION =====
       - name: Create complete backup
@@ -437,20 +501,20 @@ jobs:
           echo "🗄️ Backing up databases..."
           if command -v mysql >/dev/null 2>&1; then
             sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null || true
-            sleep 3
+            sleep 5
             
             if mysql -e "SELECT 1;" 2>/dev/null; then
               echo "✅ MySQL connection successful, creating backup..."
               mysqldump --all-databases --single-transaction > backup/all-databases.sql 2>/dev/null && \
-                gzip -f backup/all-databases.sql && echo "✅ Database backup completed" || \
+                pigz -f backup/all-databases.sql && echo "✅ Database backup completed" || \
                 echo "⚠️ Database backup failed"
             else
               echo "⚠️ MySQL connection failed, creating empty backup"
-              touch backup/all-databases.sql && gzip backup/all-databases.sql
+              touch backup/all-databases.sql && pigz backup/all-databases.sql
             fi
           else
             echo "ℹ️ MySQL not installed, creating empty backup"
-            touch backup/all-databases.sql && gzip backup/all-databases.sql
+            touch backup/all-databases.sql && pigz backup/all-databases.sql
           fi
 
           # 6. Backup aaPanel configuration
@@ -525,7 +589,6 @@ jobs:
           - System services
           EOF
 
-          # Fixed line 466 - Properly handle the du command output
           BACKUP_SIZE=$(du -sh backup 2>/dev/null | cut -f1 || echo "Unknown")
           echo "✅ Complete backup created: Size: $BACKUP_SIZE"
 
@@ -533,16 +596,32 @@ jobs:
       - name: Verify backup integrity
         if: always()
         run: |
-          echo "🔍 Verifying backup integrity..."
+          echo "🔍 Comprehensive backup verification..."
           ERRORS=0
           
-          for file in backup/*.tar.gz; do
+          for file in backup/*.tar.gz backup/*.gz; do
             if [ -f "$file" ]; then
-              if ! tar -tzf "$file" > /dev/null 2>&1; then
-                echo "❌ Corrupted backup: $file"
-                ERRORS=$((ERRORS + 1))
-              else
-                echo "✅ Valid: $(basename $file)"
+              echo "Verifying $file..."
+              
+              # Check file integrity
+              if [[ "$file" == *.gz ]]; then
+                if pigz -t "$file" 2>/dev/null; then
+                  echo "✅ $file: gzip integrity OK"
+                else
+                  echo "❌ $file: gzip integrity FAILED"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              fi
+              
+              # For tar files, check structure
+              if [[ "$file" == *.tar.gz ]]; then
+                if tar -tzf "$file" >/dev/null 2>&1; then
+                  FILE_COUNT=$(tar -tzf "$file" | wc -l)
+                  echo "✅ $file: tar structure OK ($FILE_COUNT files)"
+                else
+                  echo "❌ $file: tar structure FAILED"
+                  ERRORS=$((ERRORS + 1))
+                fi
               fi
             fi
           done
@@ -570,7 +649,7 @@ jobs:
         run: |
           echo "☁️ Saving new artifact link to MEGA..."
           
-          # Get current run ID and construct artifact link
+          # Get current run ID
           RUN_ID="${{ github.run_id }}"
           
           # Wait for artifact to be processed
@@ -589,29 +668,38 @@ jobs:
             ARTIFACT_LINK="https://github.com/${{ github.repository }}/actions/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
             echo "🔗 New artifact link: $ARTIFACT_LINK"
             
-            # Save to file
-            echo "$ARTIFACT_LINK" > artifact-link.txt
+            # Test if artifact is accessible before saving link
+            ARTIFACT_TEST=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID")
             
-            # Upload to MEGA with retry
-            RETRY_COUNT=0
-            UPLOAD_SUCCESS=false
-            
-            while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
-              if rclone copy artifact-link.txt mega: --progress; then
-                echo "✅ Successfully uploaded artifact link to MEGA"
-                UPLOAD_SUCCESS=true
-                break
+            if [ "$ARTIFACT_TEST" = "200" ]; then
+              echo "✅ Artifact is accessible, saving link"
+              echo "$ARTIFACT_LINK" > artifact-link.txt
+              
+              # Upload to MEGA with retry
+              RETRY_COUNT=0
+              UPLOAD_SUCCESS=false
+              
+              while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
+                if rclone copy artifact-link.txt mega: --progress; then
+                  echo "✅ Successfully uploaded artifact link to MEGA"
+                  UPLOAD_SUCCESS=true
+                  break
+                else
+                  RETRY_COUNT=$((RETRY_COUNT + 1))
+                  echo "⚠️ Upload failed, retry $RETRY_COUNT/${{ env.MAX_RETRIES }}"
+                  sleep 10
+                fi
+              done
+              
+              if [ "$UPLOAD_SUCCESS" = false ]; then
+                echo "❌ Failed to upload artifact link to MEGA after ${{ env.MAX_RETRIES }} attempts"
               else
-                RETRY_COUNT=$((RETRY_COUNT + 1))
-                echo "⚠️ Upload failed, retry $RETRY_COUNT/${{ env.MAX_RETRIES }}"
-                sleep 10
+                echo "✅ Artifact link saved to MEGA for next session"
               fi
-            done
-            
-            if [ "$UPLOAD_SUCCESS" = false ]; then
-              echo "❌ Failed to upload artifact link to MEGA after ${{ env.MAX_RETRIES }} attempts"
             else
-              echo "✅ Artifact link saved to MEGA for next session"
+              echo "❌ Artifact not accessible (HTTP: $ARTIFACT_TEST), skipping link save"
             fi
           else
             echo "⚠️ Could not get artifact ID for current run"
@@ -634,7 +722,7 @@ jobs:
           CUTOFF_TIMESTAMP=$(date -d '3 days ago' +%s)
           
           # Delete old artifacts
-          echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name == "vps-backup") | "KATEX_INLINE_OPEN.id):KATEX_INLINE_OPEN.created_at)"' | while IFS=: read -r id created_at; do
+          echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name == "vps-backup") | "\(.id):\(.created_at)"' | while IFS=: read -r id created_at; do
             ARTIFACT_TIMESTAMP=$(date -d "$created_at" +%s 2>/dev/null || echo 0)
             if [ $ARTIFACT_TIMESTAMP -lt $CUTOFF_TIMESTAMP ] && [ $ARTIFACT_TIMESTAMP -gt 0 ]; then
               echo "🗑️ Deleting old artifact: $id (created: $created_at)"
