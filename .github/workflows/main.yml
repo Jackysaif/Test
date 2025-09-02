@@ -1,83 +1,211 @@
-name: Persistent VPS with Backup & Restore (Simple)
+name: Persistent VPS with User Data Backup (Simplified)
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_restore:
+        description: 'Skip restoration from backup (fresh start)'
+        required: false
+        default: 'false'
+        type: boolean
+      session_timeout:
+        description: 'Session timeout (e.g., 1h, 2h, 6h)'
+        required: false
+        default: '6h'
+        type: string
   workflow_call:
+
+env:
+  VPS_USER: jacky
+  VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || 'ChangeMe123!' }}
+  VPS_HOSTNAME: github-vps
+  SESSION_TIMEOUT: ${{ inputs.session_timeout || '6h' }}
+  BACKUP_RETENTION_DAYS: 30
+  MAX_RETRIES: 3
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # 6 hours
+    timeout-minutes: 360
 
     steps:
+      # ===== INITIALIZATION =====
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl unzip zip tmate net-tools neofetch
+          sudo apt install -y curl tmate jq zip unzip
 
-      - name: Install rclone
+      - name: Validate required secrets
         run: |
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -q rclone-current-linux-amd64.zip
-          cd rclone-*-linux-amd64
-          sudo cp rclone /usr/bin/
-          rclone version
+          if [ -z "${{ secrets.MEGA_USER }}" ] || [ -z "${{ secrets.MEGA_PASS }}" ]; then
+            echo "❌ MEGA credentials not configured"
+            exit 1
+          fi
+          if [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+            echo "❌ Tailscale auth key not configured"
+            exit 1
+          fi
+          echo "✅ All required secrets are configured"
 
-      - name: Configure rclone with MEGA
+      # ===== RCLONE SETUP =====
+      - name: Install and configure rclone
         run: |
+          curl https://rclone.org/install.sh | sudo bash
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf << EOF
           [mega]
           type = mega
-          user = ${MEGA_USER}
-          pass = ${MEGA_PASS}
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
           EOF
-        env:
-          MEGA_USER: ${{ secrets.MEGA_USER }}
-          MEGA_PASS: ${{ secrets.MEGA_PASS }}
+          echo "✅ Rclone configured with MEGA"
 
-      - name: Create user jacky
+      # ===== USER SETUP =====
+      - name: Create user with sudo access
         run: |
-          if ! id -u jacky >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "jacky:root" | sudo chpasswd
-            echo "Created user jacky with password root"
-          fi
-          sudo hostnamectl set-hostname github-vps
-          echo "127.0.0.1 github-vps" | sudo tee -a /etc/hosts
-
-      - name: Restore Tailscale state if available
-        run: |
-          mkdir -p tailscale_state
-          if rclone copy mega:vps-backup/tailscale_state ./tailscale_state --ignore-existing; then
-            echo "Restoring previous Tailscale state"
-            sudo tailscaled --state=tailscale_state/state.json &
-            sleep 5
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} || true
+          if ! id -u ${{ env.VPS_USER }} >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash ${{ env.VPS_USER }}
+            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
+            sudo usermod -aG sudo ${{ env.VPS_USER }}
+            echo "${{ env.VPS_USER }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ env.VPS_USER }}
+            echo "✅ User ${{ env.VPS_USER }} created with sudo access"
           else
-            echo "No previous state found, fresh setup"
-            sudo tailscaled --state=tailscale_state/state.json &
-            sleep 5
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }}
-            rclone copy ./tailscale_state mega:vps-backup/tailscale_state
+            echo "🔁 User ${{ env.VPS_USER }} already exists"
           fi
 
-      - name: Start tmate session
+      - name: Set hostname
         run: |
-          echo "Starting tmate..."
-          tmate -F &
+          sudo hostnamectl set-hostname ${{ env.VPS_HOSTNAME }}
+          echo "🏷️ Hostname set to $(hostname)"
 
-      - name: Wait to keep session alive
-        run: sleep $((360*60))  # 6 hours
-
-      - name: Backup data on cancel
-        if: cancelled()
+      # ===== RESTORE FROM MEGA (if not skipped) =====
+      - name: Restore from MEGA backup
+        if: ${{ inputs.skip_restore != 'true' }}
         run: |
-          echo "Backing up jacky home and installed packages..."
+          mkdir -p restore
+          echo "🔍 Checking for backup in MEGA..."
+          if rclone ls mega:vps-backups/latest-backup.zip >/dev/null 2>&1; then
+            echo "📥 Downloading backup from MEGA..."
+            rclone copy mega:vps-backups/latest-backup.zip restore/
+            unzip -o restore/latest-backup.zip -d restore/
+            echo "✅ Backup restored from MEGA"
+          else
+            echo "⚠️ No backup found in MEGA (fresh start)"
+          fi
+
+          # Restore user home
+          if [ -f "restore/user-home.tar.gz" ]; then
+            echo "🏠 Restoring user home..."
+            sudo tar -xzf restore/user-home.tar.gz -C / --numeric-owner
+          fi
+
+          # Restore packages
+          if [ -f "restore/packages.list" ]; then
+            echo "📦 Restoring packages..."
+            sudo apt update
+            xargs sudo apt-get install -y < restore/packages.list
+          fi
+
+          # Restore tailscale
+          if [ -f "restore/tailscale-state.tar.gz" ]; then
+            echo "🌐 Restoring Tailscale state..."
+            sudo tar -xzf restore/tailscale-state.tar.gz -C / --numeric-owner
+            sudo systemctl restart tailscaled || true
+          fi
+
+          # Restore app data
+          if [ -f "restore/app-data.tar.gz" ]; then
+            echo "📱 Restoring app data..."
+            sudo tar -xzf restore/app-data.tar.gz -C / --numeric-owner
+          fi
+
+          # Fix permissions
+          sudo chown -R ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}
+          sudo chmod 700 /home/${{ env.VPS_USER }}
+
+      # ===== SETUP TAILSCALE =====
+      - name: Setup Tailscale
+        run: |
+          echo "🌐 Setting up Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          sleep 5
+          if ! sudo tailscale status >/dev/null 2>&1; then
+            echo "🔑 Logging into Tailscale with auth key..."
+            sudo tailscale up \
+              --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
+              --hostname ${{ env.VPS_HOSTNAME }} \
+              --ssh \
+              --advertise-exit-node \
+              --accept-dns=false
+          fi
+          TAILSCALE_IP=$(sudo tailscale ip -4)
+          echo "✅ Tailscale IP: $TAILSCALE_IP"
+
+      # ===== VPS SESSION =====
+      - name: Start VPS session
+        run: |
+          echo "🚀 VPS Session Started"
+          echo "👤 User: ${{ env.VPS_USER }}"
+          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
+          echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
+          echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
+
+          TIMEOUT=${{ env.SESSION_TIMEOUT }}
+          if [[ "$TIMEOUT" =~ ^([0-9]+)([hms])$ ]]; then
+            VALUE=${BASH_REMATCH[1]}
+            UNIT=${BASH_REMATCH[2]}
+            case $UNIT in
+              h) TIMEOUT_SECONDS=$((VALUE * 3600)) ;;
+              m) TIMEOUT_SECONDS=$((VALUE * 60)) ;;
+              s) TIMEOUT_SECONDS=$VALUE ;;
+            esac
+          else
+            echo "⚠️ Invalid timeout format, using default 6h"
+            TIMEOUT_SECONDS=21600
+          fi
+
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔗 SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "🌐 Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          sleep $TIMEOUT_SECONDS
+
+      # ===== CREATE BACKUP =====
+      - name: Create user data backup
+        if: always()
+        run: |
           mkdir -p backup
-          sudo tar -czf backup/jacky_home.tar.gz /home/jacky
-          dpkg --get-selections > backup/packages.list
-          rclone copy backup mega:vps-backup/backup-$(date +%Y%m%d-%H%M%S) --transfers=4
+          echo "💾 Creating backup..."
+          sudo tar -czf backup/user-home.tar.gz \
+            --exclude=/home/${{ env.VPS_USER }}/.cache \
+            --exclude=/home/${{ env.VPS_USER }}/node_modules \
+            --exclude=/home/${{ env.VPS_USER }}/tmp \
+            --numeric-owner \
+            /home/${{ env.VPS_USER }}
+          sudo tar -czf backup/tailscale-state.tar.gz --numeric-owner /var/lib/tailscale 2>/dev/null || true
+          sudo dpkg --get-selections > backup/packages.list
+          sudo tar -czf backup/app-data.tar.gz --numeric-owner /var/www /opt /srv 2>/dev/null || true
+          zip -r latest-backup.zip backup/
+
+      # ===== UPLOAD TO GITHUB ARTIFACTS =====
+      - name: Upload to GitHub artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-user-backup
+          path: backup/
+          retention-days: ${{ env.BACKUP_RETENTION_DAYS }}
+
+      # ===== UPLOAD TO MEGA =====
+      - name: Upload backup to MEGA
+        if: always()
+        run: |
+          echo "☁️ Uploading backup to MEGA..."
+          rclone copy latest-backup.zip mega:vps-backups/ --progress
+          rclone copy backup/ mega:vps-backups/ --progress
+          rclone copy latest-backup.zip mega:vps-backups/latest-backup.zip --progress
+          echo "✅ Backup uploaded to MEGA"
