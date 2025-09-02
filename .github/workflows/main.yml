@@ -5,10 +5,9 @@
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:
-  
+  schedule:
+    - cron: '0 0 * * *'  # Daily backup at midnight
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -21,20 +20,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. User Setup (runs at the very start of every session)
-      - name: 👤 Create user 'not' & Set root password
-        run: |
-          echo "Setting root password..."
-          echo "root:fleppy" | sudo chpasswd
-          
-          echo "Creating user 'not'..."
-          sudo useradd -m -s /bin/bash not
-          echo "not:fleppy" | sudo chpasswd
-          sudo usermod -aG sudo not
-          echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
-          echo "✅ User 'not' created and configured with password 'fleppy'."
-
-      # 2. Universal User Setup (runs every time to ensure the user exists)
+      # 1. Universal User Setup (runs every time to ensure the user exists)
       - name: 👤 Create user 'jacky' & Set Hostname
         run: |
           echo "🚀 Creating universal user and hostname setup..."
@@ -44,15 +30,16 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created with password 'root'."
       
-      # 3. Basic Setup & Tool Installation
+      # 2. Basic Setup & Tool Installation
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
       - name: ⚡ Install System Tools & Rclone
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server
           curl -fsSL https://rclone.org/install.sh | sudo bash
+          sudo systemctl enable --now ssh
 
       - name: ☁️ Configure Rclone (MEGA)
         run: |
@@ -64,7 +51,7 @@ jobs:
           pass = ${{ secrets.MEGA_PASS }}
           EOF
 
-      # 4. Restore or Initialize System
+      # 3. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
@@ -72,8 +59,7 @@ jobs:
           if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
-            # The tar command will restore the previous state on top of the newly created 'jacky' user home directory.
-            sudo tar -xzf /tmp/${BACKUP_NAME} -C /
+            sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
             echo "ℹ️ No backup found. This will be a fresh installation."
@@ -81,15 +67,12 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 5. Runtime Configuration (runs every time)
+      # 4. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
-          # Enable any specific services you backed up, e.g.:
-          # sudo systemctl enable --now my-persistent-app.service || true
           
-          # This section now handles Tailscale setup for every run
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
@@ -106,12 +89,11 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 6. Maintain the Session (New Graceful Shutdown)
+      # 5. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
           
-          # This loop will continue until the stop file is created
           while [ ! -f /tmp/stop_session ]; do
             echo "Session is active. Sleeping for 60 seconds..."
             sleep 60
@@ -119,7 +101,7 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-            # 7. Final Backup (always runs)
+      # 6. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
@@ -128,9 +110,8 @@ jobs:
           sudo pkill -f "tmate" || true
           
           echo "📦 Creating final backup archive..."
-          sudo mkdir -p ${{ env.BACKUP_STORE }}
           sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
-            /home/jacky \
+            --absolute-names \
             /etc/hostname \
             /etc/hosts \
             /etc/systemd/system \
@@ -139,6 +120,25 @@ jobs:
             /srv \
             /var/www \
             /etc/ssh \
-            /home/jacky/.ssh 2>/dev/null || true
+            /etc/apache2 \
+            /www \
+            /root \
+            /home/jacky \
+            2>/dev/null || true
           
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+
+      - name: ☁️ Upload Final Backup to MEGA
+        if: always()
+        run: |
+          echo "🚀 Uploading final backup to MEGA..."
+          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
+          echo "✅ Final backup uploaded successfully."
+
+      - name: 📝 Final Status Report
+        if: always()
+        run: |
+          echo "=== VPS Session Ended ==="
+          echo "Final job status: ${{ job.status }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "========================="
