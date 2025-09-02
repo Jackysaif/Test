@@ -8,13 +8,20 @@ on:
         required: false
         default: 'false'
         type: boolean
+      session_timeout:
+        description: 'Session timeout (e.g., 1h, 2h, 6h)'
+        required: false
+        default: '6h'
+        type: string
   workflow_call:
 
 env:
   VPS_USER: jacky
-  VPS_PASSWORD: root
+  VPS_PASSWORD: ${{ secrets.VPS_PASSWORD || 'ChangeMe123!' }}
   VPS_HOSTNAME: github-vps
-  SESSION_TIMEOUT: 6h
+  SESSION_TIMEOUT: ${{ inputs.session_timeout || '6h' }}
+  BACKUP_RETENTION_DAYS: 7
+  MAX_RETRIES: 3
 
 jobs:
   vps:
@@ -29,7 +36,7 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt update
-          sudo apt install -y curl tmate jq
+          sudo apt install -y curl tmate jq zip unzip
 
       # ===== RCLONE SETUP =====
       - name: Install and configure rclone
@@ -61,6 +68,7 @@ jobs:
             sudo useradd -m -s /bin/bash ${{ env.VPS_USER }}
             echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
             sudo usermod -aG sudo ${{ env.VPS_USER }}
+            echo "${{ env.VPS_USER }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ env.VPS_USER }}
             echo "✅ User ${{ env.VPS_USER }} created with sudo access"
           else
             echo "🔁 User ${{ env.VPS_USER }} already exists"
@@ -154,6 +162,8 @@ jobs:
           echo "📥 Downloading artifact $ARTIFACT_ID from MEGA stored link..."
           echo "🔗 Using link: $DIRECT_LINK"
           
+          mkdir -p restore
+          
           # Download using direct GitHub API
           HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -182,6 +192,8 @@ jobs:
         run: |
           ARTIFACT_ID=${{ steps.find-artifact.outputs.artifact_id }}
           echo "📥 Downloading artifact $ARTIFACT_ID via API fallback..."
+          
+          mkdir -p restore
           
           # Download using direct GitHub API
           HTTP_CODE=$(curl -L -w "%{http_code}" -o restore/backup.zip \
@@ -213,6 +225,7 @@ jobs:
           if [ -f "restore/user-home.tar.gz" ]; then
             echo "🏠 Restoring user data..."
             sudo tar -xzf restore/user-home.tar.gz -C / --no-same-owner
+            echo "✅ User data restored"
           fi
           
           # Restore system packages
@@ -222,18 +235,21 @@ jobs:
             sudo dpkg --set-selections < restore/system-packages.list || true
             sudo apt-get upgrade -y || true
             sudo apt-get dselect-upgrade -y || true
+            echo "✅ Packages restored"
           fi
           
           # Restore web server configs
           if [ -f "restore/webserver-config.tar.gz" ]; then
             echo "🌐 Restoring web server config..."
             sudo tar -xzf restore/webserver-config.tar.gz -C / --no-same-owner || true
+            echo "✅ Web server config restored"
           fi
           
           # Restore website data
           if [ -f "restore/webserver-data.tar.gz" ]; then
             echo "💾 Restoring website data..."
             sudo tar -xzf restore/webserver-data.tar.gz -C / --no-same-owner || true
+            echo "✅ Website data restored"
           fi
           
           # Restore databases
@@ -261,18 +277,21 @@ jobs:
           if [ -f "restore/aapanel-config.tar.gz" ]; then
             echo "⚙️ Restoring aaPanel config..."
             sudo tar -xzf restore/aapanel-config.tar.gz -C / --no-same-owner || true
+            echo "✅ aaPanel config restored"
           fi
           
           # Restore PHP config
           if [ -f "restore/php-config.tar.gz" ]; then
             echo "🐘 Restoring PHP config..."
             sudo tar -xzf restore/php-config.tar.gz -C / --no-same-owner || true
+            echo "✅ PHP config restored"
           fi
           
           # Restore system services
           if [ -f "restore/system-services.tar.gz" ]; then
             echo "🔧 Restoring system services..."
             sudo tar -xzf restore/system-services.tar.gz -C / --no-same-owner || true
+            echo "✅ System services restored"
           fi
           
           # Start restored services
@@ -283,14 +302,44 @@ jobs:
           
           echo "✅ System restoration completed"
 
+      # ===== SYSTEM HEALTH CHECK =====
+      - name: System health check
+        if: always()
+        run: |
+          echo "=================================="
+          echo "🏥 System Health Check"
+          echo "=================================="
+          echo "📊 Disk usage:"
+          df -h / | tail -1
+          echo ""
+          echo "💾 Memory usage:"
+          free -h
+          echo ""
+          echo "🔧 Service status:"
+          systemctl is-active mysql 2>/dev/null && echo "✅ MySQL: Running" || echo "❌ MySQL: Not running"
+          systemctl is-active apache2 2>/dev/null && echo "✅ Apache2: Running" || echo "❌ Apache2: Not running"
+          systemctl is-active nginx 2>/dev/null && echo "✅ Nginx: Running" || echo "❌ Nginx: Not running"
+          echo "=================================="
+
       # ===== TAILSCALE SETUP =====
       - name: Setup Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname ${{ env.VPS_HOSTNAME }} --ssh
           
-          echo "🌐 Tailscale IP: $(tailscale ip -4)"
-          echo "🔑 SSH: ssh ${{ env.VPS_USER }}@$(tailscale ip -4)"
+          TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "Not available")
+          echo "🌐 Tailscale IP: $TAILSCALE_IP"
+          echo "🔑 SSH: ssh ${{ env.VPS_USER }}@$TAILSCALE_IP"
+          
+          # Save connection info to file
+          cat > connection-info.txt << EOF
+          VPS Connection Information
+          ==========================
+          Tailscale IP: $TAILSCALE_IP
+          SSH Command: ssh ${{ env.VPS_USER }}@$TAILSCALE_IP
+          Username: ${{ env.VPS_USER }}
+          Hostname: ${{ env.VPS_HOSTNAME }}
+          EOF
 
       # ===== VPS SESSION =====
       - name: Start VPS session
@@ -298,18 +347,31 @@ jobs:
           echo "🚀 VPS Session Started"
           echo "========================"
           echo "👤 User: ${{ env.VPS_USER }}"
-          echo "🔑 Pass: ${{ env.VPS_PASSWORD }}"
-          echo "🌐 IP: $(tailscale ip -4)"
+          echo "🔑 Pass: [Protected]"
+          echo "🌐 IP: $(tailscale ip -4 2>/dev/null || echo 'Tailscale not ready')"
           echo "⏰ Timeout: ${{ env.SESSION_TIMEOUT }}"
           echo "========================"
           
           # Start tmate session
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🔗 Connect: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          
+          # Get connection strings
+          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          echo "🔗 SSH Connect: $TMATE_SSH"
+          echo "🌐 Web Connect: $TMATE_WEB"
+          
+          # Calculate timeout in seconds
+          TIMEOUT_SECONDS=21600  # Default 6 hours
+          if [[ "${{ env.SESSION_TIMEOUT }}" =~ ^([0-9]+)h$ ]]; then
+            TIMEOUT_SECONDS=$((${BASH_REMATCH[1]} * 3600))
+          fi
           
           # Keep session alive
-          sleep 21600  # 6 hours
+          echo "⏳ Session will remain active for ${{ env.SESSION_TIMEOUT }}"
+          sleep $TIMEOUT_SECONDS
 
       # ===== COMPLETE BACKUP CREATION =====
       - name: Create complete backup
@@ -356,7 +418,6 @@ jobs:
 
           # 4. Backup website data
           echo "💾 Backing up website data..."
-          # Create empty tar if no directories exist
           WEBSITE_DIRS=""
           [ -d "/var/www" ] && WEBSITE_DIRS="$WEBSITE_DIRS /var/www"
           [ -d "/home/${{ env.VPS_USER }}/www" ] && WEBSITE_DIRS="$WEBSITE_DIRS /home/${{ env.VPS_USER }}/www"
@@ -368,7 +429,6 @@ jobs:
               $WEBSITE_DIRS \
               2>/dev/null || echo "⚠️ Website data backup incomplete"
           else
-            # Create empty tar file to maintain consistency
             tar -czf backup/webserver-data.tar.gz --files-from /dev/null 2>/dev/null || true
             echo "ℹ️ No website directories found, created empty backup"
           fi
@@ -376,11 +436,9 @@ jobs:
           # 5. Backup databases
           echo "🗄️ Backing up databases..."
           if command -v mysql >/dev/null 2>&1; then
-            # Ensure MySQL is running
             sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null || true
             sleep 3
             
-            # Test connection before backup
             if mysql -e "SELECT 1;" 2>/dev/null; then
               echo "✅ MySQL connection successful, creating backup..."
               mysqldump --all-databases --single-transaction > backup/all-databases.sql 2>/dev/null && \
@@ -453,19 +511,48 @@ jobs:
           # 9. Create backup manifest
           echo "📝 Creating backup manifest..."
           cat > backup/manifest.txt << EOF
-Backup created: $(date)
-Components backed up:
-- User home directory
-- System packages  
-- Web server configurations
-- Website data
-- Databases
-- aaPanel configuration
-- PHP configuration
-- System services
-EOF
+          Backup created: $(date)
+          Workflow run: ${{ github.run_id }}
+          Repository: ${{ github.repository }}
+          Components backed up:
+          - User home directory
+          - System packages  
+          - Web server configurations
+          - Website data
+          - Databases
+          - aaPanel configuration
+          - PHP configuration
+          - System services
+          EOF
 
-          echo "✅ Complete backup created: $(du -sh backup 2>/dev/null || echo 'Size calculation failed')"
+          # Fixed line 466 - Properly handle the du command output
+          BACKUP_SIZE=$(du -sh backup 2>/dev/null | cut -f1 || echo "Unknown")
+          echo "✅ Complete backup created: Size: $BACKUP_SIZE"
+
+      # ===== VERIFY BACKUP INTEGRITY =====
+      - name: Verify backup integrity
+        if: always()
+        run: |
+          echo "🔍 Verifying backup integrity..."
+          ERRORS=0
+          
+          for file in backup/*.tar.gz; do
+            if [ -f "$file" ]; then
+              if ! tar -tzf "$file" > /dev/null 2>&1; then
+                echo "❌ Corrupted backup: $file"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "✅ Valid: $(basename $file)"
+              fi
+            fi
+          done
+          
+          if [ $ERRORS -gt 0 ]; then
+            echo "⚠️ Found $ERRORS corrupted backup files"
+            exit 1
+          else
+            echo "✅ All backup files are valid"
+          fi
 
       # ===== UPLOAD TO GITHUB ARTIFACTS =====
       - name: Upload backup as artifact
@@ -474,11 +561,11 @@ EOF
         with:
           name: vps-backup
           path: backup/
-          retention-days: 7
+          retention-days: ${{ env.BACKUP_RETENTION_DAYS }}
           if-no-files-found: warn
 
-      # ===== SAVE ARTIFACT LINK TO MEGA =====
-      - name: Save artifact link to MEGA
+      # ===== SAVE ARTIFACT LINK TO MEGA WITH RETRY =====
+      - name: Save artifact link to MEGA with retry
         if: always()
         run: |
           echo "☁️ Saving new artifact link to MEGA..."
@@ -486,7 +573,8 @@ EOF
           # Get current run ID and construct artifact link
           RUN_ID="${{ github.run_id }}"
           
-          # Wait a moment for artifact to be processed
+          # Wait for artifact to be processed
+          echo "⏳ Waiting for artifact to be processed..."
           sleep 30
           
           # Get artifact ID from current run
@@ -504,14 +592,59 @@ EOF
             # Save to file
             echo "$ARTIFACT_LINK" > artifact-link.txt
             
-            # Upload to MEGA
-            rclone copy artifact-link.txt mega: --progress || echo "⚠️ Failed to upload link to MEGA"
+            # Upload to MEGA with retry
+            RETRY_COUNT=0
+            UPLOAD_SUCCESS=false
             
-            echo "✅ Artifact link saved to MEGA for next session"
+            while [ $RETRY_COUNT -lt ${{ env.MAX_RETRIES }} ]; do
+              if rclone copy artifact-link.txt mega: --progress; then
+                echo "✅ Successfully uploaded artifact link to MEGA"
+                UPLOAD_SUCCESS=true
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "⚠️ Upload failed, retry $RETRY_COUNT/${{ env.MAX_RETRIES }}"
+                sleep 10
+              fi
+            done
+            
+            if [ "$UPLOAD_SUCCESS" = false ]; then
+              echo "❌ Failed to upload artifact link to MEGA after ${{ env.MAX_RETRIES }} attempts"
+            else
+              echo "✅ Artifact link saved to MEGA for next session"
+            fi
           else
             echo "⚠️ Could not get artifact ID for current run"
             echo "📋 Manual link format: https://github.com/${{ github.repository }}/actions/runs/$RUN_ID/artifacts/ARTIFACT_ID"
           fi
+
+      # ===== CLEANUP OLD ARTIFACTS =====
+      - name: Cleanup old artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "🧹 Cleaning up old artifacts..."
+          
+          # Get all artifacts
+          ARTIFACTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100")
+          
+          # Calculate cutoff date (3 days ago)
+          CUTOFF_TIMESTAMP=$(date -d '3 days ago' +%s)
+          
+          # Delete old artifacts
+          echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name == "vps-backup") | "KATEX_INLINE_OPEN.id):KATEX_INLINE_OPEN.created_at)"' | while IFS=: read -r id created_at; do
+            ARTIFACT_TIMESTAMP=$(date -d "$created_at" +%s 2>/dev/null || echo 0)
+            if [ $ARTIFACT_TIMESTAMP -lt $CUTOFF_TIMESTAMP ] && [ $ARTIFACT_TIMESTAMP -gt 0 ]; then
+              echo "🗑️ Deleting old artifact: $id (created: $created_at)"
+              curl -X DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$id"
+            fi
+          done
+          
+          echo "✅ Cleanup completed"
 
       # ===== DISPLAY RESTORATION INFO =====
       - name: Show restoration summary
@@ -538,7 +671,7 @@ EOF
           
           echo "=================================="
           echo "💾 New backup saved to:"
-          echo "   - GitHub Artifacts (7 days)"
+          echo "   - GitHub Artifacts (${{ env.BACKUP_RETENTION_DAYS }} days)"
           echo "   - MEGA link file (persistent)"
           echo "🔄 Next session will auto-restore from MEGA link"
           echo "=================================="
@@ -548,10 +681,23 @@ EOF
         if: always()
         run: |
           echo "=================================="
-          echo "VPS Session Completed"
+          echo "📊 VPS Session Report"
           echo "=================================="
           echo "Status: ${{ job.status }}"
+          echo "Duration: ${{ env.SESSION_TIMEOUT }}"
           echo "Backup: ✅ Uploaded to GitHub Artifacts"
           echo "Link: ✅ Saved to MEGA for persistence"
           echo "Next session will auto-restore this exact state"
+          echo ""
+          echo "Resource Usage:"
+          echo "$(df -h / | tail -1 | awk '{print "  Disk: "$3" / "$2" ("$5")"}')"
+          echo "$(free -h | grep Mem | awk '{print "  Memory: "$3" / "$2}')"
           echo "=================================="
+
+      # ===== SEND NOTIFICATION ON FAILURE =====
+      - name: Send failure notification
+        if: failure()
+        continue-on-error: true
+        run: |
+          echo "❌ Workflow failed! Check logs for details."
+          # Add webhook/email notification here if needed
