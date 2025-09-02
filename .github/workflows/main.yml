@@ -69,7 +69,7 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 4. First-Time Setup (only runs if no backup was found)
+      # 4. First-Time User Setup (only runs if no backup was found)
       - name: 👤 Create User 'jacky' & Set Hostname (First Run Only)
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
@@ -80,13 +80,6 @@ jobs:
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created with password 'root'."
 
-      - name: 🕸️ Initial Tailscale Setup (First Run Only)
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          echo "🚀 Performing first-time Tailscale setup..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps
-
       # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
@@ -95,9 +88,11 @@ jobs:
           # Enable any specific services you backed up, e.g.:
           # sudo systemctl enable --now my-persistent-app.service || true
           
-          echo "🔄 Starting Tailscale service..."
+          # This section now handles Tailscale setup for every run
+          echo "🕸️ Installing and starting Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
-          sudo tailscale up --hostname=github-vps --reset || true
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
           
           echo "✅ Services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
@@ -110,12 +105,18 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 6. Maintain the Session
+      # 6. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
-          echo "🖥️ VPS is now running."
-          echo "Session will time out after 6 hours. Final backup will run automatically."
-          sleep 354m
+          echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
+          
+          # This loop will continue until the stop file is created
+          while [ ! -f /tmp/stop_session ]; do
+            echo "Session is active. Sleeping for 60 seconds..."
+            sleep 60
+          done
+          
+          echo "Graceful shutdown initiated. Proceeding to final backup."
 
       # 7. Final Backup (always runs)
       - name: 💾 Create Final Backup
