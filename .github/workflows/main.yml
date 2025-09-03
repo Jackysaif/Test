@@ -27,8 +27,9 @@ jobs:
           sudo useradd -m -s /bin/bash jacky
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
+          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
-          echo "✅ User 'jacky' created with password 'root'."
+          echo "✅ User 'jacky' created and configured with password 'root'."
       
       # 2. Basic Setup & Tool Installation
       - name: 🕸️ Checkout Code
@@ -68,22 +69,19 @@ jobs:
             sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-
-      # 4. Aapanel Setup (conditional logic)
-      - name: 🚀 Aapanel Setup
+      
+      # 4. Aapanel and Service Re-Configuration
+      - name: ⚙️ Re-configure Aapanel and Services
         run: |
-          if [ "${{ steps.restore.outputs.is_new_install }}" == "true" ]; then
-            echo "Fresh install: running Aapanel installer..."
-            curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-            sudo bash /tmp/install.sh
-          else
-            echo "Restored session: re-registering Aapanel state..."
-            sudo /etc/init.d/bt stop || true
-            sudo /etc/init.d/bt start || true
-            sudo bt reload || true
-            echo "Aapanel has been reloaded."
-          fi
+          echo "Re-configuring Aapanel and services for a working session..."
+          # This step ensures the Aapanel command (bt) is available and services are registered.
+          sudo /www/server/panel/pyenv/bin/python /www/server/panel/main.pyc || true
+          # Re-create the symlink for 'bt' command to ensure it's in the PATH
+          sudo ln -sf /www/server/panel/bt /usr/bin/bt || true
           
+          # Re-add sudo permissions just in case the tar restore broke them
+          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+
       # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
@@ -155,6 +153,8 @@ jobs:
             /home/jacky \
             /usr/lib/systemd/system \
             /var/lib/mysql \
+            /etc/sudoers.d/ \
+            /usr/bin/bt \
             2>/dev/null || true
           
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
