@@ -69,18 +69,14 @@ jobs:
             sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-      
-      # 4. Aapanel and Service Re-Configuration
-      - name: ⚙️ Re-configure Aapanel and Services
+
+      # 4. Aapanel Setup (install over restored files)
+      - name: 🚀 Aapanel Setup
         run: |
-          echo "Re-configuring Aapanel and services for a working session..."
-          # This step ensures the Aapanel command (bt) is available and services are registered.
-          sudo /www/server/panel/pyenv/bin/python /www/server/panel/main.pyc || true
-          # Re-create the symlink for 'bt' command to ensure it's in the PATH
-          sudo ln -sf /www/server/panel/bt /usr/bin/bt || true
-          
-          # Re-add sudo permissions just in case the tar restore broke them
-          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          echo "Running Aapanel installer to configure over restored files..."
+          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          sudo bash /tmp/install.sh
+          echo "✅ Aapanel setup completed."
 
       # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
@@ -133,7 +129,7 @@ jobs:
           sudo systemctl stop mariadb || true
           sudo pkill -f "tmate" || true
           
-          # This is the crucial fix: create the backup store directory
+          # Create the backup store directory
           sudo mkdir -p ${{ env.BACKUP_STORE }}
           
           echo "📦 Creating final backup archive..."
