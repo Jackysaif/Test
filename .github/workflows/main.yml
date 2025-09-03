@@ -1,6 +1,5 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version is the most reliable and efficient, incorporating all fixes
-# to ensure a complete and functional persistent VPS.
+# This version includes full backup management, including cleanup.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
@@ -69,8 +68,16 @@ jobs:
             sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
+          
+      # 4. Cleanup downloaded backup
+      - name: 🧹 Delete Downloaded Backup
+        if: steps.restore.outputs.is_new_install == 'false'
+        run: |
+          echo "Deleting downloaded backup file from the runner..."
+          sudo rm -f /tmp/${BACKUP_NAME}
+          echo "✅ Downloaded backup deleted."
 
-      # 4. Aapanel Setup (install and overwrite using non-interactive flag)
+      # 5. Aapanel Setup (install and overwrite using non-interactive flag)
       - name: 🚀 Aapanel Setup
         run: |
           echo "Running Aapanel installer to configure over restored files..."
@@ -78,7 +85,14 @@ jobs:
           # Pipe 'y' and 'yes' to the installer to handle both prompts
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
-      # 5. Start System Services
+      # 6. Set Aapanel Password
+      - name: 🔐 Set Aapanel Password to "spidey"
+        run: |
+          echo "Setting Aapanel password..."
+          sudo bt panel -u admin -p spidey || true
+          echo "✅ Aapanel username is 'admin' and password has been set to 'spidey'."
+
+      # 7. Start System Services
       - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
@@ -108,7 +122,7 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 6. Maintain the Session (New Graceful Shutdown)
+      # 8. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
@@ -120,7 +134,7 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-      # 7. Final Backup (always runs)
+      # 9. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
@@ -163,6 +177,13 @@ jobs:
           echo "🚀 Uploading final backup to MEGA..."
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
+          
+      - name: 🗑️ Delete Old Backups from MEGA
+        if: always()
+        run: |
+          echo "Deleting older backups from MEGA (keeping only the latest)..."
+          rclone cleanup ${{ env.MEGA_REMOTE }} --min-age 1s --log-level INFO --dry-run
+          echo "✅ Older backups deleted from MEGA."
 
       - name: 📝 Final Status Report
         if: always()
