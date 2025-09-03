@@ -75,8 +75,8 @@ jobs:
         run: |
           echo "Running Aapanel installer to configure over restored files..."
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-          # Use the -y flag for non-interactive installation
-          sudo bash /tmp/install.sh -y
+          # Pipe 'y' and 'yes' to the installer to handle both prompts
+          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
           echo "✅ Aapanel setup completed."
 
       # 5. Show Aapanel Credentials
