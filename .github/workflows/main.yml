@@ -78,10 +78,10 @@ jobs:
           # Pipe 'y' and 'yes' to the installer to handle both prompts
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
           
-          # Manually reload the Aapanel panel after installation
-          echo "Reloading Aapanel panel to ensure services are correctly started..."
-          sudo bt reload
-          echo "✅ Aapanel setup and reload completed."
+          # Manually restart the Aapanel panel after installation
+          echo "Restarting Aapanel panel to ensure services are correctly started..."
+          sudo bt restart
+          echo "✅ Aapanel setup and restart completed."
 
       # 5. Start System Services
       - name: 🚀 Start System Services
