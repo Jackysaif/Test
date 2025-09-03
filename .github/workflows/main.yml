@@ -69,7 +69,16 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # 4. Runtime Configuration (runs every time)
+      # 4. Aapanel Installation (only on new installs)
+      - name: 🚀 Install Aapanel on Fresh Session
+        if: steps.restore.outputs.is_new_install == 'true'
+        run: |
+          echo "Installing Aapanel. This may take some time..."
+          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          sudo bash /tmp/install.sh
+          echo "✅ Aapanel installation script completed."
+          
+      # 5. Runtime Configuration (runs every time)
       - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
@@ -97,7 +106,7 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 5. Maintain the Session (New Graceful Shutdown)
+      # 6. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
@@ -109,7 +118,7 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-      # 6. Final Backup (always runs)
+      # 7. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
         run: |
