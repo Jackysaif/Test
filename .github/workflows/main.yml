@@ -1,13 +1,14 @@
-# 🕷️ Spidey Persistent VPS - Optimized Workflow
+# 🕷️️ Spidey Persistent VPS - Optimized Workflow
 # This version is the most reliable and efficient, incorporating all fixes
 # to ensure a complete and functional persistent VPS.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'  # Daily backup at midnight
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -70,14 +71,14 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
           
-      # 4. Cleanup downloaded backup
-      - name: 🧹 Delete Downloaded Backup
+      # 4. Delete Backup from MEGA
+      - name: 🗑️ Delete Backup from MEGA
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
-          echo "Deleting downloaded backup file from the runner..."
-          sudo rm -f /tmp/${BACKUP_NAME}
-          echo "✅ Downloaded backup deleted."
-
+          echo "Deleting backup file from MEGA remote..."
+          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
+          echo "✅ Backup deleted from MEGA."
+      
       # 5. Aapanel Setup (install and overwrite using non-interactive flag)
       - name: 🚀 Aapanel Setup
         run: |
@@ -112,12 +113,13 @@ jobs:
           echo "✅ All services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
       
-      # 7. Set Aapanel Password
-      - name: 🔐 Set Aapanel Password to "spidey"
+      # 7. Set Aapanel Credentials
+      - name: 🔐 Set Aapanel Username & Password
         run: |
-          echo "Setting Aapanel password..."
-          sudo bt panel -u admin -p spidey
-          echo "✅ Aapanel username is 'admin' and password has been set to 'spidey'."
+          echo "Setting Aapanel username and password..."
+          echo "jacky" | sudo bt 6
+          echo "spidey" | sudo bt 5
+          echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
       - name: 🛰️ Start Tmate Session
         run: |
@@ -190,3 +192,4 @@ jobs:
           echo "Final job status: ${{ job.status }}"
           echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           echo "========================="
+
