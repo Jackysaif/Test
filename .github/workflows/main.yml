@@ -1,6 +1,6 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version is the most reliable and efficient, incorporating all fixes
-# to ensure a complete and functional persistent VPS.
+# This version prioritizes network connectivity and debugging access (via Tmate)
+# before installing the Aapanel service.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
@@ -20,13 +20,13 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. Universal User Setup
+      # 1. Universal User Setup (runs every time to ensure the user exists)
       - name: 👤 Create user 'jacky' & Set Hostname
         run: |
           echo "🚀 Creating universal user and hostname setup..."
           sudo useradd -m -s /bin/bash jacky
           echo "jacky:root" | sudo chpasswd
-          sudo usod -aG sudo jacky
+          sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created and configured with password 'root'."
@@ -39,9 +39,9 @@ jobs:
         run: |
           echo "Installing core system tools..."
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server rclone
           sudo systemctl enable --now ssh
+          echo "✅ Core tools installed."
 
       - name: ☁️ Configure Rclone (MEGA)
         run: |
@@ -70,23 +70,16 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
           
-      # 4. Cleanup Backups
-      - name: ☁️ Delete Backup from MEGA
+      # 4. Delete Backup from MEGA
+      - name: 🗑️ Delete Backup from MEGA
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
-          echo "Deleting restored backup from MEGA to prepare for new upload..."
-          rclone delete ${MEGA_REMOTE}/${BACKUP_NAME}
-          echo "✅ Backup deleted from MEGA remote."
-
-      - name: 🧹 Delete Downloaded Backup from Runner
-        if: steps.restore.outputs.is_new_install == 'false'
-        run: |
-          echo "Deleting downloaded backup file from the runner..."
-          sudo rm -f /tmp/${BACKUP_NAME}
-          echo "✅ Downloaded backup deleted from runner."
-
-      # 5. Start Base Services & Networking
-      - name: 🚀 Start Base System Services & Tailscale
+          echo "Deleting backup file from MEGA remote..."
+          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
+          echo "✅ Backup deleted from MEGA."
+      
+      # 5. Start Core Services
+      - name: 🚀 Start Core Services & Tailscale
         run: |
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
@@ -96,38 +89,13 @@ jobs:
           sudo systemctl enable --now tailscaled
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
           
+          # Wait for Tailscale network to fully stabilize
           echo "Pausing for 10 seconds to allow Tailscale network to establish..."
           sleep 10
-          
-          echo "⚙️ Starting database and web server..."
-          sudo systemctl start mariadb || true
-          sudo systemctl start apache2 || true
-
-          echo "✅ Base services are running."
+          echo "✅ Core services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
       
-      # 6. Aapanel Installation & Configuration
-      - name: 🚀 Install Aapanel
-        run: |
-          echo "Running Aapanel installer..."
-          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
-
-      - name: 🔐 Set Aapanel User to "jacky" & Password to "spidey"
-        run: |
-          echo "Setting Aapanel username to 'jacky'..."
-          echo "jacky" | sudo bt 6
-          echo "Setting Aapanel password to 'spidey'..."
-          echo "spidey" | sudo bt 5
-          echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
-
-      - name: 🔄 Restart Aapanel to Apply Credentials
-        run: |
-          echo "Restarting Aapanel service to apply new credentials..."
-          sudo bt restart
-          echo "✅ Aapanel has been restarted."
-      
-      # 7. Start Remote Access Session
+      # 6. Start Tmate Session for debugging
       - name: 🛰️ Start Tmate Session
         run: |
           sudo apt-get install -y tmate
@@ -136,7 +104,23 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 8. Maintain the Session (Graceful Shutdown)
+      # 7. Aapanel Setup
+      - name: 🚀 Aapanel Setup & Credential Configuration
+        run: |
+          echo "Running Aapanel installer to configure over restored files..."
+          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
+
+          echo "Setting Aapanel username and password..."
+          echo "jacky" | sudo bt 6
+          echo "spidey" | sudo bt 5
+          
+          echo "Restarting Aapanel to apply new credentials..."
+          sudo bt restart
+
+          echo "✅ Aapanel is installed, configured, and running."
+      
+      # 8. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
@@ -148,9 +132,9 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-      # 9. Final Backup
+      # 9. Final Backup (only on success or failure)
       - name: 💾 Create Final Backup
-        if: always()
+        if: success() || failure()
         run: |
           echo "🛑 Stopping services for a clean backup..."
           sudo systemctl stop tailscaled || true
@@ -159,6 +143,7 @@ jobs:
           sudo systemctl stop mariadb || true
           sudo pkill -f "tmate" || true
           
+          # Create the backup store directory
           sudo mkdir -p ${{ env.BACKUP_STORE }}
           
           echo "📦 Creating final backup archive..."
@@ -184,19 +169,17 @@ jobs:
           
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
-      # 10. Upload Final Backup
       - name: ☁️ Upload Final Backup to MEGA
-        if: always()
+        if: success() || failure()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
-      # 11. Final Status Report
       - name: 📝 Final Status Report
-        if: always()
+        if: success() || failure()
         run: |
           echo "=== VPS Session Ended ==="
           echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "Backup uploaded to: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
           echo "========================="
