@@ -1,14 +1,13 @@
-# 🕷️️ Spidey Persistent VPS - Optimized Workflow
+# 🕷️ Spidey Persistent VPS - Optimized Workflow
 # This version is the most reliable and efficient, incorporating all fixes
 # to ensure a complete and functional persistent VPS.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:
-
+  schedule:
+    - cron: '0 0 * * *'  # Daily backup at midnight
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -96,11 +95,22 @@ jobs:
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
           
-          # Wait for Tailscale network to fully stabilize
-          echo "Pausing for 10 seconds to allow Tailscale network to establish..."
-          sleep 10
+          # Wait for Tailscale to be fully connected and assigned an IP
+          echo "🔍 Waiting for Tailscale to connect..."
+          for i in $(seq 1 60); do
+              TAILSCALE_STATUS=$(sudo tailscale status)
+              if echo "$TAILSCALE_STATUS" | grep -q "Tailscale up; tagged"; then
+                  echo "✅ Tailscale is connected after $i seconds."
+                  break
+              fi
+              echo "Tailscale not connected yet... sleeping 1 second."
+              sleep 1
+              if [ $i -eq 60 ]; then
+                  echo "❌ Tailscale failed to connect after 60 seconds."
+                  exit 1
+              fi
+          done
           
           # Start the services in a logical order
           echo "⚙️ Starting database, Aapanel, and web services..."
@@ -192,4 +202,3 @@ jobs:
           echo "Final job status: ${{ job.status }}"
           echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           echo "========================="
-
