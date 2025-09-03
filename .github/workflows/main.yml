@@ -1,6 +1,6 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version improves logic by separating the initial setup from the restore process,
-# eliminating redundant steps and ensuring a cleaner execution flow.
+# This version is the most reliable and efficient, incorporating all fixes
+# to ensure a complete and functional persistent VPS.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
@@ -36,13 +36,15 @@ jobs:
 
       - name: ⚡ Install System Tools & Rclone
         run: |
+          echo "Installing core system tools..."
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
 
       - name: ☁️ Configure Rclone (MEGA)
         run: |
+          echo "Configuring Rclone for MEGA..."
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
           [mega]
@@ -63,7 +65,7 @@ jobs:
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
             echo "ℹ️ No backup found. This will be a fresh installation."
-            sudo mkdir -p /home/jacky /opt /srv /var/www
+            sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
@@ -78,7 +80,13 @@ jobs:
           sudo systemctl enable --now tailscaled
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
           
-          echo "✅ Services are running."
+          # Start the services in a logical order
+          echo "⚙️ Starting database, Aapanel, and web services..."
+          sudo systemctl start mariadb || true
+          sudo systemctl start btpanel.service || true
+          sudo systemctl start apache2 || true
+
+          echo "✅ All services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
 
       - name: 🛰️ Start Tmate Session
@@ -107,6 +115,9 @@ jobs:
         run: |
           echo "🛑 Stopping services for a clean backup..."
           sudo systemctl stop tailscaled || true
+          sudo systemctl stop btpanel.service || true
+          sudo systemctl stop apache2 || true
+          sudo systemctl stop mariadb || true
           sudo pkill -f "tmate" || true
           
           # This is the crucial fix: create the backup store directory
@@ -124,9 +135,11 @@ jobs:
             /var/www \
             /etc/ssh \
             /etc/apache2 \
-            /www \
+            /www/server \
             /root \
             /home/jacky \
+            /usr/lib/systemd/system \
+            /var/lib/mysql \
             2>/dev/null || true
           
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
