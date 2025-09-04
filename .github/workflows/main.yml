@@ -1,12 +1,13 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This is the complete and final version with all known fixes.
+# This version is the most reliable and efficient, incorporating all fixes
+# to ensure a complete and functional persistent VPS.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'  # Daily backup at midnight
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -34,26 +35,29 @@ jobs:
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
-      - name: ⚡ Install System Tools
+      - name: ⚡ Install System Tools & Rclone
         run: |
           echo "Installing core system tools..."
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server rclone
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
+          curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
           echo "✅ Core tools installed."
+      
+      # 3. Configure Rclone with a reliable method
+      - name: ☁️ Configure Rclone (MEGA)
+        run: |
+          echo "Configuring Rclone for MEGA..."
+          mkdir -p ~/.config/rclone
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
+          echo "✅ Rclone is configured."
 
-      # 3. Restore or Initialize System
+      # 4. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
           echo "🔍 Checking for existing backup on MEGA..."
-          
-          # Configure Rclone temporarily to restore the backup
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          
-          # Check for backup file with improved logging
-          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} --mega-debug-dumps --progress; then
+          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
             sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
@@ -64,20 +68,24 @@ jobs:
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
           
-      # 4. Delete Backup from MEGA
+      # 5. Delete Backup from MEGA
       - name: 🗑️ Delete Backup from MEGA
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           echo "Deleting backup file from MEGA remote..."
-          # Re-create the Rclone config to ensure it's available
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
       
-      # 5. Start Core Services
-      - name: 🚀 Start Core Services & Tailscale
+      # 6. Aapanel Setup (install and overwrite using non-interactive flag)
+      - name: 🚀 Aapanel Setup
+        run: |
+          echo "Running Aapanel installer to configure over restored files..."
+          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          # Pipe 'y' and 'yes' to the installer to handle both prompts
+          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
+      
+      # 7. Start System Services
+      - name: 🚀 Start System Services
         run: |
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
@@ -90,10 +98,26 @@ jobs:
           # Wait for Tailscale network to fully stabilize
           echo "Pausing for 10 seconds to allow Tailscale network to establish..."
           sleep 10
-          echo "✅ Core services are running."
+          
+          # Start the services in a logical order
+          echo "⚙️ Starting database, Aapanel, and web services..."
+          sudo systemctl start mariadb || true
+          
+          # Restart Aapanel after Tailscale is configured
+          sudo bt restart || true
+          sudo systemctl start apache2 || true
+
+          echo "✅ All services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
+          
+      # 8. Set Aapanel Credentials
+      - name: 🔐 Set Aapanel Username & Password
+        run: |
+          echo "Setting Aapanel username and password..."
+          echo "jacky" | sudo bt 6
+          echo "spidey" | sudo bt 5
+          echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-      # 6. Start Tmate Session for debugging
       - name: 🛰️ Start Tmate Session
         run: |
           sudo apt-get install -y tmate
@@ -102,24 +126,7 @@ jobs:
           sleep 3
           echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 7. Aapanel Setup
-      - name: 🚀 Aapanel Setup & Credential Configuration
-        run: |
-          echo "Running Aapanel installer to configure over restored files..."
-          sudo apt-get install -y mariadb-server apache2 php php-mysql || true
-          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
-
-          echo "Setting Aapanel username and password..."
-          echo "jacky" | sudo bt 6
-          echo "spidey" | sudo bt 5
-          
-          echo "Restarting Aapanel to apply new credentials..."
-          sudo bt restart
-
-          echo "✅ Aapanel is installed, configured, and running."
-      
-      # 8. Maintain the Session (New Graceful Shutdown)
+      # 9. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
@@ -131,9 +138,9 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
-      # 9. Final Backup (only on success or failure)
+      # 10. Final Backup (always runs)
       - name: 💾 Create Final Backup
-        if: success() || failure()
+        if: always()
         run: |
           echo "🛑 Stopping services for a clean backup..."
           sudo systemctl stop tailscaled || true
@@ -169,18 +176,17 @@ jobs:
           echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
       - name: ☁️ Upload Final Backup to MEGA
-        if: success() || failure()
+        if: always()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
-          # Re-create the Rclone config to ensure it's available for this step
+          # Use a single echo command to avoid EOF syntax issues
           mkdir -p ~/.config/rclone
           echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
       - name: 📝 Final Status Report
-        if: success() || failure()
+        if: always()
         run: |
           echo "=== VPS Session Ended ==="
           echo "Final job status: ${{ job.status }}"
