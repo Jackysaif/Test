@@ -136,33 +136,55 @@ jobs:
           done
 
           
-      # 11. Create & Upload New Backup (Improved efficiency)
-      - name: 📦 Create and Upload Backup to MEGA
+      # 9. Final Backup (always runs)
+      - name: 💾 Create Final Backup
         if: always()
         run: |
-          echo "Preparing to create new backup..."
+          echo "🛑 Stopping services for a clean backup..."
+          sudo systemctl stop tailscaled || true
+          sudo systemctl stop btpanel.service || true
+          sudo systemctl stop apache2 || true
+          sudo systemctl stop mariadb || true
+          sudo pkill -f "tmate" || true
           
-          # Re-configure Rclone here to ensure it's fresh for the upload
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
+          # Create the backup store directory
+          sudo mkdir -p ${{ env.BACKUP_STORE }}
           
-          # Gracefully stop services to ensure data consistency
-          sudo systemctl stop apache2 mariadb bt
+          echo "📦 Creating final backup archive..."
+          sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
+            --absolute-names \
+            /etc/hostname \
+            /etc/hosts \
+            /etc/systemd/system \
+            /var/lib/tailscale \
+            /opt \
+            /srv \
+            /var/www \
+            /etc/ssh \
+            /etc/apache2 \
+            /www/server \
+            /root \
+            /home/jacky \
+            /usr/lib/systemd/system \
+            /var/lib/mysql \
+            /etc/sudoers.d/ \
+            /usr/bin/bt \
+            2>/dev/null || true
           
-          echo "Creating system backup archive..."
-          sudo tar --exclude-from <(printf '%s\n' \
-            '/var/backups' \
-            '/var/cache' \
-            '/var/log' \
-            '/tmp' \
-            '/run' \
-            '/proc' \
-            '/dev' \
-            '/sys' \
-            '.cache' \
-          ) -czf /tmp/${BACKUP_NAME} -C / .
+          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
-          echo "Uploading new backup to MEGA remote..."
-          rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
+      - name: ☁️ Upload Final Backup to MEGA
+        if: always()
+        run: |
+          echo "🚀 Uploading final backup to MEGA..."
+          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
+          echo "✅ Final backup uploaded successfully."
           
-          echo "✅ New backup uploaded successfully."
+      - name: 📝 Final Status Report
+        if: always()
+        run: |
+          echo "=== VPS Session Ended ==="
+          echo "Final job status: ${{ job.status }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "========================="
+
