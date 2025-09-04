@@ -123,43 +123,43 @@ jobs:
 
       - name: ⏳ Maintain VPS Session
         run: |
-          echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
-          SECS=0
-          TIMEOUT=$((350*60)) # 350 minutes in seconds
-          while [ ! -f /tmp/stop_session ] && [ $SECS -lt $TIMEOUT ]; do
-            echo "Session is active. Sleeping for 60 seconds..."
-            sleep 60
-            SECS=$((SECS+60))
-          done
-          if [ -f /tmp/stop_session ]; then
-            echo "Graceful shutdown initiated. Proceeding to backup step."
-          else
-            echo "Session ended due to timeout ($TIMEOUT seconds reached). Proceeding to backup step."
-          fi
+          sudo mkdir -p ${{ env.BACKUP_STORE }}
+          
+          echo "📦 Creating final backup archive..."
+          sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
+            --absolute-names \
+            /etc/hostname \
+            /etc/hosts \
+            /etc/systemd/system \
+            /var/lib/tailscale \
+            /opt \
+            /srv \
+            /var/www \
+            /etc/ssh \
+            /etc/apache2 \
+            /www/server \
+            /root \
+            /home/jacky \
+            /usr/lib/systemd/system \
+            /var/lib/mysql \
+            /etc/sudoers.d/ \
+            /usr/bin/bt \
+            2>/dev/null || true
+          
+          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
-      - name: 📦 Create and Upload Backup to MEGA
-        if: ${{ !cancelled() }}
+      - name: ☁️ Upload Final Backup to MEGA
+        if: always()
         run: |
-          echo "Preparing to create new backup..."
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          sudo systemctl stop apache2 mariadb bt
-          echo "Creating system backup archive..."
+          echo "🚀 Uploading final backup to MEGA..."
+          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
+          echo "✅ Final backup uploaded successfully."
           
-          # Create exclude file instead of using process substitution
-          sudo tee /tmp/exclude.list > /dev/null << EOF
-          /var/backups
-          /var/cache
-          /var/log
-          /tmp
-          /run
-          /proc
-          /dev
-          /sys
-          .cache
-          EOF
-          
-          sudo tar --exclude-from=/tmp/exclude.list -czf /tmp/${BACKUP_NAME} -C / .
-          echo "Uploading new backup to MEGA remote..."
-          rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
-          echo "✅ New backup uploaded successfully."
+      - name: 📝 Final Status Report
+        if: always()
+        run: |
+          echo "=== VPS Session Ended ==="
+          echo "Final job status: ${{ job.status }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "========================="
+
