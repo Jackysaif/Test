@@ -109,17 +109,15 @@ jobs:
       # 9. Show Tailscale IP and tmate info
       - name: Show Tailscale IP and tmate info
         run: |
+         uses: mxschmitt/action-tmate@v3
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh
 
-      # 10. Start tmate session
-      - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
-
-      # 11. Maintain the Session & Graceful Shutdown
+      
+      # 10. Maintain the Session & Graceful Shutdown
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
@@ -131,7 +129,7 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
           
-      # 12. Create & Upload New Backup (Improved efficiency)
+      # 11. Create & Upload New Backup (Improved efficiency)
       - name: 📦 Create and Upload Backup to MEGA
         if: always()
         run: |
