@@ -36,13 +36,10 @@ jobs:
         run: |
           echo "Installing core system tools..."
           sudo apt-get update
-          sudo apt install -y unzip curl tmate
           sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
-          tmate -V
           echo "✅ Core tools installed."
-          
       
       # 3. Configure Rclone with a reliable method (Moved to the end)
       
@@ -109,82 +106,62 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-      # 9. Start non-blocking tmate session
-      - name: Start tmate session
+      # 9. Show Tailscale IP and tmate info
+      - name: Show Tailscale IP and tmate info
         run: |
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🔑 SSH session:"
-          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
-          echo "🌐 Web session:"
-          tmate -S /tmp/tmate.sock display -p '#{tmate_web}'
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
 
+      # 10. Start tmate session
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
 
-      # 10. Maintain VPS Session (graceful exit or 6h max)
+      # 11. Maintain the Session & Graceful Shutdown
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
           
-          END=$((SECONDS+21600)) # 6 hours
-          while [ $SECONDS -lt $END ]; do
-            if [ -f /tmp/stop_session ]; then
-              echo "🛑 Graceful shutdown initiated. Proceeding to final backup."
-              break
-            fi
-            echo "⏳ Session active. Sleeping for 60 seconds..."
+          while [ ! -f /tmp/stop_session ]; do
+            echo "Session is active. Sleeping for 60 seconds..."
             sleep 60
           done
-
           
-      # 9. Final Backup (always runs)
-      - name: 💾 Create Final Backup
+          echo "Graceful shutdown initiated. Proceeding to final backup."
+          
+      # 12. Create & Upload New Backup (Improved efficiency)
+      - name: 📦 Create and Upload Backup to MEGA
         if: always()
         run: |
-          echo "🛑 Stopping services for a clean backup..."
-          sudo systemctl stop tailscaled || true
-          sudo systemctl stop btpanel.service || true
-          sudo systemctl stop apache2 || true
-          sudo systemctl stop mariadb || true
-          sudo pkill -f "tmate" || true
+          echo "Preparing to create new backup..."
           
-          # Create the backup store directory
-          sudo mkdir -p ${{ env.BACKUP_STORE }}
+          # Re-configure Rclone here to ensure it's fresh for the upload
+          mkdir -p ~/.config/rclone
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
           
-          echo "📦 Creating final backup archive..."
-          sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
-            --absolute-names \
-            /etc/hostname \
-            /etc/hosts \
-            /etc/systemd/system \
-            /var/lib/tailscale \
-            /opt \
-            /srv \
-            /var/www \
-            /etc/ssh \
-            /etc/apache2 \
-            /www/server \
-            /root \
-            /home/jacky \
-            /usr/lib/systemd/system \
-            /var/lib/mysql \
-            /etc/sudoers.d/ \
-            /usr/bin/bt \
-            2>/dev/null || true
+          # Gracefully stop services to ensure data consistency
+          sudo systemctl stop apache2 mariadb bt
           
-          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+          echo "Creating system backup archive..."
+          sudo tar --exclude-from <(printf '%s\n' \
+            '/var/backups' \
+            '/var/cache' \
+            '/var/log' \
+            '/tmp' \
+            '/run' \
+            '/proc' \
+            '/dev' \
+            '/sys' \
+            '.cache' \
+          ) -czf /tmp/${BACKUP_NAME} -C / .
 
-      - name: ☁️ Upload Final Backup to MEGA
-        if: always()
-        run: |
-          echo "🚀 Uploading final backup to MEGA..."
-          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
-          echo "✅ Final backup uploaded successfully."
+          echo "Uploading new backup to MEGA remote..."
+          rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
           
-      - name: 📝 Final Status Report
-        if: always()
-        run: |
-          echo "=== VPS Session Ended ==="
-          echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-          echo "========================="
-
+          echo "✅ New backup uploaded successfully."
+          
+[Debug your GitHub Actions via SSH by using tmate](https://www.youtube.com/watch?v=z2KGp7EUKaw)
+This video shows you how to use tmate to get a terminal session on a GitHub Actions runner for debugging, which is the exact functionality your workflow relies on.
+http://googleusercontent.com/youtube_content/1
