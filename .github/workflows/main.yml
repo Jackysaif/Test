@@ -106,28 +106,31 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-      # 9. Show Tailscale IP and tmate info
-      - name: Show Tailscale IP and tmate info
+            # 9. Start tmate session
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      # 10. Show Tailscale IP
+      - name: Show Tailscale IP
         run: |
-         uses: mxschmitt/action-tmate@v3
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
-          echo ""
-          echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
 
-      
-      # 10. Maintain the Session & Graceful Shutdown
+      # 11. Maintain VPS Session (graceful exit or 6h max)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
           
-          while [ ! -f /tmp/stop_session ]; do
-            echo "Session is active. Sleeping for 60 seconds..."
+          END=$((SECONDS+21600)) # 6 hours
+          while [ $SECONDS -lt $END ]; do
+            if [ -f /tmp/stop_session ]; then
+              echo "🛑 Graceful shutdown initiated. Proceeding to final backup."
+              break
+            fi
+            echo "⏳ Session active. Sleeping for 60 seconds..."
             sleep 60
           done
-          
-          echo "Graceful shutdown initiated. Proceeding to final backup."
+
           
       # 11. Create & Upload New Backup (Improved efficiency)
       - name: 📦 Create and Upload Backup to MEGA
