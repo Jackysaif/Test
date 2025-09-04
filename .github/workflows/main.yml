@@ -1,12 +1,8 @@
-# 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version is the most reliable and efficient, incorporating all fixes
-# to ensure a complete and functional persistent VPS.
-
 name: 🕷️ Spidey Persistent VPS - Optimized
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 */6 * * *' # Every 6 hours
   workflow_dispatch:
 
 env:
@@ -20,7 +16,7 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # 1. Universal User Setup (runs every time to ensure the user exists)
+      # 1. Universal User Setup
       - name: 👤 Create user 'jacky' & Set Hostname
         run: |
           echo "🚀 Creating universal user and hostname setup..."
@@ -75,15 +71,14 @@ jobs:
           echo "Deleting backup file from MEGA remote..."
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
-      
+
       # 6. Aapanel Setup (install and overwrite using non-interactive flag)
       - name: 🚀 Aapanel Setup
         run: |
           echo "Running Aapanel installer to configure over restored files..."
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-          # Pipe 'y' and 'yes' to the installer to handle both prompts
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
-      
+
       # 7. Start System Services
       - name: 🚀 Start System Services
         run: |
@@ -93,19 +88,17 @@ jobs:
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
+          # Removed the unnecessary '|| true'
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
           
           # Wait for Tailscale network to fully stabilize
           echo "Pausing for 10 seconds to allow Tailscale network to establish..."
           sleep 10
           
-          # Start the services in a logical order
           echo "⚙️ Starting database, Aapanel, and web services..."
-          sudo systemctl start mariadb || true
-          
-          # Restart Aapanel after Tailscale is configured
-          sudo bt restart || true
-          sudo systemctl start apache2 || true
+          sudo systemctl start mariadb
+          sudo bt restart
+          sudo systemctl start apache2
 
           echo "✅ All services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
@@ -118,9 +111,11 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
+      # 9. Start tmate session
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
 
+      # 10. Show Tailscale IP and tmate info
       - name: Show Tailscale IP and tmate info
         run: |
           echo "🔗 Tailscale IP:"
@@ -129,7 +124,7 @@ jobs:
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh
 
-      # 9. Maintain the Session (New Graceful Shutdown)
+      # 11. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
@@ -140,61 +135,30 @@ jobs:
           done
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
-
-           - name: Sleep to keep VPS alive
-                  run: sleep 21600
-
-      # 10. Final Backup (always runs)
-      - name: 💾 Create Final Backup
-        if: always()
+          
+      # 12. Create & Upload New Backup
+      - name: 📦 Create and Upload Backup to MEGA
+        if: always() # This ensures the backup runs even if a previous step failed
         run: |
-          echo "🛑 Stopping services for a clean backup..."
-          sudo systemctl stop tailscaled || true
-          sudo systemctl stop btpanel.service || true
-          sudo systemctl stop apache2 || true
-          sudo systemctl stop mariadb || true
-          sudo pkill -f "tmate" || true
+          echo "Preparing to create new backup..."
           
-          # Create the backup store directory
-          sudo mkdir -p ${{ env.BACKUP_STORE }}
+          # Gracefully stop services to ensure data consistency
+          sudo systemctl stop apache2 mariadb bt
           
-          echo "📦 Creating final backup archive..."
-          sudo tar --ignore-failed-read -czf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
-            --absolute-names \
-            /etc/hostname \
-            /etc/hosts \
-            /etc/systemd/system \
-            /var/lib/tailscale \
-            /opt \
-            /srv \
-            /var/www \
-            /etc/ssh \
-            /etc/apache2 \
-            /www/server \
-            /root \
-            /home/jacky \
-            /usr/lib/systemd/system \
-            /var/lib/mysql \
-            /etc/sudoers.d/ \
-            /usr/bin/bt \
-            2>/dev/null || true
-          
-          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+          echo "Creating system backup archive..."
+          sudo tar --exclude-from <(printf '%s\n' \
+            '/var/backups' \
+            '/var/cache' \
+            '/var/log' \
+            '/tmp' \
+            '/run' \
+            '/proc' \
+            '/dev' \
+            '/sys' \
+            '.cache' \
+          ) -czf /tmp/${BACKUP_NAME} -C / .
 
-      - name: ☁️ Upload Final Backup to MEGA
-        if: always()
-        run: |
-          echo "🚀 Uploading final backup to MEGA..."
-          # Use a single echo command to avoid EOF syntax issues
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
-          echo "✅ Final backup uploaded successfully."
+          echo "Uploading new backup to MEGA remote..."
+          rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
           
-      - name: 📝 Final Status Report
-        if: always()
-        run: |
-          echo "=== VPS Session Ended ==="
-          echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-          echo "========================="
+          echo "✅ New backup uploaded successfully."
