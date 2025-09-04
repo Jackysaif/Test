@@ -89,10 +89,11 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
 
-      - name: 🔗 Start tmate session (detached via screen)
+      - name: 🔗 Start tmate session (detached via screen with explicit socket)
         run: |
-          echo "Starting detached tmate session..."
-          screen -dmS tmate-session bash -c "tmate -F"
+          echo "Starting detached tmate session with explicit socket..."
+          SOCKET=/tmp/tmate.sock
+          screen -dmS tmate-session bash -c "tmate -S $SOCKET new-session -d; tmate -S $SOCKET wait tmate-ready; tmate -S $SOCKET attach"
           echo "✅ Detached tmate session started."
           sleep 10
 
@@ -102,11 +103,12 @@ jobs:
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 tmate SSH session:"
-          TMATE_SSH_INFO=$(tmate show-messages | grep -m 1 'ssh ')
+          SOCKET=/tmp/tmate.sock
+          TMATE_SSH_INFO=$(tmate -S $SOCKET show-messages | grep -m 1 'ssh ')
           if [ -z "$TMATE_SSH_INFO" ]; then
-            echo "tmate SSH info not found, trying socket..."
-            if [ -f $HOME/.tmate.sock/ssh ]; then
-              cat $HOME/.tmate.sock/ssh
+            echo "tmate SSH info not found, trying socket ssh file..."
+            if [ -f $SOCKET/ssh ]; then
+              cat $SOCKET/ssh
             else
               echo "No SSH info available."
             fi
