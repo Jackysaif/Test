@@ -74,11 +74,11 @@ jobs:
           # Re-create the Rclone config to ensure it's available
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
+[mega]
+type = mega
+user = ${{ secrets.MEGA_USER }}
+pass = ${{ secrets.MEGA_PASS }}
+EOF
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
       
@@ -181,11 +181,11 @@ jobs:
           # Re-create the Rclone config to ensure it's available for this step
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
+[mega]
+type = mega
+user = ${{ secrets.MEGA_USER }}
+pass = ${{ secrets.MEGA_PASS }}
+EOF
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
