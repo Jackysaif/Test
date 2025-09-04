@@ -141,6 +141,9 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
 
+           - name: Sleep to keep VPS alive
+                  run: sleep 21600
+
       # 10. Final Backup (always runs)
       - name: 💾 Create Final Backup
         if: always()
