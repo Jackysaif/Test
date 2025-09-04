@@ -47,14 +47,12 @@ jobs:
         id: restore
         run: |
           echo "🔍 Checking for existing backup on MEGA..."
+          # Use a single echo command to avoid EOF syntax issues
+          mkdir -p ~/.config/rclone
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
+          
           if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
-            # Configure Rclone temporarily to restore the backup
-            mkdir -p ~/.config/rclone
-            echo "[mega]
-type = mega
-user = ${{ secrets.MEGA_USER }}
-pass = ${{ secrets.MEGA_PASS }}" | cat > ~/.config/rclone/rclone.conf
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
             sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
@@ -69,12 +67,10 @@ pass = ${{ secrets.MEGA_PASS }}" | cat > ~/.config/rclone/rclone.conf
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           echo "Deleting backup file from MEGA remote..."
-          # Re-create the Rclone config to ensure it's available
+          # Use a single echo command to avoid EOF syntax issues
           mkdir -p ~/.config/rclone
-          echo "[mega]
-type = mega
-user = ${{ secrets.MEGA_USER }}
-pass = ${{ secrets.MEGA_PASS }}" | cat > ~/.config/rclone/rclone.conf
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
+          
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
       
@@ -174,12 +170,10 @@ pass = ${{ secrets.MEGA_PASS }}" | cat > ~/.config/rclone/rclone.conf
         if: success() || failure()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
-          # Re-create the Rclone config to ensure it's available for this step
+          # Use a single echo command to avoid EOF syntax issues
           mkdir -p ~/.config/rclone
-          echo "[mega]
-type = mega
-user = ${{ secrets.MEGA_USER }}
-pass = ${{ secrets.MEGA_PASS }}" | cat > ~/.config/rclone/rclone.conf
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
+          
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
