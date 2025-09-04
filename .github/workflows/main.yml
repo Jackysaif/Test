@@ -23,7 +23,8 @@ jobs:
           sudo useradd -m -s /bin/bash jacky
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          # This line makes 'jacky' an administrator but requires a password for 'sudo su'
+          echo "jacky ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created and configured with password 'root'."
       
@@ -40,14 +41,8 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools installed."
       
-      # 3. Configure Rclone with a reliable method
-      - name: ☁️ Configure Rclone (MEGA)
-        run: |
-          echo "Configuring Rclone for MEGA..."
-          mkdir -p ~/.config/rclone
-          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          echo "✅ Rclone is configured."
-
+      # 3. Configure Rclone with a reliable method (Moved to the end)
+      
       # 4. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
@@ -79,16 +74,16 @@ jobs:
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
-      # 7. Start System Services
+      # 7. Start System Services (Improved Error Handling)
       - name: 🚀 Start System Services
         run: |
+          set -e
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
           
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
-          # Removed the unnecessary '|| true'
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
           
           # Wait for Tailscale network to fully stabilize
@@ -97,7 +92,7 @@ jobs:
           
           echo "⚙️ Starting database, Aapanel, and web services..."
           sudo systemctl start mariadb
-          sudo bt restart
+          sudo bt restart || true # Use || true as this command can sometimes fail
           sudo systemctl start apache2
 
           echo "✅ All services are running."
@@ -111,11 +106,7 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-      # 9. Start tmate session
-      - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
-
-      # 10. Show Tailscale IP and tmate info
+      # 9. Show Tailscale IP and tmate info
       - name: Show Tailscale IP and tmate info
         run: |
           echo "🔗 Tailscale IP:"
@@ -124,10 +115,14 @@ jobs:
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh
 
-      # 11. Maintain the Session (New Graceful Shutdown)
+      # 10. Start tmate session
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      # 11. Maintain the Session & Graceful Shutdown
       - name: ⏳ Maintain VPS Session
         run: |
-          echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
+          echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
           
           while [ ! -f /tmp/stop_session ]; do
             echo "Session is active. Sleeping for 60 seconds..."
@@ -136,11 +131,15 @@ jobs:
           
           echo "Graceful shutdown initiated. Proceeding to final backup."
           
-      # 12. Create & Upload New Backup
+      # 12. Create & Upload New Backup (Improved efficiency)
       - name: 📦 Create and Upload Backup to MEGA
-        if: always() # This ensures the backup runs even if a previous step failed
+        if: always()
         run: |
           echo "Preparing to create new backup..."
+          
+          # Re-configure Rclone here to ensure it's fresh for the upload
+          mkdir -p ~/.config/rclone
+          echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
           
           # Gracefully stop services to ensure data consistency
           sudo systemctl stop apache2 mariadb bt
