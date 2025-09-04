@@ -36,10 +36,13 @@ jobs:
         run: |
           echo "Installing core system tools..."
           sudo apt-get update
+          sudo apt install -y unzip curl tmate
           sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
+          tmate -V
           echo "✅ Core tools installed."
+          
       
       # 3. Configure Rclone with a reliable method (Moved to the end)
       
