@@ -106,17 +106,18 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-            # 9. Start tmate session
+      # 9. Start non-blocking tmate session
       - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
-
-      # 10. Show Tailscale IP
-      - name: Show Tailscale IP
         run: |
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔑 SSH session:"
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
+          echo "🌐 Web session:"
+          tmate -S /tmp/tmate.sock display -p '#{tmate_web}'
 
-      # 11. Maintain VPS Session (graceful exit or 6h max)
+
+      # 10. Maintain VPS Session (graceful exit or 6h max)
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
