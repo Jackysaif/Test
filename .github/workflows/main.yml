@@ -28,14 +28,14 @@ jobs:
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
-      - name: ⚡ Install System Tools & Rclone
+      - name: ⚡ Install System Tools, Rclone & tmate
         run: |
-          echo "Installing core system tools..."
+          echo "Installing core system tools, rclone, and tmate..."
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql tmate
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
-          echo "✅ Core tools installed."
+          echo "✅ Core tools, rclone, and tmate installed."
 
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
@@ -92,10 +92,8 @@ jobs:
       - name: 🔗 Start tmate session (detached via screen)
         run: |
           echo "Starting detached tmate session..."
-          # Start tmate inside detached screen so the step does not block
           screen -dmS tmate-session bash -c "tmate -F"
           echo "✅ Detached tmate session started."
-          # Let the socket become available before next step
           sleep 10
 
       - name: Show Tailscale IP and tmate info
