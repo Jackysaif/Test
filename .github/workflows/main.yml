@@ -1,6 +1,5 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version is the most reliable and efficient, incorporating all fixes
-# to ensure a complete and functional persistent VPS.
+# This is the complete and final version with all known fixes.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
@@ -35,7 +34,7 @@ jobs:
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
 
-      - name: ⚡ Install System Tools & Rclone
+      - name: ⚡ Install System Tools
         run: |
           echo "Installing core system tools..."
           sudo apt-get update
@@ -72,7 +71,7 @@ jobs:
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           echo "Deleting backup file from MEGA remote..."
-          # Configure Rclone temporarily to delete the backup
+          # Re-create the Rclone config to ensure it's available
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
           [mega]
