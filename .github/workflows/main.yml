@@ -89,13 +89,17 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
 
-      - name: 🔗 Start tmate session (detached via screen with explicit socket)
+      - name: 🔗 Start tmate session
         run: |
-          echo "Starting detached tmate session with explicit socket..."
-          SOCKET=/tmp/tmate.sock
-          screen -dmS tmate-session bash -c "tmate -S $SOCKET new-session -d; tmate -S $SOCKET wait tmate-ready; tmate -S $SOCKET attach"
-          echo "✅ Detached tmate session started."
-          sleep 10
+          echo "Starting tmate session..."
+          # Ensure tmate is installed
+          sudo apt-get install -y tmate
+          # Start tmate in the background
+          tmate -S /tmp/tmate.sock new-session -d
+          # Wait for tmate to be ready
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "✅ tmate session started successfully."
+          sleep 3
 
       - name: Show Tailscale IP and tmate info
         run: |
@@ -103,17 +107,18 @@ jobs:
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 tmate SSH session:"
-          SOCKET=/tmp/tmate.sock
-          TMATE_SSH_INFO=$(tmate -S $SOCKET show-messages | grep -m 1 'ssh ')
-          if [ -z "$TMATE_SSH_INFO" ]; then
-            echo "tmate SSH info not found, trying socket ssh file..."
-            if [ -f $SOCKET/ssh ]; then
-              cat $SOCKET/ssh
-            else
-              echo "No SSH info available."
-            fi
+          # Get tmate connection information
+          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "")
+          if [ -n "$TMATE_SSH" ]; then
+            echo "SSH: $TMATE_SSH"
           else
-            echo "$TMATE_SSH_INFO"
+            echo "Trying alternative method to get tmate connection info..."
+            TMATE_SSH=$(tmate -S /tmp/tmate.sock show-messages | grep -o "ssh [^ ]*" | head -1)
+            if [ -n "$TMATE_SSH" ]; then
+              echo "SSH: $TMATE_SSH"
+            else
+              echo "Could not retrieve tmate SSH connection information."
+            fi
           fi
 
       - name: ⏳ Maintain VPS Session
@@ -140,17 +145,21 @@ jobs:
           echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
           sudo systemctl stop apache2 mariadb bt
           echo "Creating system backup archive..."
-          sudo tar --exclude-from <(printf '%s\n' \
-            '/var/backups' \
-            '/var/cache' \
-            '/var/log' \
-            '/tmp' \
-            '/run' \
-            '/proc' \
-            '/dev' \
-            '/sys' \
-            '.cache' \
-          ) -czf /tmp/${BACKUP_NAME} -C / .
+          
+          # Create exclude file instead of using process substitution
+          sudo tee /tmp/exclude.list > /dev/null << EOF
+          /var/backups
+          /var/cache
+          /var/log
+          /tmp
+          /run
+          /proc
+          /dev
+          /sys
+          .cache
+          EOF
+          
+          sudo tar --exclude-from=/tmp/exclude.list -czf /tmp/${BACKUP_NAME} -C / .
           echo "Uploading new backup to MEGA remote..."
           rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
           echo "✅ New backup uploaded successfully."
