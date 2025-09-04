@@ -17,7 +17,7 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 350
 
     steps:
       # 1. Universal User Setup (runs every time to ensure the user exists)
@@ -118,13 +118,16 @@ jobs:
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
       
-      - name: 🛰️ Start Tmate Session
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Show Tailscale IP and tmate info
         run: |
-          sudo apt-get install -y tmate
-          # Start tmate in a detached screen as the 'jacky' user
-          sudo -u jacky screen -dmS tmate-session tmate
-          sleep 3
-          echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
 
       # 9. Maintain the Session (New Graceful Shutdown)
       - name: ⏳ Maintain VPS Session
