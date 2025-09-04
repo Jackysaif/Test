@@ -52,11 +52,11 @@ jobs:
             # Configure Rclone temporarily to restore the backup
             mkdir -p ~/.config/rclone
             cat > ~/.config/rclone/rclone.conf <<EOF
-            [mega]
-            type = mega
-            user = ${{ secrets.MEGA_USER }}
-            pass = ${{ secrets.MEGA_PASS }}
-            EOF
+[mega]
+type = mega
+user = ${{ secrets.MEGA_USER }}
+pass = ${{ secrets.MEGA_PASS }}
+EOF
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
             sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
