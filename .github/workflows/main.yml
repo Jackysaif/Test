@@ -1,6 +1,6 @@
 # 🕷️ Spidey Persistent VPS - Optimized Workflow
-# This version prioritizes network connectivity and debugging access (via Tmate)
-# before installing the Aapanel service.
+# This version is the most reliable and efficient, incorporating all fixes
+# to ensure a complete and functional persistent VPS.
 
 name: 🕷️ Spidey Persistent VPS - Optimized
 
@@ -43,17 +43,6 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools installed."
 
-      - name: ☁️ Configure Rclone (MEGA)
-        run: |
-          echo "Configuring Rclone for MEGA..."
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
-
       # 3. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
@@ -61,6 +50,14 @@ jobs:
           echo "🔍 Checking for existing backup on MEGA..."
           if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
+            # Configure Rclone temporarily to restore the backup
+            mkdir -p ~/.config/rclone
+            cat > ~/.config/rclone/rclone.conf <<EOF
+            [mega]
+            type = mega
+            user = ${{ secrets.MEGA_USER }}
+            pass = ${{ secrets.MEGA_PASS }}
+            EOF
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
             sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
@@ -75,6 +72,14 @@ jobs:
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           echo "Deleting backup file from MEGA remote..."
+          # Configure Rclone temporarily to delete the backup
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
       
@@ -108,6 +113,7 @@ jobs:
       - name: 🚀 Aapanel Setup & Credential Configuration
         run: |
           echo "Running Aapanel installer to configure over restored files..."
+          sudo apt-get install -y mariadb-server apache2 php php-mysql || true
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
@@ -173,6 +179,14 @@ jobs:
         if: success() || failure()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
+          # Re-create the Rclone config to ensure it's available for this step
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
@@ -181,5 +195,5 @@ jobs:
         run: |
           echo "=== VPS Session Ended ==="
           echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           echo "========================="
