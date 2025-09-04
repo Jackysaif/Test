@@ -14,20 +14,18 @@ jobs:
   vps:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
-
     steps:
       # 1. Universal User Setup
       - name: 👤 Create user 'jacky' & Set Hostname
         run: |
           echo "🚀 Creating universal user and hostname setup..."
-          sudo useradd -m -s /bin/bash jacky
+          sudo useradd -m -s /bin/bash jacky || true
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
-          # This line makes 'jacky' an administrator but requires a password for 'sudo su'
           echo "jacky ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
           echo "✅ User 'jacky' created and configured with password 'root'."
-      
+
       # 2. Basic Setup & Tool Installation
       - name: 🕸️ Checkout Code
         uses: actions/checkout@v4
@@ -40,10 +38,8 @@ jobs:
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
           echo "✅ Core tools installed."
-      
-      # 3. Configure Rclone with a reliable method (Moved to the end)
-      
-      # 4. Restore or Initialize System
+
+      # 3. Restore or Initialize System
       - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
@@ -58,8 +54,8 @@ jobs:
             sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-          
-      # 5. Delete Backup from MEGA
+
+      # 4. Delete Backup from MEGA after restoring
       - name: 🗑️ Delete Backup from MEGA
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
@@ -67,83 +63,78 @@ jobs:
           rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           echo "✅ Backup deleted from MEGA."
 
-      # 6. Aapanel Setup (install and overwrite using non-interactive flag)
+      # 5. Aapanel Setup (install and overwrite using non-interactive flag)
       - name: 🚀 Aapanel Setup
         run: |
           echo "Running Aapanel installer to configure over restored files..."
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
-      # 7. Start System Services (Improved Error Handling)
+      # 6. Start System Services
       - name: 🚀 Start System Services
         run: |
           set -e
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
-          
           echo "🕸️ Installing and starting Tailscale..."
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable --now tailscaled
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
-          
-          # Wait for Tailscale network to fully stabilize
           echo "Pausing for 10 seconds to allow Tailscale network to establish..."
           sleep 10
-          
           echo "⚙️ Starting database, Aapanel, and web services..."
           sudo systemctl start mariadb
-          sudo bt restart || true # Use || true as this command can sometimes fail
+          sudo bt restart || true
           sudo systemctl start apache2
-
           echo "✅ All services are running."
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
-          
-      # 8. Set Aapanel Credentials
+
+      # 7. Set Aapanel Credentials
       - name: 🔐 Set Aapanel Username & Password
         run: |
           echo "Setting Aapanel username and password..."
           echo "jacky" | sudo bt 6
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
-      
-      # 9. Show Tailscale IP and tmate info
+
+      # 8. Show Tailscale IP and tmate info
       - name: Show Tailscale IP and tmate info
         run: |
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
           echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
+          cat $HOME/.tmate.sock/ssh || true
 
-      # 10. Start tmate session
+      # 9. Start tmate session for SSH debug
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
 
-      # 11. Maintain the Session & Graceful Shutdown
+      # 10. Maintain the Session & Graceful/Timeout Shutdown Point
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. To trigger a graceful shutdown and backup, create a file named '/tmp/stop_session' inside the VPS."
-          
-          while [ ! -f /tmp/stop_session ]; do
+          SECS=0
+          TIMEOUT=$((350*60)) # 350 minutes in seconds
+          while [ ! -f /tmp/stop_session ] && [ $SECS -lt $TIMEOUT ]; do
             echo "Session is active. Sleeping for 60 seconds..."
             sleep 60
+            SECS=$((SECS+60))
           done
-          
-          echo "Graceful shutdown initiated. Proceeding to final backup."
-          
-      # 12. Create & Upload New Backup (Improved efficiency)
+          if [ -f /tmp/stop_session ]; then
+            echo "Graceful shutdown initiated. Proceeding to backup step."
+          else
+            echo "Session ended due to timeout ($TIMEOUT seconds reached). Proceeding to backup step."
+          fi
+
+      # 11. Create & Upload Backup (Runs ONLY if NOT cancelled by user)
       - name: 📦 Create and Upload Backup to MEGA
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           echo "Preparing to create new backup..."
-          
-          # Re-configure Rclone here to ensure it's fresh for the upload
           mkdir -p ~/.config/rclone
           echo -e "[mega]\ntype = mega\nuser = ${{ secrets.MEGA_USER }}\npass = ${{ secrets.MEGA_PASS }}" > ~/.config/rclone/rclone.conf
-          
-          # Gracefully stop services to ensure data consistency
           sudo systemctl stop apache2 mariadb bt
-          
           echo "Creating system backup archive..."
           sudo tar --exclude-from <(printf '%s\n' \
             '/var/backups' \
@@ -156,12 +147,6 @@ jobs:
             '/sys' \
             '.cache' \
           ) -czf /tmp/${BACKUP_NAME} -C / .
-
           echo "Uploading new backup to MEGA remote..."
           rclone copy /tmp/${BACKUP_NAME} ${MEGA_REMOTE}/
-          
           echo "✅ New backup uploaded successfully."
-          
-[Debug your GitHub Actions via SSH by using tmate](https://www.youtube.com/watch?v=z2KGp7EUKaw)
-This video shows you how to use tmate to get a terminal session on a GitHub Actions runner for debugging, which is the exact functionality your workflow relies on.
-http://googleusercontent.com/youtube_content/1
