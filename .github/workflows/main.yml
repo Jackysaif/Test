@@ -771,43 +771,42 @@ jobs:
             echo "Setting up user accounts..."
             
             # Create main user
-            if ! id "${{ env.VPS_USER }}" &>/dev/null; then
-              sudo useradd -m -s /bin/bash -G sudo "${{ env.VPS_USER }}"
-              echo "✅ User '${{ env.VPS_USER }}' created"
-            else
-              echo "ℹ️ User '${{ env.VPS_USER }}' already exists"
-            fi
-            
-            # Set password and configure sudo
-            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
-            sudo usermod -aG sudo,www-data "${{ env.VPS_USER }}"
-            
-            # Configure passwordless sudo for automation
-            echo "${{ env.VPS_USER }} ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ env.VPS_USER }}"
-            sudo chmod 440 "/etc/sudoers.d/${{ env.VPS_USER }}"
-            
-            # Create essential directories
-            sudo -u "${{ env.VPS_USER }}" mkdir -p "/home/${{ env.VPS_USER }}/.ssh"
-            sudo chmod 700 "/home/${{ env.VPS_USER }}/.ssh"
-            
-            echo "✅ User accounts configured"
-          }
-          
-          # Function to configure system settings
-          setup_system() {
-            echo "Configuring system settings..."
-            
-            # Set hostname and hosts file
-            sudo hostnamectl set-hostname github-vps-enhanced
-            echo "127.0.0.1 localhost" | sudo tee /etc/hosts
-            echo "127.0.1.1 github-vps-enhanced" | sudo tee -a /etc/hosts
-            echo "::1 localhost ip6-localhost ip6-loopback" | sudo tee -a /etc/hosts
-            
-            # Configure timezone
-            sudo timedatectl set-timezone UTC
-            
-            # Optimize system performance
-            cat << 'SYSCTL_EOF' | sudo tee /etc/sysctl.d/99-vps-optimization.conf
+if ! id "$VPS_USER" &>/dev/null; then
+  sudo useradd -m -s /bin/bash -G sudo "$VPS_USER"
+  echo "✅ User '$VPS_USER' created"
+else
+  echo "ℹ️ User '$VPS_USER' already exists"
+fi
+
+# Set password and configure sudo
+echo "$VPS_USER:$VPS_PASSWORD" | sudo chpasswd
+sudo usermod -aG sudo,www-data "$VPS_USER"
+
+# Configure passwordless sudo for automation
+echo "$VPS_USER ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$VPS_USER"
+sudo chmod 440 "/etc/sudoers.d/$VPS_USER"
+
+# Create essential directories
+sudo -u "$VPS_USER" mkdir -p "/home/$VPS_USER/.ssh"
+sudo chmod 700 "/home/$VPS_USER/.ssh"
+
+echo "✅ User accounts configured"
+
+# Function to configure system settings
+setup_system() {
+  echo "Configuring system settings..."
+  
+  # Set hostname and hosts file
+  sudo hostnamectl set-hostname github-vps-enhanced
+  echo "127.0.0.1 localhost" | sudo tee /etc/hosts
+  echo "127.0.1.1 github-vps-enhanced" | sudo tee -a /etc/hosts
+  echo "::1 localhost ip6-localhost ip6-loopback" | sudo tee -a /etc/hosts
+  
+  # Configure timezone
+  sudo timedatectl set-timezone UTC
+  
+  # Optimize system performance
+  cat << 'SYSCTL_EOF' | sudo tee /etc/sysctl.d/99-vps-optimization.conf
 # Network optimizations
 net.core.rmem_default = 262144
 net.core.rmem_max = 16777216
@@ -830,30 +829,29 @@ net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 kernel.dmesg_restrict = 1
 SYSCTL_EOF
-            
-            sudo sysctl -p /etc/sysctl.d/99-vps-optimization.conf
-            
-            echo "✅ System settings configured"
-          }
-          
-          # Function to install and configure Aapanel
-          install_aapanel() {
-            echo "Installing Aapanel control panel..."
-            
-            # Pre-installation requirements
-            sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              curl wget expect python3 python3-pip || {
-              echo "Failed to install Aapanel prerequisites"
-              return 1
-            }
-            
-            # Create installation script with multiple fallbacks
-            cat << 'INSTALL_SCRIPT' > /tmp/install_aapanel.sh
-#!/bin/bash
-set -e
+  
+  sudo sysctl -p /etc/sysctl.d/99-vps-optimization.conf
+  
+  echo "✅ System settings configured"
+}
 
-INSTALL_URLS=(
+# Function to install and configure Aapanel
+install_aapanel() {
+  echo "Installing Aapanel control panel..."
+  
+  # Pre-installation requirements
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl wget expect python3 python3-pip || {
+    echo "Failed to install Aapanel prerequisites"
+    return 1
+  }
+  
+  # Create installation script with multiple fallbacks
+  cat << 'INSTALL_SCRIPT' > /tmp/install_aapanel.sh
+#!/bin/bash
+# Aapanel installation script content would go here
+INSTALL_SCRIPT(
   "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
   "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install_6.0_en.sh"
   "https://download.aapanel.com/install/install-ubuntu_6.0_en.sh"
