@@ -1621,8 +1621,9 @@ PHP_INFO
               # Backup original
               sudo cp "$PHP_INI" "$PHP_INI.backup"
               
-              # Apply optimizations
-              cat << PHP_OPTS | sudo tee -a "$PHP_INI"
+          
+               # Apply optimizations - FIXED HEREDOC
+        cat << 'PHP_OPTS' | sudo tee -a "$PHP_INI"
 
 ; VPS Optimizations
 memory_limit = 256
