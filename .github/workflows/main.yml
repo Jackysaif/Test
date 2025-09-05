@@ -1,4 +1,4 @@
-# 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
+name: 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
 
 on:
   schedule:
@@ -15,6 +15,12 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
+      # ADDED STEP: This step uses your secret to configure rclone.
+      - name: '🛠️ Configure Rclone'
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
