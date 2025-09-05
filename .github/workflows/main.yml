@@ -233,13 +233,14 @@ jobs:
             exit 0
           fi
           
-          # 💡 Stop Apache to prevent installation conflicts
+          # Stop Apache to prevent installation conflicts
           echo "🛑 Stopping apache2 to prevent conflicts..."
           sudo systemctl stop apache2
           
-          # Install Aapanel, automatically answering "yes" to the prompt
-          echo "🔧 Installing Aapanel (this may take a few minutes)..."
-          timeout 300 bash -c 'echo "yes" | sudo bash /tmp/install.sh' || {
+          # 💡 Automate sending 'y' and then 'yes' to the installer prompts
+          # Use a longer timeout of 15 minutes (900 seconds).
+          echo "🔧 Installing Aapanel (this may take up to 15 minutes)..."
+          timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || {
             echo "⚠️ Aapanel installation timed out or failed"
             echo "⚠️ Continuing without Aapanel..."
           }
@@ -252,6 +253,7 @@ jobs:
             echo "⚠️ Aapanel command 'bt' not found in PATH"
             echo "⚠️ Installation may have failed or be incomplete"
           fi
+
 
       - name: '🚀 Start and Configure Services'
         run: |
