@@ -1,758 +1,1628 @@
-name: Persistent VPS
+name: Enhanced Persistent VPS
 
 on:
   schedule:
     - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:      # Manual trigger
+    inputs:
+      session_duration:
+        description: 'Session duration in minutes (max 350)'
+        required: false
+        default: '330'
+        type: string
+      skip_backup_restore:
+        description: 'Skip backup restoration (fresh install)'
+        required: false
+        default: false
+        type: boolean
+      enable_debug_mode:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
 
 env:
   BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
+  BACKUP_METADATA: vps-backup-metadata.json
   MEGA_REMOTE: mega:vps-backup
   VPS_USER: jacky
   VPS_PASSWORD: root
   AAPANEL_USER: jacky
   AAPANEL_PASSWORD: spidey123
-  SESSION_TIMEOUT: 330
+  SESSION_TIMEOUT: ${{ github.event.inputs.session_duration || '330' }}
+  DEBUG_MODE: ${{ github.event.inputs.enable_debug_mode || 'false' }}
+  SKIP_RESTORE: ${{ github.event.inputs.skip_backup_restore || 'false' }}
+  MAX_RETRY_ATTEMPTS: 5
+  HEALTH_CHECK_INTERVAL: 30
+  BACKUP_RETENTION_DAYS: 7
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
+    timeout-minutes: 360  # 6 hours maximum
+    
+    outputs:
+      session_status: ${{ steps.session_status.outputs.status }}
+      tailscale_ip: ${{ steps.connection_info.outputs.tailscale_ip }}
+      backup_created: ${{ steps.backup_status.outputs.created }}
     
     steps:
+      - name: 'Initialize Workflow'
+        id: init
+        run: |
+          echo "🚀 Starting Enhanced Persistent VPS Workflow"
+          echo "Workflow initiated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Session duration: ${{ env.SESSION_TIMEOUT }} minutes"
+          echo "Debug mode: ${{ env.DEBUG_MODE }}"
+          echo "Skip restore: ${{ env.SKIP_RESTORE }}"
+          
+          # Set debug mode
+          if [[ "${{ env.DEBUG_MODE }}" == "true" ]]; then
+            set -x
+            echo "DEBUG_ENABLED=true" >> $GITHUB_ENV
+          fi
+          
+          # Validate inputs
+          if [[ "${{ env.SESSION_TIMEOUT }}" -gt 350 ]]; then
+            echo "⚠️ Session timeout exceeds maximum, setting to 350 minutes"
+            echo "SESSION_TIMEOUT=350" >> $GITHUB_ENV
+          fi
+          
+          # Create workflow metadata
+          cat > /tmp/workflow_metadata.json << EOF
+          {
+            "workflow_id": "${{ github.run_id }}",
+            "workflow_number": "${{ github.run_number }}",
+            "started_at": "$(date -u -Iseconds)",
+            "session_duration": "${{ env.SESSION_TIMEOUT }}",
+            "debug_mode": "${{ env.DEBUG_MODE }}",
+            "skip_restore": "${{ env.SKIP_RESTORE }}",
+            "runner_os": "$(lsb_release -d | cut -f2)"
+          }
+          EOF
+          
+          echo "✅ Workflow initialization complete"
+
       - name: 'Checkout Code'
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: 'Pre-flight System Check'
-        run: |
-          echo "Checking system resources..."
-          # Check disk space
-          if [ $(df / --output=pcent | tail -1 | tr -d '% ') -gt 90 ]; then
-            echo "Critical: Low disk space"
-            exit 1
-          fi
-          
-          # Check memory
-          MEM_AVAILABLE=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-          if [ $MEM_AVAILABLE -lt 524288 ]; then  # 512MB
-            echo "Warning: Low available memory"
-          fi
-          
-          echo "System resources adequate for operation"
-
-      - name: 'Install System Tools, Rclone & tmate'
+      - name: 'Advanced System Health Check'
+        id: health_check
         run: |
           set -euo pipefail
-          echo "Installing core system tools, rclone, and tmate..."
+          echo "🔍 Performing comprehensive system health check..."
           
-          # Update package lists
-          sudo apt-get update -qq
+          # Initialize health check results
+          HEALTH_STATUS="healthy"
+          WARNINGS=()
+          ERRORS=()
           
-          # Install essential packages with error handling
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            psmisc screen openssh-server mariadb-server apache2 \
-            php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
-            curl wget unzip tar gzip htop nano vim git net-tools expect ufw fail2ban || {
-              echo "Package installation failed"
+          # Check disk space with multiple thresholds
+          ROOT_USAGE=$(df / --output=pcent | tail -1 | tr -d '% ')
+          if [ "$ROOT_USAGE" -gt 95 ]; then
+            ERRORS+=("Critical: Root filesystem $ROOT_USAGE% full")
+            HEALTH_STATUS="critical"
+          elif [ "$ROOT_USAGE" -gt 85 ]; then
+            WARNINGS+=("Warning: Root filesystem $ROOT_USAGE% full")
+          fi
+          
+          # Check available memory
+          TOTAL_MEM=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+          AVAIL_MEM=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+          MEM_USAGE=$((100 - (AVAIL_MEM * 100 / TOTAL_MEM)))
+          
+          if [ "$MEM_USAGE" -gt 90 ]; then
+            ERRORS+=("Critical: Memory usage at $MEM_USAGE%")
+            HEALTH_STATUS="critical"
+          elif [ "$MEM_USAGE" -gt 80 ]; then
+            WARNINGS+=("Warning: Memory usage at $MEM_USAGE%")
+          fi
+          
+          # Check CPU load
+          LOAD_AVG=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',')
+          CPU_CORES=$(nproc)
+          if (( $(echo "$LOAD_AVG > $CPU_CORES * 2" | bc -l) )); then
+            WARNINGS+=("Warning: High CPU load: $LOAD_AVG")
+          fi
+          
+          # Check for required commands
+          REQUIRED_COMMANDS=("curl" "wget" "tar" "systemctl")
+          for cmd in "${REQUIRED_COMMANDS[@]}"; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              ERRORS+=("Critical: Required command '$cmd' not found")
+              HEALTH_STATUS="critical"
+            fi
+          done
+          
+          # Report health status
+          echo "System Health Status: $HEALTH_STATUS"
+          echo "Disk Usage: $ROOT_USAGE%"
+          echo "Memory Usage: $MEM_USAGE%"
+          echo "CPU Load: $LOAD_AVG (cores: $CPU_CORES)"
+          echo "Available Space: $(df -h / | tail -1 | awk '{print $4}')"
+          
+          # Output warnings
+          if [ ${#WARNINGS[@]} -gt 0 ]; then
+            echo "⚠️ Warnings:"
+            printf '%s\n' "${WARNINGS[@]}"
+          fi
+          
+          # Output errors and exit if critical
+          if [ ${#ERRORS[@]} -gt 0 ]; then
+            echo "❌ Errors:"
+            printf '%s\n' "${ERRORS[@]}"
+            if [ "$HEALTH_STATUS" = "critical" ]; then
+              echo "System health check failed - aborting"
               exit 1
-            }
+            fi
+          fi
           
-          # Install tmate (GitHub runner compatible)
-          echo "Installing tmate..."
-          sudo apt-get install -y tmate || {
-            # Fallback: manual installation
-            wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
-            tar -xf /tmp/tmate.tar.xz -C /tmp/
-            sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-            sudo chmod +x /usr/local/bin/tmate
+          echo "health_status=$HEALTH_STATUS" >> $GITHUB_OUTPUT
+          echo "✅ System health check completed"
+
+      - name: 'Install Enhanced System Tools'
+        id: install_tools
+        run: |
+          set -euo pipefail
+          echo "📦 Installing enhanced system tools and dependencies..."
+          
+          # Function for retrying package installation
+          retry_install() {
+            local max_attempts=3
+            local attempt=1
+            local packages="$*"
+            
+            while [ $attempt -le $max_attempts ]; do
+              echo "Installation attempt $attempt/$max_attempts for: $packages"
+              if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $packages; then
+                echo "✅ Successfully installed: $packages"
+                return 0
+              else
+                echo "❌ Installation attempt $attempt failed"
+                if [ $attempt -lt $max_attempts ]; then
+                  echo "Waiting 10 seconds before retry..."
+                  sleep 10
+                  sudo apt-get update -qq
+                fi
+                ((attempt++))
+              fi
+            done
+            
+            echo "❌ Failed to install after $max_attempts attempts: $packages"
+            return 1
           }
           
-          # Install rclone
+          # Update package lists with retry
+          echo "Updating package lists..."
+          for i in {1..3}; do
+            if sudo apt-get update -qq; then
+              break
+            elif [ $i -eq 3 ]; then
+              echo "Failed to update package lists after 3 attempts"
+              exit 1
+            fi
+            sleep 5
+          done
+          
+          # Install core system packages
+          echo "Installing core system packages..."
+          retry_install \
+            psmisc screen openssh-server curl wget unzip tar gzip \
+            htop nano vim git net-tools expect ufw fail2ban \
+            bc jq tree rsync lsof tcpdump iotop dstat \
+            software-properties-common apt-transport-https ca-certificates \
+            gnupg lsb-release
+          
+          # Install web server stack
+          echo "Installing web server stack..."
+          retry_install \
+            apache2 mariadb-server \
+            php php-mysql php-cli php-curl php-zip php-gd php-mbstring \
+            php-xml php-json php-intl php-opcache php-readline
+          
+          # Install additional monitoring tools
+          echo "Installing monitoring and security tools..."
+          retry_install \
+            iftop nethogs vnstat logwatch \
+            rkhunter chkrootkit clamav clamav-daemon \
+            aide tripwire
+          
+          # Install tmate with fallback
+          echo "Installing tmate..."
+          if ! retry_install tmate; then
+            echo "Falling back to manual tmate installation..."
+            TMATE_VERSION="2.4.0"
+            TMATE_ARCH="amd64"
+            TMATE_URL="https://github.com/tmate-io/tmate/releases/download/${TMATE_VERSION}/tmate-${TMATE_VERSION}-static-linux-${TMATE_ARCH}.tar.xz"
+            
+            wget -q -O /tmp/tmate.tar.xz "$TMATE_URL"
+            tar -xf /tmp/tmate.tar.xz -C /tmp/
+            sudo cp "/tmp/tmate-${TMATE_VERSION}-static-linux-${TMATE_ARCH}/tmate" /usr/local/bin/
+            sudo chmod +x /usr/local/bin/tmate
+            rm -rf /tmp/tmate*
+          fi
+          
+          # Install rclone with verification
           echo "Installing rclone..."
-          curl -fsSL https://rclone.org/install.sh | sudo bash || {
+          if ! curl -fsSL https://rclone.org/install.sh | sudo bash; then
             echo "Rclone installation failed"
             exit 1
-          }
+          fi
           
-          # Verify installations
+          # Verify critical installations
           echo "Verifying installations..."
-          rclone version
-          tmate -V
-          php -v | head -1
+          REQUIRED_TOOLS=("rclone" "tmate" "php" "apache2" "mysql")
+          for tool in "${REQUIRED_TOOLS[@]}"; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              version=$("$tool" --version 2>/dev/null | head -1 || echo "Version unavailable")
+              echo "✅ $tool: $version"
+            else
+              echo "❌ $tool: Not found or not working"
+              exit 1
+            fi
+          done
           
-          echo "All tools installed successfully."
+          # Create installation manifest
+          cat > /tmp/installation_manifest.txt << EOF
+          Installation completed: $(date -u -Iseconds)
+          Packages installed: $(dpkg --get-selections | wc -l)
+          Disk usage after install: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
+          EOF
+          
+          echo "✅ Enhanced system tools installation completed"
 
-      - name: 'Configure Rclone (MEGA)'
+      - name: 'Configure Advanced Rclone Setup'
+        id: rclone_setup
         run: |
           set -euo pipefail
-          echo "Setting up rclone configuration..."
+          echo "⚙️ Configuring advanced rclone setup..."
           
-          # Check if RCLONE_CONFIG secret exists and is not empty
+          # Validate rclone config secret
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "RCLONE_CONFIG secret is missing!"
-            echo "Please add your rclone.conf content to GitHub secrets."
-            echo "To generate: run 'rclone config' locally and copy ~/.config/rclone/rclone.conf"
+            cat << 'EOF'
+          ❌ RCLONE_CONFIG secret is missing!
+          
+          Please add your rclone configuration to GitHub secrets:
+          1. Run 'rclone config' locally to set up MEGA
+          2. Copy the contents of ~/.config/rclone/rclone.conf
+          3. Add it as a secret named RCLONE_CONFIG in your repository
+          
+          To configure MEGA:
+          - Choose 'n' for new remote
+          - Name: mega
+          - Storage: mega
+          - Enter your MEGA credentials
+          EOF
             exit 1
           fi
           
-          # Create rclone config directory
-          mkdir -p ~/.config/rclone
+          # Create rclone directories with proper permissions
+          mkdir -p ~/.config/rclone ~/.cache/rclone
+          chmod 700 ~/.config/rclone ~/.cache/rclone
           
-          # Write config with proper formatting
+          # Write rclone configuration
           cat > ~/.config/rclone/rclone.conf << 'EOF'
           ${{ secrets.RCLONE_CONFIG }}
           EOF
           
-          # Set proper permissions
           chmod 600 ~/.config/rclone/rclone.conf
           
-          # Validate config format
+          # Validate configuration format
+          echo "Validating rclone configuration..."
           if ! rclone config show >/dev/null 2>&1; then
-            echo "Invalid rclone configuration format"
-            echo "Available sections:"
-            rclone config show 2>&1 || true
+            echo "❌ Invalid rclone configuration format"
+            echo "Available remotes:"
+            rclone listremotes 2>&1 || echo "No remotes found"
             exit 1
           fi
           
-          echo "Rclone configuration created successfully."
-
-      - name: 'Test Rclone Configuration'
-        run: |
-          set -euo pipefail
-          echo "Testing MEGA connection..."
-          
-          # List available remotes
-          echo "Available remotes:"
-          rclone listremotes
-          
-          # Test connection with multiple methods
-          if rclone listremotes | grep -q "mega:"; then
-            echo "MEGA remote found in configuration"
-            
-            # Test with timeout and retries
-            for i in {1..3}; do
-              echo "Connection test attempt $i/3..."
-              if timeout 60 rclone about ${{ env.MEGA_REMOTE }} >/dev/null 2>&1; then
-                echo "MEGA connection successful!"
-                break
-              elif [[ $i -eq 3 ]]; then
-                echo "MEGA connection failed after 3 attempts"
-                echo "Debugging information:"
-                rclone about ${{ env.MEGA_REMOTE }} 2>&1 || true
-                exit 1
-              else
-                echo "Attempt $i failed, retrying in 10 seconds..."
-                sleep 10
-              fi
-            done
-          else
-            echo "MEGA remote not found in configuration"
+          # Check for MEGA remote specifically
+          if ! rclone listremotes | grep -q "mega:"; then
+            echo "❌ MEGA remote not found in configuration"
             echo "Available remotes:"
             rclone listremotes
             exit 1
           fi
+          
+          echo "✅ Rclone configuration validated successfully"
 
-      - name: 'Restore from Backup OR Initialize'
+      - name: 'Test Cloud Storage Connectivity'
+        id: cloud_test
+        run: |
+          set -euo pipefail
+          echo "🔗 Testing cloud storage connectivity..."
+          
+          # Test with exponential backoff
+          test_connection() {
+            local max_attempts=${{ env.MAX_RETRY_ATTEMPTS }}
+            local attempt=1
+            local delay=5
+            
+            while [ $attempt -le $max_attempts ]; do
+              echo "Connection test attempt $attempt/$max_attempts..."
+              
+              if timeout 90 rclone about "${{ env.MEGA_REMOTE }}" 2>/dev/null; then
+                echo "✅ MEGA connection successful on attempt $attempt"
+                
+                # Get storage info
+                STORAGE_INFO=$(rclone about "${{ env.MEGA_REMOTE }}" 2>/dev/null || echo "Storage info unavailable")
+                echo "Storage Information:"
+                echo "$STORAGE_INFO"
+                
+                return 0
+              else
+                echo "❌ Connection attempt $attempt failed"
+                if [ $attempt -lt $max_attempts ]; then
+                  echo "Waiting $delay seconds before retry..."
+                  sleep $delay
+                  delay=$((delay * 2))  # Exponential backoff
+                fi
+              fi
+              ((attempt++))
+            done
+            
+            echo "❌ MEGA connection failed after $max_attempts attempts"
+            echo "Debugging information:"
+            rclone about "${{ env.MEGA_REMOTE }}" || true
+            return 1
+          }
+          
+          if ! test_connection; then
+            exit 1
+          fi
+          
+          # Test file operations
+          echo "Testing file operations..."
+          TEST_FILE="/tmp/connectivity_test.txt"
+          echo "Connectivity test $(date -u -Iseconds)" > "$TEST_FILE"
+          
+          if rclone copy "$TEST_FILE" "${{ env.MEGA_REMOTE }}/tests/" --retries 2; then
+            echo "✅ File upload test successful"
+            rclone delete "${{ env.MEGA_REMOTE }}/tests/connectivity_test.txt" || true
+          else
+            echo "⚠️ File upload test failed (continuing anyway)"
+          fi
+          
+          rm -f "$TEST_FILE"
+          echo "✅ Cloud storage connectivity test completed"
+
+      - name: 'Intelligent Backup Restoration'
         id: restore
         run: |
           set -euo pipefail
-          echo "Checking for existing backup..."
+          echo "💾 Starting intelligent backup restoration process..."
           
-          # Check if backup exists with proper error handling
-          if timeout 90 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "Backup found! Downloading and restoring..."
+          # Skip restoration if requested
+          if [[ "${{ env.SKIP_RESTORE }}" == "true" ]]; then
+            echo "⏭️ Backup restoration skipped by user request"
+            echo "is_new_install=true" >> $GITHUB_OUTPUT
+            echo "restore_status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Function to check backup existence and metadata
+          check_backup() {
+            echo "Checking for existing backup..."
             
-            # Create restore directory
-            mkdir -p /tmp/restore
-            
-            # Download backup with progress
-            echo "Downloading backup..."
-            if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
-              echo "Backup downloaded successfully"
-            else
-              echo "Failed to download backup"
-              exit 1
+            # Check if backup file exists
+            if ! timeout 120 rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
+              echo "No backup file found"
+              return 1
             fi
             
-            # Verify backup integrity
-            echo "Verifying backup integrity..."
-            if tar -tzf "/tmp/restore/${BACKUP_NAME}" >/dev/null 2>&1; then
-              echo "Backup integrity verified"
-            else
-              echo "Backup is corrupted"
-              rm -f "/tmp/restore/${BACKUP_NAME}"
-              exit 1
-            fi
-            
-            # Extract backup
-            echo "Restoring system state..."
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
-              echo "Some files failed to restore (normal for system files)"
-            }
-            
-            # Special handling for Aapanel restoration
-            echo "Special handling for Aapanel restoration..."
-            
-            # Reinstall Aapanel if /www directory exists but bt command is missing
-            if [ -d "/www" ] && ! command -v bt >/dev/null 2>&1; then
-              echo "Aapanel detected but bt command missing - reinstalling..."
+            # Check backup age and metadata
+            if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_METADATA }}" >/dev/null 2>&1; then
+              echo "Downloading backup metadata..."
+              rclone copy "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_METADATA }}" /tmp/ --retries 2
               
-              # Download and install Aapanel
-              curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
-              curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
-                echo "Failed to download Aapanel installer"
-                # Continue without Aapanel
-              }
-              
-              if [ -f "/tmp/install.sh" ]; then
-                chmod +x /tmp/install.sh
-                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
-                  echo "Aapanel reinstallation failed, but continuing..."
-                }
+              if [[ -f "/tmp/${{ env.BACKUP_METADATA }}" ]]; then
+                BACKUP_DATE=$(jq -r '.created_at // empty' "/tmp/${{ env.BACKUP_METADATA }}" 2>/dev/null || echo "")
+                BACKUP_SIZE=$(jq -r '.size_bytes // empty' "/tmp/${{ env.BACKUP_METADATA }}" 2>/dev/null || echo "")
+                BACKUP_VERSION=$(jq -r '.version // empty' "/tmp/${{ env.BACKUP_METADATA }}" 2>/dev/null || echo "")
+                
+                echo "Backup metadata:"
+                echo "  Date: $BACKUP_DATE"
+                echo "  Size: $BACKUP_SIZE bytes"
+                echo "  Version: $BACKUP_VERSION"
+                
+                # Check if backup is too old (more than 7 days)
+                if [[ -n "$BACKUP_DATE" ]]; then
+                  BACKUP_TIMESTAMP=$(date -d "$BACKUP_DATE" +%s 2>/dev/null || echo "0")
+                  CURRENT_TIMESTAMP=$(date +%s)
+                  AGE_DAYS=$(( (CURRENT_TIMESTAMP - BACKUP_TIMESTAMP) / 86400 ))
+                  
+                  if [[ $AGE_DAYS -gt ${{ env.BACKUP_RETENTION_DAYS }} ]]; then
+                    echo "⚠️ Backup is $AGE_DAYS days old (threshold: ${{ env.BACKUP_RETENTION_DAYS }} days)"
+                    read -p "Continue with old backup? [y/N]: " -n 1 -r
+                    echo
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                      echo "Skipping old backup restoration"
+                      return 1
+                    fi
+                  fi
+                fi
               fi
             fi
+            
+            return 0
+          }
+          
+          # Restore function with integrity checks
+          restore_backup() {
+            echo "Starting backup restoration..."
+            
+            # Create secure restore directory
+            RESTORE_DIR="/tmp/restore_$$"
+            mkdir -p "$RESTORE_DIR"
+            chmod 700 "$RESTORE_DIR"
+            
+            # Download backup with progress and verification
+            echo "Downloading backup (this may take a while)..."
+            if ! rclone copy "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" "$RESTORE_DIR/" \
+                 --progress --retries 3 --low-level-retries 3 --stats 30s; then
+              echo "❌ Backup download failed"
+              rm -rf "$RESTORE_DIR"
+              return 1
+            fi
+            
+            BACKUP_FILE="$RESTORE_DIR/${{ env.BACKUP_NAME }}"
+            
+            # Verify backup integrity with multiple checks
+            echo "Verifying backup integrity..."
+            
+            # Check file exists and is not empty
+            if [[ ! -s "$BACKUP_FILE" ]]; then
+              echo "❌ Backup file is empty or missing"
+              rm -rf "$RESTORE_DIR"
+              return 1
+            fi
+            
+            # Test archive integrity
+            if ! tar -tzf "$BACKUP_FILE" >/dev/null 2>&1; then
+              echo "❌ Backup archive is corrupted"
+              rm -rf "$RESTORE_DIR"
+              return 1
+            fi
+            
+            # Get file count for progress estimation
+            FILE_COUNT=$(tar -tzf "$BACKUP_FILE" 2>/dev/null | wc -l)
+            echo "Backup contains $FILE_COUNT files/directories"
+            
+            # Extract with progress indication
+            echo "Extracting backup to system..."
+            (
+              tar -xzf "$BACKUP_FILE" --absolute-names -C / \
+                  --exclude='proc/*' --exclude='tmp/*' --exclude='sys/*' \
+                  --exclude='dev/*' --exclude='run/*' 2>/dev/null || {
+                echo "⚠️ Some files failed to restore (normal for system files)"
+              }
+            ) &
+            
+            # Show progress while extraction happens
+            TAR_PID=$!
+            while kill -0 $TAR_PID 2>/dev/null; do
+              echo -n "."
+              sleep 2
+            done
+            echo " Done!"
+            
+            wait $TAR_PID
+            EXTRACT_STATUS=$?
             
             # Cleanup
-            rm -f "/tmp/restore/${BACKUP_NAME}"
+            rm -rf "$RESTORE_DIR"
             
-            # Remove old backup from MEGA
-            echo "Cleaning old backup from MEGA..."
-            rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
-            
-            echo "is_new_install=false" >> $GITHUB_OUTPUT
+            if [[ $EXTRACT_STATUS -eq 0 ]]; then
+              echo "✅ Backup restoration completed successfully"
+              return 0
+            else
+              echo "⚠️ Backup restoration completed with warnings"
+              return 0  # Continue anyway, warnings are expected
+            fi
+          }
+          
+          # Main restoration logic
+          if check_backup; then
+            if restore_backup; then
+              echo "is_new_install=false" >> $GITHUB_OUTPUT
+              echo "restore_status=success" >> $GITHUB_OUTPUT
+              
+              # Post-restoration system repairs
+              echo "Performing post-restoration system repairs..."
+              
+              # Fix common permission issues
+              sudo chown -R www-data:www-data /var/www/ 2>/dev/null || true
+              sudo chmod -R 755 /var/www/html/ 2>/dev/null || true
+              
+              # Fix SSH permissions
+              sudo chmod 700 /home/*/. ssh 2>/dev/null || true
+              sudo chmod 600 /home/*/.ssh/* 2>/dev/null || true
+              
+              echo "✅ Post-restoration repairs completed"
+            else
+              echo "❌ Backup restoration failed"
+              echo "is_new_install=true" >> $GITHUB_OUTPUT
+              echo "restore_status=failed" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "No backup found. Setting up fresh installation..."
-            
-            # Create essential directories
-            sudo mkdir -p \
-              /home/jacky/.ssh \
-              /opt /srv /var/www/html \
-              /www/server \
-              /root/.ssh
-            
+            echo "ℹ️ No valid backup found or backup check failed"
+            echo "Proceeding with fresh installation..."
             echo "is_new_install=true" >> $GITHUB_OUTPUT
+            echo "restore_status=no_backup" >> $GITHUB_OUTPUT
           fi
 
-      - name: 'Repair Aapanel After Restoration'
+      - name: 'Advanced Aapanel Recovery'
         if: steps.restore.outputs.is_new_install == 'false'
+        id: aapanel_recovery
         run: |
           set -euo pipefail
-          echo "Repairing Aapanel after restoration..."
+          echo "🔧 Performing advanced Aapanel recovery..."
           
-          # Check if Aapanel should exist
-          if [ -d "/www" ]; then
-            echo "Aapanel installation detected, checking status..."
+          # Function to check Aapanel installation
+          check_aapanel() {
+            echo "Checking Aapanel installation status..."
             
-            # Repair bt command if missing
-            if ! command -v bt >/dev/null 2>&1; then
-              echo "bt command missing - repairing..."
-              
-              # Try to restore bt command from common locations
-              if [ -f "/www/server/panel/bt" ]; then
-                sudo ln -sf /www/server/panel/bt /usr/bin/bt
-                echo "bt command restored from panel directory"
-              else
-                # Reinstall Aapanel
-                echo "Reinstalling Aapanel..."
-                curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
-                curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
-                  echo "Failed to download Aapanel installer"
-                  exit 0
-                }
-                
-                chmod +x /tmp/install.sh
-                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
-                  echo "Aapanel reinstallation failed"
-                  exit 0
-                }
-              fi
+            # Check for Aapanel directories
+            if [[ -d "/www" ]]; then
+              echo "✅ Aapanel directory structure found"
+              AAPANEL_DETECTED=true
+            else
+              echo "ℹ️ No Aapanel directory structure found"
+              AAPANEL_DETECTED=false
+              return 1
             fi
             
-            # Fix permissions
-            echo "Fixing Aapanel permissions..."
-            sudo chown -R www:www /www/wwwroot 2>/dev/null || true
-            sudo chmod -R 755 /www/server 2>/dev/null || true
-            
-            # Restart Aapanel services
-            echo "Restarting Aapanel services..."
+            # Check for bt command
             if command -v bt >/dev/null 2>&1; then
-              sudo bt restart 2>/dev/null || {
-                echo "Aapanel restart failed, trying start instead..."
-                sudo bt start 2>/dev/null || true
-              }
-              
-              # Reset Aapanel credentials to known values
-              echo "Resetting Aapanel credentials..."
-              echo "jacky" | sudo bt 6 2>/dev/null || echo "Could not set Aapanel username"
-              echo "spidey123" | sudo bt 5 2>/dev/null || echo "Could not set Aapanel password"
-              
-              echo "Aapanel repair completed"
+              echo "✅ bt command is available"
+              BT_AVAILABLE=true
             else
-              echo "Aapanel detected but bt command still missing after repair attempt"
+              echo "⚠️ bt command not found"
+              BT_AVAILABLE=false
             fi
-          else
-            echo "No Aapanel installation detected, skipping repair"
-          fi
-
-      - name: 'Initial Setup'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "Setting up fresh VPS environment..."
-          
-          # Create user jacky
-          if ! id "jacky" &>/dev/null; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "User 'jacky' created"
-          fi
-          
-          # Set password and sudo privileges
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          
-          # Set hostname
-          sudo hostnamectl set-hostname github-vps
-          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-          
-          echo "Basic system setup completed."
-
-      - name: 'Install Aapanel'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "Installing Aapanel control panel..."
-          
-          # Install required dependencies first
-          echo "Installing prerequisites..."
-          sudo apt-get install -y curl wget unzip tar expect || true
-          
-          # Method 1: Try official installation script with timeout
-          echo "Attempting official Aapanel installation..."
-          if timeout 300 bash -c '
-            if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
-              chmod +x /tmp/install.sh
-              # Use expect to handle interactive prompts
-              sudo expect -c "
-                set timeout 300
-                spawn bash /tmp/install.sh
-                expect \"Do you want to install aaPanel to the /www directory now?\\\\(y/n\\\\)\"
-                send \"y\\r\"
-                expect eof
-              "
-            else
-              echo "Failed to download Aapanel installer"
-              exit 1
-            fi
-          '; then
-            echo "Aapanel installation completed"
-          else
-            echo "Official installation failed, trying alternative methods..."
             
-            # Method 2: Try different download mirror
-            echo "Trying alternative download mirror..."
-            if curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh"; then
-              chmod +x /tmp/install.sh
-              echo "y" | sudo bash /tmp/install.sh
-              echo "Aapanel installed via GitHub mirror"
-            else
-              echo "All download methods failed"
-              echo "Continuing without Aapanel..."
-            fi
-          fi
-          
-          # Verify installation
-          if command -v bt >/dev/null 2>&1; then
-            echo "Aapanel installed successfully"
-            sudo bt --version 2>/dev/null || true
-            
-            # Set Aapanel credentials
-            echo "Setting Aapanel credentials..."
-            echo "jacky" | sudo bt 6 2>/dev/null || echo "Could not set Aapanel username"
-            echo "spidey123" | sudo bt 5 2>/dev/null || echo "Could not set Aapanel password"
-          else
-            echo "Aapanel command 'bt' not found in PATH"
-            echo "Installation may have failed or be incomplete"
-          fi
-
-      - name: 'Security Hardening'
-        run: |
-          set -euo pipefail
-          echo "Applying security hardening..."
-          
-          # Secure SSH configuration
-          sudo sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-          
-          # Configure firewall (ufw)
-          sudo ufw allow ssh
-          sudo ufw allow http
-          sudo ufw allow https
-          sudo ufw allow 7800/tcp  # Aapanel
-          echo "y" | sudo ufw enable
-          
-          # Set up fail2ban for brute force protection
-          sudo systemctl enable fail2ban
-          sudo systemctl start fail2ban
-          
-          # Create SSH key for jacky user if it doesn't exist
-          if [ ! -f /home/jacky/.ssh/id_rsa ]; then
-            sudo -u jacky ssh-keygen -t rsa -b 4096 -f /home/jacky/.ssh/id_rsa -N "" -q
-            sudo -u jacky cat /home/jacky/.ssh/id_rsa.pub >> /home/jacky/.ssh/authorized_keys
-            sudo chmod 600 /home/jacky/.ssh/authorized_keys
-            echo "SSH key generated for jacky user"
-          fi
-          
-          echo "Security hardening completed"
-
-      - name: 'Start and Configure Services'
-        run: |
-          set -euo pipefail
-          echo "Starting system services..."
-          
-          # Reload systemd
-          sudo systemctl daemon-reload
-          
-          # Configure and start MariaDB
-          echo "Configuring MariaDB..."
-          sudo systemctl enable mariadb
-          sudo systemctl start mariadb || {
-            echo "MariaDB failed to start, attempting to fix..."
-            sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
-            sudo systemctl start mariadb || true
-          }
-          
-          # Configure and start Apache
-          echo "Configuring Apache..."
-          sudo systemctl enable apache2
-          sudo systemctl start apache2 || {
-            echo "Apache failed to start"
-            sudo systemctl status apache2 --no-pager || true
-          }
-          
-          # Configure SSH
-          echo "Configuring SSH..."
-          sudo systemctl enable ssh
-          sudo systemctl start ssh
-          
-          # Start Aapanel if available - with enhanced detection
-          if [ -d "/www" ] || command -v bt >/dev/null 2>&1; then
-            echo "Starting Aapanel..."
-            
-            # Check if panel service exists
+            # Check panel service
             if systemctl list-unit-files | grep -q "panel.service"; then
-              sudo systemctl enable panel 2>/dev/null || true
-              sudo systemctl start panel 2>/dev/null || true
-            fi
-            
-            # Use bt command if available
-            if command -v bt >/dev/null 2>&1; then
-              sudo bt start 2>/dev/null || {
-                echo "Aapanel failed to start via bt command"
-                # Try alternative startup method
-                if [ -f "/www/server/panel/script/start" ]; then
-                  sudo bash /www/server/panel/script/start 2>/dev/null || true
-                fi
-              }
+              echo "✅ Panel service found"
+              SERVICE_AVAILABLE=true
             else
-              echo "bt command missing, trying direct startup..."
-              if [ -f "/www/server/panel/script/start" ]; then
-                sudo bash /www/server/panel/script/start 2>/dev/null || true
-              fi
+              echo "⚠️ Panel service not found"
+              SERVICE_AVAILABLE=false
             fi
             
-            # Wait for panel to start
-            echo "Waiting for Aapanel to start..."
+            return 0
+          }
+          
+          # Function to repair bt command
+          repair_bt_command() {
+            echo "Repairing bt command..."
+            
+            # Look for bt in common locations
+            BT_LOCATIONS=(
+              "/www/server/panel/bt"
+              "/www/server/panel/bt.py"
+              "/usr/bin/bt"
+              "/usr/local/bin/bt"
+            )
+            
+            for location in "${BT_LOCATIONS[@]}"; do
+              if [[ -f "$location" ]]; then
+                echo "Found bt at: $location"
+                sudo ln -sf "$location" /usr/bin/bt 2>/dev/null || true
+                sudo chmod +x /usr/bin/bt 2>/dev/null || true
+                
+                # Test the command
+                if command -v bt >/dev/null 2>&1; then
+                  echo "✅ bt command restored successfully"
+                  return 0
+                fi
+              fi
+            done
+            
+            echo "⚠️ Could not restore bt command from existing files"
+            return 1
+          }
+          
+          # Function to reinstall Aapanel
+          reinstall_aapanel() {
+            echo "Reinstalling Aapanel..."
+            
+            # Backup existing configuration
+            if [[ -d "/www/server/panel/data" ]]; then
+              echo "Backing up existing panel configuration..."
+              sudo cp -r /www/server/panel/data /tmp/panel_data_backup 2>/dev/null || true
+            fi
+            
+            # Download and install Aapanel
+            INSTALL_URLS=(
+              "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
+              "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install_6.0_en.sh"
+              "https://download.aapanel.com/install/install-ubuntu_6.0_en.sh"
+            )
+            
+            for url in "${INSTALL_URLS[@]}"; do
+              echo "Trying installation from: $url"
+              if curl -fsSL -o /tmp/install_aapanel.sh "$url" --connect-timeout 30; then
+                chmod +x /tmp/install_aapanel.sh
+                
+                # Install with timeout and expect
+                if timeout 600 bash -c '
+                  sudo expect -c "
+                    set timeout 600
+                    spawn bash /tmp/install_aapanel.sh
+                    expect {
+                      \"Do you want to install aaPanel to the /www directory now?*\" {
+                        send \"y\\r\"
+                        expect eof
+                      }
+                      timeout {
+                        puts \"Installation timed out\"
+                        exit 1
+                      }
+                    }
+                  "
+                '; then
+                  echo "✅ Aapanel installation completed"
+                  
+                  # Restore configuration if backup exists
+                  if [[ -d "/tmp/panel_data_backup" ]]; then
+                    echo "Restoring panel configuration..."
+                    sudo cp -r /tmp/panel_data_backup/* /www/server/panel/data/ 2>/dev/null || true
+                    sudo rm -rf /tmp/panel_data_backup
+                  fi
+                  
+                  return 0
+                else
+                  echo "⚠️ Installation from $url failed"
+                fi
+                
+                rm -f /tmp/install_aapanel.sh
+              else
+                echo "⚠️ Could not download from $url"
+              fi
+            done
+            
+            echo "❌ All Aapanel installation attempts failed"
+            return 1
+          }
+          
+          # Function to configure Aapanel
+          configure_aapanel() {
+            echo "Configuring Aapanel..."
+            
+            # Wait for services to be ready
             sleep 10
             
-            # Check panel status
+            # Set credentials
             if command -v bt >/dev/null 2>&1; then
-              echo "Aapanel status:"
-              sudo bt status 2>/dev/null || echo "Could not get Aapanel status"
-            fi
-          fi
-          
-          # Service status check
-          echo "Service Status:"
-          systemctl is-active mariadb apache2 ssh || true
-          
-          echo "Services configured and started."
-
-      - name: 'Configure Remote Access'
-        run: |
-          set -euo pipefail
-          
-          # Configure Aapanel if available and new install
-          if [[ "${{ steps.restore.outputs.is_new_install }}" == "true" ]] && command -v bt >/dev/null 2>&1; then
-            echo "Configuring Aapanel credentials..."
-            sleep 5
-            
-            # Set Aapanel credentials with error handling
-            echo "jacky" | sudo bt 6 2>/dev/null || echo "Could not set Aapanel username"
-            echo "spidey123" | sudo bt 5 2>/dev/null || echo "Could not set Aapanel password"
-            
-            # Get panel information
-            echo "Aapanel Information:"
-            sudo bt default 2>/dev/null || echo "Could not retrieve Aapanel info"
-          fi
-          
-          # Install and configure Tailscale
-          echo "Setting up Tailscale VPN..."
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "TAILSCALE_AUTHKEY secret is missing!"
-            echo "Please add your Tailscale auth key to GitHub secrets."
-            echo "Get it from: https://login.tailscale.com/admin/settings/keys"
-            exit 1
-          fi
-          
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable tailscaled
-          sudo systemctl start tailscaled
-          
-          # Connect with retry logic
-          for i in {1..3}; do
-            if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes; then
-              echo "Tailscale connected on attempt $i"
-              break
+              echo "Setting Aapanel credentials..."
+              
+              # Set username
+              echo "${{ env.AAPANEL_USER }}" | sudo bt 6 2>/dev/null || \
+                echo "⚠️ Could not set Aapanel username"
+              
+              # Set password
+              echo "${{ env.AAPANEL_PASSWORD }}" | sudo bt 5 2>/dev/null || \
+                echo "⚠️ Could not set Aapanel password"
+              
+              # Get panel info
+              echo "Aapanel access information:"
+              sudo bt default 2>/dev/null || echo "Could not retrieve panel info"
+              
+              return 0
             else
-              echo "Tailscale connection attempt $i failed"
-              if [[ $i -eq 3 ]]; then
-                echo "Tailscale setup failed"
-                exit 1
-              fi
-              sleep 15
+              echo "❌ bt command still not available after configuration"
+              return 1
             fi
-          done
-          
-          # Start tmate session
-          echo "Starting tmate for SSH access..."
-          tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready - Welcome to GitHub VPS!"; bash'
-          
-          # Wait for tmate with timeout
-          timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || {
-            echo "tmate session startup timeout"
           }
           
-          echo "================================================"
-          echo "VPS IS READY FOR CONNECTION!"
-          echo "================================================"
+          # Main recovery process
+          RECOVERY_STATUS="unknown"
           
-          # Get connection details
-          TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Failed to get IP")
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Failed to get tmate info")
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "Not available")
-          
-          echo "Tailscale IP: $TAILSCALE_IP"
-          echo "SSH Access: $TMATE_SSH"
-          echo "Web Terminal: $TMATE_WEB"
-          echo "Local User: ssh jacky@localhost (password: root)"
-          
-          if command -v bt >/dev/null 2>&1; then
-            echo "Aapanel: http://$TAILSCALE_IP:7800 (jacky/spidey123)"
-          fi
-          
-          echo "================================================"
-
-      - name: 'Health Monitoring'
-        run: |
-          set -euo pipefail
-          echo "Starting health monitoring..."
-          
-          # Simple health check script that runs in background
-          cat > /tmp/health_monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            echo "$(date): CPU: $(top -bn1 | grep load | awk '{printf "%.2f", $(NF-2)}')%, Memory: $(free -m | awk '/Mem:/ {printf "%.1f%%", $3/$2*100}')" >> /tmp/health.log
-            sleep 300
-          done
-          EOF
-          chmod +x /tmp/health_monitor.sh
-          nohup /tmp/health_monitor.sh > /dev/null 2>&1 &
-          
-          echo "Health monitoring started"
-
-      - name: 'Maintain VPS Session'
-        run: |
-          set -euo pipefail
-          echo "VPS session is running!"
-          echo "To stop gracefully: touch /tmp/stop_session"
-          echo "Auto-stop in 5.5 hours for backup"
-          
-          # Main monitoring loop
-          for minute in {1..330}; do
-            # Check for stop signal
-            if [[ -f /tmp/stop_session ]]; then
-              echo "Stop signal detected at minute $minute"
-              break
-            fi
+          if check_aapanel; then
+            echo "Aapanel installation detected, performing recovery..."
             
-            # Status update every 30 minutes
-            if (( minute % 30 == 0 )); then
-              echo "Runtime: $minute minutes"
-              echo "Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ')"
-              
-              # Connection info reminder
-              if (( minute % 60 == 0 )); then
-                echo "Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'N/A')"
-              fi
-            fi
-            
-            sleep 60
-          done
-          
-          echo "VPS session maintenance completed at minute $minute"
-
-      - name: 'Create System Backup'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "Creating comprehensive backup..."
-          
-          # Create backup directory
-          sudo mkdir -p "${{ env.BACKUP_STORE }}"
-          
-          # Stop services gracefully
-          echo "Stopping services for clean backup..."
-          sudo systemctl stop apache2 mariadb 2>/dev/null || true
-          if command -v bt >/dev/null 2>&1; then
-            sudo bt stop 2>/dev/null || true
-          fi
-          
-          # Wait for services to stop
-          sleep 5
-          
-          # Create comprehensive backup
-          echo "Creating backup archive..."
-          sudo tar -czf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
-            --absolute-names \
-            --ignore-failed-read \
-            --warning=no-file-ignored \
-            --exclude='/proc/*' --exclude='/tmp/*' --exclude='/sys/*' \
-            --exclude='/dev/*' --exclude='/run/*' --exclude='/mnt/*' \
-            --exclude='/media/*' --exclude='/lost+found' \
-            --exclude='*.log' --exclude='*.pid' \
-            /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
-            /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
-            /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
-            /var/lib/mysql/ /var/www/ /opt/ /srv/ /www/ \
-            /root/ /home/jacky/ \
-            $(command -v bt >/dev/null && echo "/usr/bin/bt" || echo "") \
-            /usr/local/bin/ \
-            2>/dev/null || {
-              echo "Some files couldn't be backed up (normal)"
-            }
-          
-          # Verify backup
-          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
-            echo "Backup created: $BACKUP_SIZE"
-            
-            # Test integrity
-            if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-              echo "Backup integrity verified"
-            else
-              echo "Backup integrity check failed"
-              exit 1
-            fi
-          else
-            echo "Backup creation failed"
-            exit 1
-          fi
-
-      - name: 'Verify Backup Integrity'
-        run: |
-          set -euo pipefail
-          echo "Verifying backup integrity..."
-          
-          # Test the backup we just created
-          if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-            echo "Local backup verification successful"
-          else
-            echo "Local backup verification failed"
-            exit 1
-          fi
-
-      - name: 'Upload Backup to MEGA'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "Uploading backup to MEGA..."
-          
-          # Verify backup exists
-          if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            echo "No backup file found to upload"
-            exit 1
-          fi
-          
-          # Upload with retry mechanism
-          for attempt in {1..5}; do
-            echo "Upload attempt $attempt/5..."
-            
-            if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" \
-               --progress --transfers 1 --retries 3 --low-level-retries 3; then
-              
-              echo "Upload successful on attempt $attempt"
-              
-              # Verify upload
-              if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-                echo "Upload verified on MEGA"
-                break
+            # Try to repair bt command first
+            if [[ "$BT_AVAILABLE" == "false" ]]; then
+              if repair_bt_command; then
+                RECOVERY_STATUS="bt_repaired"
               else
-                echo "Upload verification failed"
+                echo "bt command repair failed, attempting reinstallation..."
+                if reinstall_aapanel; then
+                  RECOVERY_STATUS="reinstalled"
+                else
+                  RECOVERY_STATUS="failed"
+                fi
               fi
             else
-              echo "Upload attempt $attempt failed"
+              echo "bt command already available"
+              RECOVERY_STATUS="already_working"
+            fi
+            
+            # Configure Aapanel if recovery was successful
+            if [[ "$RECOVERY_STATUS" != "failed" ]]; then
+              if configure_aapanel; then
+                echo "✅ Aapanel recovery completed successfully"
+              else
+                echo "⚠️ Aapanel recovery completed but configuration failed"
+                RECOVERY_STATUS="config_failed"
+              fi
+            fi
+          else
+            echo "ℹ️ No Aapanel installation detected, skipping recovery"
+            RECOVERY_STATUS="not_installed"
+          fi
+          
+          echo "aapanel_status=$RECOVERY_STATUS" >> $GITHUB_OUTPUT
+          echo "✅ Aapanel recovery process completed"
+
+      - name: 'Comprehensive Fresh Installation'
+        if: steps.restore.outputs.is_new_install == 'true'
+        id: fresh_install
+        run: |
+          set -euo pipefail
+          echo "🆕 Performing comprehensive fresh installation..."
+          
+          # Function to create user accounts
+          setup_users() {
+            echo "Setting up user accounts..."
+            
+            # Create main user
+            if ! id "${{ env.VPS_USER }}" &>/dev/null; then
+              sudo useradd -m -s /bin/bash -G sudo "${{ env.VPS_USER }}"
+              echo "✅ User '${{ env.VPS_USER }}' created"
+            else
+              echo "ℹ️ User '${{ env.VPS_USER }}' already exists"
+            fi
+            
+            # Set password and configure sudo
+            echo "${{ env.VPS_USER }}:${{ env.VPS_PASSWORD }}" | sudo chpasswd
+            sudo usermod -aG sudo,www-data "${{ env.VPS_USER }}"
+            
+            # Configure passwordless sudo for automation
+            echo "${{ env.VPS_USER }} ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ env.VPS_USER }}"
+            sudo chmod 440 "/etc/sudoers.d/${{ env.VPS_USER }}"
+            
+            # Create essential directories
+            sudo -u "${{ env.VPS_USER }}" mkdir -p "/home/${{ env.VPS_USER }}/.ssh"
+            sudo chmod 700 "/home/${{ env.VPS_USER }}/.ssh"
+            
+            echo "✅ User accounts configured"
+          }
+          
+          # Function to configure system settings
+          setup_system() {
+            echo "Configuring system settings..."
+            
+            # Set hostname and hosts file
+            sudo hostnamectl set-hostname github-vps-enhanced
+            echo "127.0.0.1 localhost" | sudo tee /etc/hosts
+            echo "127.0.1.1 github-vps-enhanced" | sudo tee -a /etc/hosts
+            echo "::1 localhost ip6-localhost ip6-loopback" | sudo tee -a /etc/hosts
+            
+            # Configure timezone
+            sudo timedatectl set-timezone UTC
+            
+            # Optimize system performance
+            cat << 'SYSCTL_EOF' | sudo tee /etc/sysctl.d/99-vps-optimization.conf
+# Network optimizations
+net.core.rmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_default = 262144
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 65536 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+
+# File system optimizations
+vm.swappiness = 10
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+
+# Security settings
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+kernel.dmesg_restrict = 1
+SYSCTL_EOF
+            
+            sudo sysctl -p /etc/sysctl.d/99-vps-optimization.conf
+            
+            echo "✅ System settings configured"
+          }
+          
+          # Function to install and configure Aapanel
+          install_aapanel() {
+            echo "Installing Aapanel control panel..."
+            
+            # Pre-installation requirements
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              curl wget expect python3 python3-pip || {
+              echo "Failed to install Aapanel prerequisites"
+              return 1
+            }
+            
+            # Create installation script with multiple fallbacks
+            cat << 'INSTALL_SCRIPT' > /tmp/install_aapanel.sh
+#!/bin/bash
+set -e
+
+INSTALL_URLS=(
+  "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
+  "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install_6.0_en.sh"
+  "https://download.aapanel.com/install/install-ubuntu_6.0_en.sh"
+  "https://node.aapanel.com/install/install_6.0_en.sh"
+)
+
+for url in "${INSTALL_URLS[@]}"; do
+  echo "Attempting download from: $url"
+  if curl -fsSL --connect-timeout 30 --max-time 300 -o /tmp/aapanel_installer.sh "$url"; then
+    echo "Download successful from: $url"
+    chmod +x /tmp/aapanel_installer.sh
+    
+    # Install with automated responses
+    expect -c "
+      set timeout 900
+      spawn bash /tmp/aapanel_installer.sh
+      expect {
+        \"*Do you want to install aaPanel to the /www directory now*\" {
+          send \"y\r\"
+          exp_continue
+        }
+        \"*Please enter the port you want to use*\" {
+          send \"7800\r\"
+          exp_continue
+        }
+        \"*installation completed*\" {
+          exit 0
+        }
+        timeout {
+          puts \"Installation timeout\"
+          exit 1
+        }
+        eof {
+          exit 0
+        }
+      }
+    "
+    
+    if [ $? -eq 0 ]; then
+      echo "Aapanel installation completed successfully"
+      rm -f /tmp/aapanel_installer.sh
+      return 0
+    fi
+  fi
+  
+  echo "Failed to install from: $url"
+  rm -f /tmp/aapanel_installer.sh
+done
+
+echo "All installation attempts failed"
+return 1
+INSTALL_SCRIPT
+            
+            chmod +x /tmp/install_aapanel.sh
+            
+            # Run installation with timeout
+            if timeout 1200 bash /tmp/install_aapanel.sh; then
+              echo "✅ Aapanel installation completed"
               
-              if [[ $attempt -eq 5 ]]; then
-                echo "All upload attempts exhausted"
-                exit 1
+              # Wait for services to initialize
+              echo "Waiting for Aapanel services to initialize..."
+              sleep 15
+              
+              # Configure credentials
+              if command -v bt >/dev/null 2>&1; then
+                echo "Configuring Aapanel credentials..."
+                echo "${{ env.AAPANEL_USER }}" | sudo bt 6 2>/dev/null || true
+                echo "${{ env.AAPANEL_PASSWORD }}" | sudo bt 5 2>/dev/null || true
+                
+                # Get access information
+                echo "Aapanel access information:"
+                sudo bt default 2>/dev/null || true
+              else
+                echo "⚠️ bt command not available after installation"
               fi
               
-              echo "Waiting 30 seconds before retry..."
-              sleep 30
+              rm -f /tmp/install_aapanel.sh
+              return 0
+            else
+              echo "❌ Aapanel installation failed or timed out"
+              rm -f /tmp/install_aapanel.sh
+              return 1
+            fi
+          }
+          
+          # Main installation process
+          echo "Starting fresh installation process..."
+          
+          # Step 1: Setup users
+          if setup_users; then
+            echo "✅ User setup completed"
+          else
+            echo "❌ User setup failed"
+            exit 1
+          fi
+          
+          # Step 2: Configure system
+          if setup_system; then
+            echo "✅ System configuration completed"
+          else
+            echo "⚠️ System configuration had issues but continuing..."
+          fi
+          
+          # Step 3: Install Aapanel
+          if install_aapanel; then
+            echo "✅ Aapanel installation completed"
+            echo "aapanel_installed=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Aapanel installation failed, continuing without it"
+            echo "aapanel_installed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Step 4: Create initial directory structure
+          echo "Creating directory structure..."
+          sudo mkdir -p \
+            /var/www/html \
+            /var/backups \
+            /opt/scripts \
+            /srv/data \
+            /home/${{ env.VPS_USER }}/projects
+          
+          sudo chown -R ${{ env.VPS_USER }}:${{ env.VPS_USER }} /home/${{ env.VPS_USER }}/
+          sudo chown -R www-data:www-data /var/www/
+          
+          echo "✅ Fresh installation completed successfully"
+
+      - name: 'Enhanced Security Hardening'
+        id: security_hardening
+        run: |
+          set -euo pipefail
+          echo "🛡️ Implementing enhanced security hardening..."
+          
+          # Function to configure advanced SSH security
+          configure_ssh() {
+            echo "Configuring SSH security..."
+            
+            # Backup original SSH config
+            sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+            
+            # Create hardened SSH configuration
+            cat << 'SSH_CONFIG' | sudo tee /etc/ssh/sshd_config
+# Enhanced SSH Configuration for VPS Security
+Port 22
+Protocol 2
+
+# Authentication
+PermitRootLogin no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+
+# Connection settings
+ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxAuthTries 3
+MaxSessions 10
+MaxStartups 10:30:100
+
+# Security settings
+X11Forwarding no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+Compression delayed
+UseDNS no
+
+# Logging
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# Allow specific users only
+AllowUsers ${{ env.VPS_USER }}
+
+# Subsystems
+Subsystem sftp /usr/lib/openssh/sftp-server
+SSH_CONFIG
+            
+            # Generate SSH keys for the main user
+            sudo -u "${{ env.VPS_USER }}" bash -c '
+              if [ ! -f ~/.ssh/id_rsa ]; then
+                ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" -C "github-vps-$(date +%Y%m%d)"
+                cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+                chmod 600 ~/.ssh/authorized_keys
+                chmod 700 ~/.ssh
+                echo "✅ SSH keys generated"
+              fi
+            '
+            
+            # Test SSH configuration
+            if sudo sshd -t; then
+              sudo systemctl reload ssh
+              echo "✅ SSH security configuration applied"
+            else
+              echo "❌ SSH configuration invalid, restoring backup"
+              sudo cp /etc/ssh/sshd_config.backup /etc/ssh/sshd_config
+              return 1
+            fi
+          }
+          
+          # Function to configure advanced firewall
+          configure_firewall() {
+            echo "Configuring advanced firewall rules..."
+            
+            # Reset and configure UFW
+            sudo ufw --force reset
+            sudo ufw default deny incoming
+            sudo ufw default allow outgoing
+            
+            # Essential services
+            sudo ufw allow ssh comment 'SSH access'
+            sudo ufw allow http comment 'HTTP web server'
+            sudo ufw allow https comment 'HTTPS web server'
+            
+            # Aapanel if installed
+            if command -v bt >/dev/null 2>&1; then
+              sudo ufw allow 7800/tcp comment 'Aapanel web interface'
+            fi
+            
+            # Rate limiting for SSH
+            sudo ufw limit ssh comment 'Rate limit SSH connections'
+            
+            # Enable firewall
+            echo "y" | sudo ufw enable
+            
+            # Configure fail2ban
+            echo "Configuring fail2ban..."
+            
+            cat << 'FAIL2BAN_CONFIG' | sudo tee /etc/fail2ban/jail.local
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 3
+backend = systemd
+
+[sshd]
+enabled = true
+port = ssh
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+
+[apache-auth]
+enabled = true
+port = http,https
+logpath = /var/log/apache2/error.log
+maxretry = 6
+
+[apache-badbots]
+enabled = true
+port = http,https
+logpath = /var/log/apache2/access.log
+maxretry = 2
+
+[apache-noscript]
+enabled = true
+port = http,https
+logpath = /var/log/apache2/access.log
+maxretry = 6
+
+[apache-overflows]
+enabled = true
+port = http,https
+logpath = /var/log/apache2/error.log
+maxretry = 2
+FAIL2BAN_CONFIG
+            
+            sudo systemctl enable fail2ban
+            sudo systemctl restart fail2ban
+            
+            echo "✅ Advanced firewall configured"
+          }
+          
+          # Function to configure system monitoring
+          configure_monitoring() {
+            echo "Setting up system monitoring..."
+            
+            # Create monitoring script
+            cat << 'MONITORING_SCRIPT' > /tmp/system_monitor.sh
+#!/bin/bash
+
+LOG_FILE="/var/log/system-monitor.log"
+ALERT_THRESHOLD_CPU=80
+ALERT_THRESHOLD_MEM=85
+ALERT_THRESHOLD_DISK=90
+
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | sudo tee -a "$LOG_FILE"
+}
+
+check_cpu() {
+    CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    CPU_USAGE=${CPU_USAGE%.*}  # Remove decimal
+    if [ "$CPU_USAGE" -gt "$ALERT_THRESHOLD_CPU" ]; then
+        log_message "HIGH CPU USAGE: ${CPU_USAGE}%"
+        return 1
+    fi
+    return 0
+}
+
+check_memory() {
+    MEM_USAGE=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100}')
+    if [ "$MEM_USAGE" -gt "$ALERT_THRESHOLD_MEM" ]; then
+        log_message "HIGH MEMORY USAGE: ${MEM_USAGE}%"
+        return 1
+    fi
+    return 0
+}
+
+check_disk() {
+    DISK_USAGE=$(df / | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    if [ "$DISK_USAGE" -gt "$ALERT_THRESHOLD_DISK" ]; then
+        log_message "HIGH DISK USAGE: ${DISK_USAGE}%"
+        return 1
+    fi
+    return 0
+}
+
+check_services() {
+    CRITICAL_SERVICES=("ssh" "apache2" "mysql")
+    for service in "${CRITICAL_SERVICES[@]}"; do
+        if ! systemctl is-active --quiet "$service"; then
+            log_message "SERVICE DOWN: $service"
+            # Attempt to restart
+            if sudo systemctl restart "$service"; then
+                log_message "SERVICE RESTARTED: $service"
+            else
+                log_message "SERVICE RESTART FAILED: $service"
+            fi
+        fi
+    done
+}
+
+# Main monitoring loop
+while true; do
+    check_cpu
+    check_memory  
+    check_disk
+    check_services
+    
+    # Log system status every hour
+    if [ $(($(date +%M) % 60)) -eq 0 ]; then
+        LOAD=$(uptime | awk -F'load average:' '{print $2}')
+        UPTIME=$(uptime -p)
+        log_message "STATUS: Load:$LOAD, $UPTIME"
+    fi
+    
+    sleep 300  # Check every 5 minutes
+done
+MONITORING_SCRIPT
+            
+            chmod +x /tmp/system_monitor.sh
+            sudo cp /tmp/system_monitor.sh /opt/scripts/
+            
+            # Create systemd service for monitoring
+            cat << 'MONITOR_SERVICE' | sudo tee /etc/systemd/system/system-monitor.service
+[Unit]
+Description=System Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/scripts/system_monitor.sh
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+MONITOR_SERVICE
+            
+            sudo systemctl daemon-reload
+            sudo systemctl enable system-monitor
+            sudo systemctl start system-monitor
+            
+            echo "✅ System monitoring configured"
+          }
+          
+          # Function to setup log rotation
+          configure_logging() {
+            echo "Configuring log management..."
+            
+            # Enhanced logrotate configuration
+            cat << 'LOGROTATE_CONFIG' | sudo tee /etc/logrotate.d/vps-custom
+/var/log/system-monitor.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    copytruncate
+    create 644 root root
+}
+
+/var/log/apache2/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        systemctl reload apache2 > /dev/null 2>&1 || true
+    endscript
+}
+LOGROTATE_CONFIG
+            
+            # Configure rsyslog for better logging
+            cat << 'RSYSLOG_CONFIG' | sudo tee /etc/rsyslog.d/50-vps.conf
+# Enhanced logging for VPS
+*.info;mail.none;authpriv.none;cron.none    /var/log/messages
+authpriv.*                                  /var/log/secure
+mail.*                                      /var/log/maillog
+cron.*                                      /var/log/cron
+local7.*                                    /var/log/boot.log
+RSYSLOG_CONFIG
+            
+            sudo systemctl restart rsyslog
+            
+            echo "✅ Log management configured"
+          }
+          
+          # Execute security hardening
+          echo "Starting security hardening process..."
+          
+          # SSH Configuration
+          if configure_ssh; then
+            echo "✅ SSH security configured"
+          else
+            echo "⚠️ SSH security configuration had issues"
+          fi
+          
+          # Firewall Configuration  
+          if configure_firewall; then
+            echo "✅ Firewall configured"
+          else
+            echo "⚠️ Firewall configuration had issues"
+          fi
+          
+          # System Monitoring
+          if configure_monitoring; then
+            echo "✅ System monitoring configured"
+          else
+            echo "⚠️ System monitoring configuration had issues"
+          fi
+          
+          # Log Management
+          if configure_logging; then
+            echo "✅ Log management configured"
+          else
+            echo "⚠️ Log management configuration had issues"
+          fi
+          
+          # Additional security measures
+          echo "Applying additional security measures..."
+          
+          # Disable unnecessary services
+          UNNECESSARY_SERVICES=("bluetooth" "cups" "avahi-daemon")
+          for service in "${UNNECESSARY_SERVICES[@]}"; do
+            if systemctl is-enabled "$service" &>/dev/null; then
+              sudo systemctl disable "$service"
+              sudo systemctl stop "$service" 2>/dev/null || true
+              echo "Disabled service: $service"
             fi
           done
           
-          # Cleanup local backup
-          sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
-          echo "Local backup cleaned up"
+          # Set secure file permissions
+          sudo chmod 644 /etc/passwd /etc/group
+          sudo chmod 640 /etc/shadow /etc/gshadow
+          sudo chmod 600 /etc/ssh/ssh_host_*_key
+          sudo chmod 644 /etc/ssh/ssh_host_*_key.pub
+          
+          echo "✅ Enhanced security hardening completed"
 
-      - name: 'Final Status Report'
-        if: always()
+      - name: 'Intelligent Service Management'
+        id: service_management
         run: |
-          echo "============================================="
-          echo "VPS SESSION COMPLETE"
-          echo "============================================="
-          echo "Completed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "Status: ${{ job.status }}"
-          echo "Hostname: $(hostname)"
-          echo "Runner: $(whoami)@$(hostname)"
+          set -euo pipefail
+          echo "⚙️ Starting intelligent service management..."
           
-          case "${{ job.status }}" in
-            "success")
-              echo "Session completed successfully!"
-              echo "Backup stored: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-              ;;
-            "failure")
-              echo "Session completed with errors"
-              echo "Backup may be available at: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-              ;;
-            *)
-              echo "Session was cancelled or timed out"
-              echo "Backup status unknown"
-              ;;
-          esac
+          # Function to configure and optimize MariaDB
+          configure_mariadb() {
+            echo "Configuring MariaDB..."
+            
+            # Stop service for configuration
+            sudo systemctl stop mariadb 2>/dev/null || true
+            
+            # Initialize database if needed
+            if [[ ! -d "/var/lib/mysql/mysql" ]]; then
+              echo "Initializing MariaDB database..."
+              sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql
+            fi
+            
+            # Create optimized configuration
+            cat << 'MYSQL_CONFIG' | sudo tee /etc/mysql/mariadb.conf.d/99-vps-optimization.cnf
+[mysqld]
+# Basic settings
+bind-address = 127.0.0.1
+port = 3306
+socket = /var/run/mysqld/mysqld.sock
+
+# Performance optimization for small VPS
+max_connections = 50
+thread_cache_size = 8
+table_open_cache = 64
+query_cache_type = 1
+query_cache_size = 16M
+query_cache_limit = 2M
+
+# InnoDB settings
+innodb_buffer_pool_size = 128M
+innodb_log_file_size = 32M
+innodb_log_buffer_size = 8M
+innodb_flush_log_at_trx_commit = 2
+
+# MyISAM settings
+key_buffer_size = 32M
+myisam_sort_buffer_size = 8M
+
+# Logging
+log_error = /var/log/mysql/error.log
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 2
+
+# Security
+local_infile = 0
+skip_name_resolve = 1
+MYSQL_CONFIG
+            
+            # Fix permissions
+            sudo chown -R mysql:mysql /var/lib/mysql
+            sudo chmod 755 /var/lib/mysql
+            
+            # Start and enable service
+            sudo systemctl enable mariadb
+            if sudo systemctl start mariadb; then
+              echo "✅ MariaDB started successfully"
+              
+              # Wait for service to be ready
+              sleep 5
+              
+              # Secure installation
+              echo "Securing MariaDB installation..."
+              sudo mysql_secure_installation << EOF || true
+Y
+root
+root
+Y
+Y
+Y
+Y
+EOF
+              
+              # Create database user for applications
+              sudo mysql -u root -proot << 'SQL' || true
+CREATE USER IF NOT EXISTS 'vps_user'@'localhost' IDENTIFIED BY 'vps_password';
+GRANT ALL PRIVILEGES ON *.* TO 'vps_user'@'localhost' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+SQL
+              
+              echo "✅ MariaDB configured and secured"
+            else
+              echo "❌ MariaDB failed to start"
+              return 1
+            fi
+          }
           
-          # Final system state
-          echo ""
-          echo "Final System State:"
-          echo "Disk Usage: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
-          echo "Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "Uptime: $(uptime -p)"
-          echo "Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
+          # Function to configure Apache with optimizations
+          configure_apache() {
+            echo "Configuring Apache..."
+            
+            # Enable essential modules
+            APACHE_MODULES=("rewrite" "ssl" "headers" "deflate" "expires" "security2")
+            for module in "${APACHE_MODULES[@]}"; do
+              sudo a2enmod "$module" 2>/dev/null || echo "Module $module may not be available"
+            done
+            
+            # Create optimized Apache configuration
+            cat << 'APACHE_CONFIG' | sudo tee /etc/apache2/conf-available/vps-optimization.conf
+# VPS Optimization Configuration
+ServerTokens Prod
+ServerSignature Off
+
+# Performance settings
+Timeout 30
+KeepAlive On
+MaxKeepAliveRequests 100
+KeepAliveTimeout 5
+
+# Prefork MPM optimization for small VPS
+<IfModule mpm_prefork_module>
+    StartServers 2
+    MinSpareServers 2
+    MaxSpareServers 5
+    MaxRequestWorkers 50
+    MaxConnectionsPerChild 1000
+</IfModule>
+
+# Security headers
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options nosniff
+    Header always set X-Frame-Options SAMEORIGIN
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Content-Security-Policy "default-src 'self'"
+</IfModule>
+
+# Compression
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html
+    AddOutputFilterByType DEFLATE text/css
+    AddOutputFilterByType DEFLATE text/javascript
+    AddOutputFilterByType DEFLATE text/xml
+    AddOutputFilterByType DEFLATE text/plain
+    AddOutputFilterByType DEFLATE application/javascript
+    AddOutputFilterByType DEFLATE application/x-javascript
+    AddOutputFilterByType DEFLATE application/json
+    AddOutputFilterByType DEFLATE application/xml
+</IfModule>
+
+# Caching
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType image/jpg "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType image/gif "access plus 1 year"
+    ExpiresByType image/ico "access plus 1 year"
+    ExpiresByType image/icon "access plus 1 year"
+    ExpiresByType image/x-icon "access plus 1 year"
+</IfModule>
+
+# Hide sensitive information
+<FilesMatch "\.(htaccess|htpasswd|ini|log|sh|inc|bak)$">
+    Require all denied
+</FilesMatch>
+APACHE_CONFIG
+            
+            # Enable the configuration
+            sudo a2enconf vps-optimization
+            
+            # Create a default virtual host with PHP info
+            cat << 'VHOST_CONFIG' | sudo tee /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerAdmin admin@localhost
+    DocumentRoot /var/www/html
+    
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+    
+    <Directory /var/www/html>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    
+    # PHP configuration
+    <IfModule mod_php.c>
+        php_value upload_max_filesize 64M
+        php_value post_max_size 64M
+        php_value memory_limit 256M
+        php_value max_execution_time 300
+    </IfModule>
+</VirtualHost>
+VHOST_CONFIG
+            
+            # Create a simple index page with system info
+            cat << 'INDEX_HTML' | sudo tee /var/www/html/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub VPS - Online</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .status { color: #28a745; font-size: 24px; margin-bottom: 20px; }
+        .info { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0; }
+        .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 10px; border-radius: 5px; color: #856404; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 GitHub VPS Server</h1>
+        <div class="status">✅ Server is online and running!</div>
+        
+        <div class="info">
+            <h3>System Information</h3>
+            <p><strong>Server Time:</strong> <span id="serverTime"></span></p>
+            <p><strong>Uptime:</strong> Will be shown after system starts</p>
+            <p><strong>Web Server:</strong> Apache with PHP</p>
+            <p><strong>Database:</strong> MariaDB</p>
+        </div>
+        
+        <div class="warning">
+            <strong>⚠️ Security Notice:</strong> This is a temporary VPS instance. 
+            Change all default passwords and secure your applications before deploying to production.
+        </div>
+        
+        <div class="info">
+            <h3>Available Services</h3>
+            <ul>
+                <li><a href="/phpinfo.php">PHP Information</a></li>
+                <li><a href=":7800" target="_blank">Aapanel (if installed)</a></li>
+                <li>SSH Access via Tailscale or tmate</li>
+            </ul>
+        </div>
+    </div>
+    
+    <script>
+        document.getElementById('serverTime').textContent = new Date().toLocaleString();
+        setInterval(() => {
+            document.getElementById('serverTime').textContent = new Date().toLocaleString();
+        }, 1000);
+    </script>
+</body>
+</html>
+INDEX_HTML
+            
+            # Create PHP info page
+            cat << 'PHP_INFO' | sudo tee /var/www/html/phpinfo.php
+<?php
+// Security check - remove in production
+if ($_SERVER['SERVER_ADDR'] !== '127.0.0.1' && 
+    !in_array($_SERVER['REMOTE_ADDR'], ['127.0.0.1', '::1'])) {
+    if (!isset($_GET['allow'])) {
+        die('<h1>Access Restricted</h1><p>PHP info is only accessible from localhost or with ?allow parameter.</p>');
+    }
+}
+
+phpinfo();
+?>
+PHP_INFO
+            
+            # Set proper permissions
+            sudo chown -R www-data:www-data /var/www/html
+            sudo chmod -R 755 /var/www/html
+            
+            # Test Apache configuration
+            if sudo apache2ctl configtest; then
+              sudo systemctl enable apache2
+              sudo systemctl restart apache2
+              echo "✅ Apache configured and started"
+            else
+              echo "❌ Apache configuration test failed"
+              return 1
+            fi
+          }
           
-          echo "============================================="
-          echo "Thank you for using Spidey VPS!"
-          echo "============================================="
+          # Function to configure PHP optimizations
+          configure_php() {
+            echo "Configuring PHP..."
+            
+            # Find PHP version
+            PHP_VERSION=$(php -r "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;")
+            PHP_INI="/etc/php/$PHP_VERSION/apache2/php.ini"
+            
+            if [[ -f "$PHP_INI" ]]; then
+              # Backup original
+              sudo cp "$PHP_INI" "$PHP_INI.backup"
+              
+              # Apply optimizations
+              cat << PHP_OPTS | sudo tee -a "$PHP_INI"
+
+; VPS Optimizations
+memory_limit = 256
