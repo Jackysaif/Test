@@ -27,7 +27,6 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools, rclone, and tmate installed."
 
-      # Corrected Step: The indentation for the final EOF has been removed.
       - name: '🛠️ Configure Rclone (MEGA)'
         run: |
           echo "🔐 Creating rclone configuration file from GitHub secrets..."
