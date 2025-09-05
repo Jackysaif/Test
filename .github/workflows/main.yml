@@ -1,4 +1,4 @@
-name: 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
+# 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
 
 on:
   schedule:
@@ -15,11 +15,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
-      # ADDED STEP: This step uses your secret to configure rclone.
-      - name: '🛠️ Configure Rclone'
+      - name: '🛠️ Configure Rclone (MEGA)'
         run: |
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
+
+      # NEW STEP: Test the rclone configuration and log the result.
+      - name: '✅ Test Rclone Configuration'
+        run: |
+          echo "Testing connection to MEGA remote..."
+          if rclone ls ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
+            echo "✅ Rclone configuration succeeded. Connection established to MEGA."
+          else
+            echo "❌ Rclone configuration failed. Check your MEGA secrets and the rclone.conf format."
+            exit 1
+          fi
 
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
