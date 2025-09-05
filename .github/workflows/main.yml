@@ -15,22 +15,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
-      - name: '🛠️ Configure Rclone'
-        run: |
-          mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-
-      - name: '✅ Test Rclone Configuration'
-        run: |
-          echo "Testing connection to MEGA remote..."
-          # Use the full path to rclone to ensure it's found
-          if /usr/bin/rclone ls ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
-            echo "✅ Rclone configuration succeeded. Connection established to MEGA."
-          else
-            echo "❌ Rclone configuration failed. Check your MEGA secrets and the rclone.conf format."
-            exit 1
-          fi
-
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
@@ -43,16 +27,41 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools, rclone, and tmate installed."
 
+      # Corrected Step Position: Now, rclone is installed before we try to use it.
+      - name: '🛠️ Configure Rclone (MEGA)'
+        run: |
+          echo "🔐 Creating rclone configuration file from GitHub secrets..."
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
+          echo "✅ rclone configuration file created."
+
+      # NEW STEP: Test the rclone configuration and log the result.
+      - name: '✅ Test Rclone Configuration'
+        run: |
+          echo "Testing connection to MEGA remote..."
+          # The rclone command should now be found and work.
+          if rclone ls ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
+            echo "✅ Rclone configuration succeeded. Connection established to MEGA."
+          else
+            echo "❌ Rclone configuration failed. Check your MEGA secrets and the rclone.conf format."
+            exit 1
+          fi
+
       - name: '♻️ Restore from Backup OR Initialize'
         id: restore
         run: |
           echo "🔍 Checking for existing backup on MEGA..."
-          if /usr/bin/rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
+          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
-            /usr/bin/rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
+            rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
             sudo tar -xzpf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "🗑️ Deleting old backup from MEGA to prevent reuse on next run..."
-            /usr/bin/rclone delete ${MEGA_REMOTE}/${BACKUP_NAME}
+            rclone delete ${MEGA_REMOTE}/${BACKUP_NAME}
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
             echo "ℹ️ No backup found. This will be a fresh installation."
@@ -154,7 +163,7 @@ jobs:
         if: success() || failure()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
-          /usr/bin/rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
+          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
       - name: '📝 Final Status Report'
