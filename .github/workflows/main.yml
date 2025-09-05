@@ -1,5 +1,3 @@
-# 🕷️ Spidey Persistent VPS - Production Ready
-
 name: Persistent VPS
 
 on:
@@ -11,6 +9,11 @@ env:
   BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
   MEGA_REMOTE: mega:vps-backup
+  VPS_USER: jacky
+  VPS_PASSWORD: root
+  AAPANEL_USER: jacky
+  AAPANEL_PASSWORD: spidey123
+  SESSION_TIMEOUT: 330
 
 jobs:
   vps:
@@ -20,6 +23,23 @@ jobs:
     steps:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
+
+      - name: '🔍 Pre-flight System Check'
+        run: |
+          echo "🔧 Checking system resources..."
+          # Check disk space
+          if [ $(df / --output=pcent | tail -1 | tr -d '% ') -gt 90 ]; then
+            echo "❌ Critical: Low disk space"
+            exit 1
+          fi
+          
+          # Check memory
+          MEM_AVAILABLE=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+          if [ $MEM_AVAILABLE -lt 524288 ]; then  # 512MB
+            echo "⚠️ Warning: Low available memory"
+          fi
+          
+          echo "✅ System resources adequate for operation"
 
       - name: '⚡ Install System Tools, Rclone & tmate'
         run: |
@@ -33,7 +53,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             psmisc screen openssh-server mariadb-server apache2 \
             php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
-            curl wget unzip tar gzip htop nano vim git net-tools || {
+            curl wget unzip tar gzip htop nano vim git net-tools expect ufw fail2ban || {
               echo "❌ Package installation failed"
               exit 1
             }
@@ -133,7 +153,7 @@ jobs:
             exit 1
           fi
 
-      - name: '♻️ Restore from Backup OR Initialize - Enhanced'
+      - name: '♻️ Restore from Backup OR Initialize - Enhanced Aapanel Support'
         id: restore
         run: |
           set -euo pipefail
@@ -171,6 +191,28 @@ jobs:
               echo "⚠️ Some files failed to restore (normal for system files)"
             }
             
+            # Special handling for Aapanel restoration
+            echo "🔄 Special handling for Aapanel restoration..."
+            
+            # Reinstall Aapanel if /www directory exists but bt command is missing
+            if [ -d "/www" ] && ! command -v bt >/dev/null 2>&1; then
+              echo "⚠️ Aapanel detected but bt command missing - reinstalling..."
+              
+              # Download and install Aapanel
+              curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
+              curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
+                echo "❌ Failed to download Aapanel installer"
+                # Continue without Aapanel
+              }
+              
+              if [ -f "/tmp/install.sh" ]; then
+                chmod +x /tmp/install.sh
+                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
+                  echo "⚠️ Aapanel reinstallation failed, but continuing..."
+                }
+              fi
+            fi
+            
             # Cleanup
             rm -f "/tmp/restore/${BACKUP_NAME}"
             
@@ -190,6 +232,67 @@ jobs:
               /root/.ssh
             
             echo "is_new_install=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: '🔄 Repair Aapanel After Restoration'
+        if: steps.restore.outputs.is_new_install == 'false'
+        run: |
+          set -euo pipefail
+          echo "🔧 Repairing Aapanel after restoration..."
+          
+          # Check if Aapanel should exist
+          if [ -d "/www" ]; then
+            echo "📋 Aapanel installation detected, checking status..."
+            
+            # Repair bt command if missing
+            if ! command -v bt >/dev/null 2>&1; then
+              echo "⚠️ bt command missing - repairing..."
+              
+              # Try to restore bt command from common locations
+              if [ -f "/www/server/panel/bt" ]; then
+                sudo ln -sf /www/server/panel/bt /usr/bin/bt
+                echo "✅ bt command restored from panel directory"
+              else
+                # Reinstall Aapanel
+                echo "🔄 Reinstalling Aapanel..."
+                curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
+                curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
+                  echo "❌ Failed to download Aapanel installer"
+                  exit 0
+                }
+                
+                chmod +x /tmp/install.sh
+                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
+                  echo "⚠️ Aapanel reinstallation failed"
+                  exit 0
+                }
+              fi
+            fi
+            
+            # Fix permissions
+            echo "🔒 Fixing Aapanel permissions..."
+            sudo chown -R www:www /www/wwwroot 2>/dev/null || true
+            sudo chmod -R 755 /www/server 2>/dev/null || true
+            
+            # Restart Aapanel services
+            echo "🔄 Restarting Aapanel services..."
+            if command -v bt >/dev/null 2>&1; then
+              sudo bt restart 2>/dev/null || {
+                echo "⚠️ Aapanel restart failed, trying start instead..."
+                sudo bt start 2>/dev/null || true
+              }
+              
+              # Reset Aapanel credentials to known values
+              echo "🔑 Resetting Aapanel credentials..."
+              echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
+              echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
+              
+              echo "✅ Aapanel repair completed"
+            else
+              echo "⚠️ Aapanel detected but bt command still missing after repair attempt"
+            fi
+          else
+            echo "ℹ️ No Aapanel installation detected, skipping repair"
           fi
 
       - name: '👤 Initial Setup: User, Hostname & Services'
@@ -215,39 +318,95 @@ jobs:
           
           echo "✅ Basic system setup completed."
 
-      - name: '📦 Install Aapanel - Improved'
+      - name: '📦 Install Aapanel - Enhanced with Fallbacks'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
           set -euo pipefail
           echo "📥 Installing Aapanel control panel..."
           
-          # Download Aapanel installer
-          if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
-            chmod +x /tmp/install.sh
-            echo "✅ Aapanel installer downloaded"
-          else
-            echo "❌ Failed to download Aapanel installer"
-            echo "⚠️ Continuing without Aapanel..."
-            exit 0
-          fi
+          # Install required dependencies first
+          echo "🔧 Installing prerequisites..."
+          sudo apt-get install -y curl wget unzip tar expect || true
           
-          # Install Aapanel with timeout and auto-answers
-          echo "🔧 Installing Aapanel (this may take a few minutes)..."
-          timeout 300 bash -c 'yes "y" | sudo bash /tmp/install.sh' || {
-            echo "⚠️ Aapanel installation timed out or failed"
-            echo "⚠️ Continuing without Aapanel..."
-          }
+          # Method 1: Try official installation script with timeout
+          echo "🔄 Attempting official Aapanel installation..."
+          if timeout 300 bash -c '
+            if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
+              chmod +x /tmp/install.sh
+              # Use expect to handle interactive prompts
+              sudo expect -c "
+                set timeout 300
+                spawn bash /tmp/install.sh
+                expect \"Do you want to install aaPanel to the /www directory now?\\\\(y/n\\\\)\"
+                send \"y\\r\"
+                expect eof
+              "
+            else
+              echo "❌ Failed to download Aapanel installer"
+              exit 1
+            fi
+          '; then
+            echo "✅ Aapanel installation completed"
+          else
+            echo "⚠️ Official installation failed, trying alternative methods..."
+            
+            # Method 2: Try different download mirror
+            echo "🔄 Trying alternative download mirror..."
+            if curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh"; then
+              chmod +x /tmp/install.sh
+              echo "y" | sudo bash /tmp/install.sh
+              echo "✅ Aapanel installed via GitHub mirror"
+            else
+              echo "❌ All download methods failed"
+              echo "⚠️ Continuing without Aapanel..."
+            fi
+          fi
           
           # Verify installation
           if command -v bt >/dev/null 2>&1; then
             echo "✅ Aapanel installed successfully"
             sudo bt --version 2>/dev/null || true
+            
+            # Set Aapanel credentials
+            echo "🔐 Setting Aapanel credentials..."
+            echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
+            echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
           else
             echo "⚠️ Aapanel command 'bt' not found in PATH"
             echo "⚠️ Installation may have failed or be incomplete"
           fi
 
-      - name: '🚀 Start and Configure Services'
+      - name: '🔒 Security Hardening'
+        run: |
+          set -euo pipefail
+          echo "🔒 Applying security hardening..."
+          
+          # Secure SSH configuration
+          sudo sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+          
+          # Configure firewall (ufw)
+          sudo ufw allow ssh
+          sudo ufw allow http
+          sudo ufw allow https
+          sudo ufw allow 7800/tcp  # Aapanel
+          echo "y" | sudo ufw enable
+          
+          # Set up fail2ban for brute force protection
+          sudo systemctl enable fail2ban
+          sudo systemctl start fail2ban
+          
+          # Create SSH key for jacky user if it doesn't exist
+          if [ ! -f /home/jacky/.ssh/id_rsa ]; then
+            sudo -u jacky ssh-keygen -t rsa -b 4096 -f /home/jacky/.ssh/id_rsa -N "" -q
+            sudo -u jacky cat /home/jacky/.ssh/id_rsa.pub >> /home/jacky/.ssh/authorized_keys
+            sudo chmod 600 /home/jacky/.ssh/authorized_keys
+            echo "✅ SSH key generated for jacky user"
+          fi
+          
+          echo "✅ Security hardening completed"
+
+      - name: '🚀 Start and Configure Services - Enhanced Aapanel Support'
         run: |
           set -euo pipefail
           echo "🔄 Starting system services..."
@@ -277,12 +436,41 @@ jobs:
           sudo systemctl enable ssh
           sudo systemctl start ssh
           
-          # Start Aapanel if available
-          if command -v bt >/dev/null 2>&1; then
+          # Start Aapanel if available - with enhanced detection
+          if [ -d "/www" ] || command -v bt >/dev/null 2>&1; then
             echo "🎛️ Starting Aapanel..."
-            sudo bt start 2>/dev/null || {
-              echo "⚠️ Aapanel failed to start"
-            }
+            
+            # Check if panel service exists
+            if systemctl list-unit-files | grep -q "panel.service"; then
+              sudo systemctl enable panel 2>/dev/null || true
+              sudo systemctl start panel 2>/dev/null || true
+            fi
+            
+            # Use bt command if available
+            if command -v bt >/dev/null 2>&1; then
+              sudo bt start 2>/dev/null || {
+                echo "⚠️ Aapanel failed to start via bt command"
+                # Try alternative startup method
+                if [ -f "/www/server/panel/script/start" ]; then
+                  sudo bash /www/server/panel/script/start 2>/dev/null || true
+                fi
+              }
+            else
+              echo "⚠️ bt command missing, trying direct startup..."
+              if [ -f "/www/server/panel/script/start" ]; then
+                sudo bash /www/server/panel/script/start 2>/dev/null || true
+              fi
+            fi
+            
+            # Wait for panel to start
+            echo "⏳ Waiting for Aapanel to start..."
+            sleep 10
+            
+            # Check panel status
+            if command -v bt >/dev/null 2>&1; then
+              echo "📋 Aapanel status:"
+              sudo bt status 2>/dev/null || echo "⚠️ Could not get Aapanel status"
+            fi
           fi
           
           # Service status check
@@ -366,6 +554,24 @@ jobs:
           fi
           
           echo "================================================"
+
+      - name: '📊 Health Monitoring'
+        run: |
+          set -euo pipefail
+          echo "📈 Starting health monitoring..."
+          
+          # Simple health check script that runs in background
+          cat > /tmp/health_monitor.sh << 'EOF'
+          #!/bin/bash
+          while true; do
+            echo "$(date): CPU: $(top -bn1 | grep load | awk '{printf "%.2f", $(NF-2)}')%, Memory: $(free -m | awk '/Mem:/ {printf "%.1f%%", $3/$2*100}')" >> /tmp/health.log
+            sleep 300
+          done
+          EOF
+          chmod +x /tmp/health_monitor.sh
+          nohup /tmp/health_monitor.sh > /dev/null 2>&1 &
+          
+          echo "✅ Health monitoring started"
 
       - name: '⏳ Maintain VPS Session'
         run: |
@@ -452,6 +658,19 @@ jobs:
             fi
           else
             echo "❌ Backup creation failed"
+            exit 1
+          fi
+
+      - name: '✅ Verify Backup Integrity'
+        run: |
+          set -euo pipefail
+          echo "🔍 Verifying backup integrity..."
+          
+          # Test the backup we just created
+          if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
+            echo "✅ Local backup verification successful"
+          else
+            echo "❌ Local backup verification failed"
             exit 1
           fi
 
