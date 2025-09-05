@@ -1,9 +1,13 @@
 # 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
 
+name: Persistent VPS
+
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:      # Manual trigger
+  push:
+    branches: [ main ]    # Optional: trigger on push to main
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -13,157 +17,445 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350
+    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
+    
     steps:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
       - name: '⚡ Install System Tools, Rclone & tmate'
         run: |
+          set -euo pipefail  # Exit on error, undefined vars, pipe failures
           echo "🚀 Installing core system tools, rclone, and tmate..."
-          sudo apt-get update
-          sudo apt-get install -y psmisc screen openssh-server mariadb-server apache2 php php-mysql tmate
+          
+          # Update package lists
+          sudo apt-get update -qq
+          
+          # Install essential packages
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            psmisc \
+            screen \
+            openssh-server \
+            mariadb-server \
+            apache2 \
+            php \
+            php-mysql \
+            php-cli \
+            php-curl \
+            php-zip \
+            php-gd \
+            php-mbstring \
+            php-xml \
+            curl \
+            wget \
+            unzip \
+            tar \
+            gzip \
+            htop \
+            nano \
+            vim \
+            git
+          
+          # Install tmate
+          wget -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
+          sudo tar -xf /tmp/tmate.tar.xz -C /tmp/
+          sudo mv /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
+          sudo chmod +x /usr/local/bin/tmate
+          
+          # Install rclone
           curl -fsSL https://rclone.org/install.sh | sudo bash
-          sudo systemctl enable --now ssh
+          
+          # Enable and start SSH
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+          
           echo "✅ Core tools, rclone, and tmate installed."
 
       - name: '🛠️ Configure Rclone (MEGA)'
         run: |
+          set -euo pipefail
           echo "🔐 Creating rclone configuration file from GitHub secrets..."
+          
+          # Ensure rclone config directory exists
           mkdir -p ~/.config/rclone
+          
+          # Create rclone config from secrets
+          if [[ -z "${{ secrets.RCLONE_CONFIG }}" ]]; then
+            echo "❌ RCLONE_CONFIG secret is not set!"
+            exit 1
+          fi
+          
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
           echo "✅ rclone configuration file created."
 
       - name: '✅ Test Rclone Configuration'
         run: |
-          echo "Testing connection to MEGA remote..."
-          if rclone ls ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
+          set -euo pipefail
+          echo "🔍 Testing connection to MEGA remote..."
+          
+          # Test rclone connection with timeout
+          if timeout 30 rclone about ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
             echo "✅ Rclone configuration succeeded. Connection established to MEGA."
           else
             echo "❌ Rclone configuration failed. Check your MEGA secrets and the rclone.conf format."
+            echo "Available remotes:"
+            rclone listremotes || true
             exit 1
           fi
 
       - name: '♻️ Restore from Backup OR Initialize'
         id: restore
         run: |
+          set -euo pipefail
           echo "🔍 Checking for existing backup on MEGA..."
-          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
+          
+          # Check if backup exists with timeout
+          if timeout 60 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
-            rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
-            sudo tar -xzpf /tmp/${BACKUP_NAME} --absolute-names -C /
-            echo "🗑️ Deleting old backup from MEGA to prevent reuse on next run..."
-            rclone delete ${MEGA_REMOTE}/${BACKUP_NAME}
+            
+            # Download backup with progress and verification
+            mkdir -p /tmp/restore
+            if ! rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress; then
+              echo "❌ Failed to download backup"
+              exit 1
+            fi
+            
+            # Verify backup file exists and is not empty
+            if [[ ! -f "/tmp/restore/${BACKUP_NAME}" ]] || [[ ! -s "/tmp/restore/${BACKUP_NAME}" ]]; then
+              echo "❌ Downloaded backup file is missing or empty"
+              exit 1
+            fi
+            
+            # Test backup integrity before extraction
+            if ! tar -tzf "/tmp/restore/${BACKUP_NAME}" >/dev/null 2>&1; then
+              echo "❌ Backup file is corrupted"
+              exit 1
+            fi
+            
+            # Extract backup with error handling
+            echo "📦 Extracting backup..."
+            sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
+              echo "⚠️ Some files failed to restore (this is often normal)"
+            }
+            
+            # Clean up downloaded backup
+            rm -f "/tmp/restore/${BACKUP_NAME}"
+            
+            # Delete old backup from MEGA to prevent reuse
+            echo "🗑️ Cleaning up old backup from MEGA..."
+            rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
+            
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
             echo "ℹ️ No backup found. This will be a fresh installation."
-            sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
+            
+            # Create essential directories
+            sudo mkdir -p \
+              /home/jacky \
+              /opt \
+              /srv \
+              /var/www/html \
+              /var/lib/mysql \
+              /www/server \
+              /root/.ssh \
+              /home/jacky/.ssh
+            
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
       - name: '👤 Initial Setup: Create User, Set Hostname & Aapanel'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
+          set -euo pipefail
           echo "🚀 Performing first-time setup for a new VPS..."
-          sudo useradd -m -s /bin/bash jacky || true
+          
+          # Create user jacky if it doesn't exist
+          if ! id "jacky" &>/dev/null; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "✅ User 'jacky' created"
+          else
+            echo "ℹ️ User 'jacky' already exists"
+          fi
+          
+          # Set password and sudo privileges
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/jacky
+          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          
+          # Set hostname
           sudo hostnamectl set-hostname github-vps
-          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
+          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
+          
+          # Install Aapanel with error handling
+          echo "📥 Downloading and installing Aapanel..."
+          if curl -sSLo /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
+            chmod +x /tmp/install.sh
+            # Auto-answer installation prompts
+            (echo "y" | timeout 600 sudo bash /tmp/install.sh) || {
+              echo "⚠️ Aapanel installation may have encountered issues"
+            }
+          else
+            echo "❌ Failed to download Aapanel installer"
+          fi
+          
           echo "✅ Initial setup complete."
 
       - name: '🚀 Start System Services'
         run: |
-          set -e
-          echo "🔄 (Re)loading system services..."
+          set -euo pipefail
+          echo "🔄 Starting and configuring system services..."
+          
+          # Reload systemd
           sudo systemctl daemon-reload
-          sudo systemctl restart mariadb apache2 || true
-          sudo bt restart || true
-          echo "✅ Core services (MariaDB, Apache, Aapanel) are running."
+          
+          # Start and enable MariaDB
+          sudo systemctl enable mariadb
+          sudo systemctl start mariadb
+          echo "✅ MariaDB started"
+          
+          # Start and enable Apache
+          sudo systemctl enable apache2
+          sudo systemctl start apache2
+          echo "✅ Apache2 started"
+          
+          # Start SSH service
+          sudo systemctl enable ssh
+          sudo systemctl start ssh
+          echo "✅ SSH service started"
+          
+          # Start Aapanel if installed
+          if command -v bt &> /dev/null; then
+            sudo bt restart || echo "⚠️ Aapanel not found or failed to start"
+          fi
+          
+          # Verify services are running
+          echo "🔍 Service status check:"
+          sudo systemctl is-active mariadb apache2 ssh || true
+          
+          echo "✅ Core services configured."
 
       - name: '🔗 Configure Remote Access & Credentials'
         run: |
-          if [ "${{ steps.restore.outputs.is_new_install }}" == "true" ]; then
-            echo "🔐 Setting default Aapanel username and password..."
-            sleep 15
-            echo "jacky" | sudo bt 6
-            echo "spidey" | sudo bt 5
-            echo "✅ Aapanel username set to 'jacky' and password to 'spidey'."
+          set -euo pipefail
+          
+          # Configure Aapanel credentials if it's a new install
+          if [[ "${{ steps.restore.outputs.is_new_install }}" == "true" ]] && command -v bt &> /dev/null; then
+            echo "🔐 Setting Aapanel credentials..."
+            sleep 10
+            
+            # Set username and password
+            echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Failed to set Aapanel username"
+            echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Failed to set Aapanel password"
+            
+            # Get Aapanel info
+            sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
           fi
           
-          echo "🕸️ Installing and starting Tailscale..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
+          # Install and configure Tailscale
+          echo "🕸️ Installing Tailscale..."
+          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]]; then
+            echo "❌ TAILSCALE_AUTHKEY secret is not set!"
+            exit 1
+          fi
           
-          echo "💬 Starting tmate session for direct SSH access..."
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable tailscaled
+          sudo systemctl start tailscaled
+          
+          # Connect to Tailscale with retry logic
+          for i in {1..3}; do
+            if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset; then
+              echo "✅ Tailscale connected successfully"
+              break
+            else
+              echo "⚠️ Tailscale connection attempt $i failed, retrying..."
+              sleep 10
+            fi
+          done
+          
+          # Start tmate session
+          echo "💬 Starting tmate session for SSH access..."
+          tmate -S /tmp/tmate.sock new-session -d 'bash'
+          
+          # Wait for tmate to be ready with timeout
+          timeout 30 tmate -S /tmp/tmate.sock wait tmate-ready || {
+            echo "⚠️ tmate session may not be ready"
+          }
           
           echo "---"
           echo "✅ VPS IS READY FOR CONNECTION ✅"
           echo "---"
-          echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
-          echo "🔑 tmate SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          
+          # Get connection information
+          TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Not available")
+          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Not available")
+          
+          echo "🌐 Tailscale IP: $TAILSCALE_IP"
+          echo "🔑 tmate SSH: $TMATE_SSH"
+          echo "🖥️ Local SSH: ssh jacky@localhost (password: root)"
+          
+          if command -v bt &> /dev/null; then
+            PANEL_INFO=$(sudo bt default 2>/dev/null | grep -E "(Aapanel|External|username|password)" || echo "Aapanel info not available")
+            echo "🎛️ Aapanel: $PANEL_INFO"
+          fi
+          
           echo "---"
 
       - name: '⏳ Maintain VPS Session'
         run: |
-          echo "🖥️ VPS is now running. To stop gracefully and trigger a backup, run this command in the VPS: touch /tmp/stop_session"
+          set -euo pipefail
+          echo "🖥️ VPS is now running. To stop gracefully and trigger backup, create: touch /tmp/stop_session"
+          echo "⏰ Session will auto-stop in 5.5 hours to allow backup time."
+          
+          # Monitor for stop signal or timeout (330 minutes = 5.5 hours)
           for i in {1..330}; do
-            if [ -f /tmp/stop_session ]; then
-              echo "🛑 Stop signal detected. Proceeding to backup..."
+            if [[ -f /tmp/stop_session ]]; then
+              echo "🛑 Stop signal detected at minute $i. Proceeding to backup..."
               break
             fi
+            
+            # Show status every 30 minutes
+            if (( i % 30 == 0 )); then
+              echo "⏰ VPS running for $i minutes. Services status:"
+              sudo systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null || true
+            fi
+            
             sleep 60
           done
+          
+          echo "🏁 VPS session maintenance completed."
 
       - name: '📦 Create Final Backup'
-        if: success() || failure()
+        if: always()  # Run even if previous steps failed
         run: |
-          echo "📦 Creating final backup archive..."
-          sudo mkdir -p ${{ env.BACKUP_STORE }}
-          sudo tar -czpf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
+          set -euo pipefail
+          echo "📦 Creating comprehensive system backup..."
+          
+          # Create backup directory
+          sudo mkdir -p "${{ env.BACKUP_STORE }}"
+          
+          # Stop services gracefully before backup
+          echo "🛑 Stopping services for clean backup..."
+          sudo systemctl stop apache2 mariadb || true
+          sudo bt stop || true
+          
+          # Create backup with comprehensive file list
+          echo "📁 Creating backup archive..."
+          sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --ignore-failed-read \
+            --exclude='/proc/*' \
+            --exclude='/tmp/*' \
+            --exclude='/sys/*' \
+            --exclude='/dev/*' \
+            --exclude='/run/*' \
+            --exclude='/mnt/*' \
+            --exclude='/media/*' \
+            --exclude='/lost+found' \
             /etc/hostname \
             /etc/hosts \
-            /etc/systemd/system \
-            /var/lib/tailscale \
-            /opt \
-            /srv \
-            /var/www \
-            /etc/ssh \
-            /etc/apache2 \
-            /www/server \
-            /root \
-            /home/jacky \
-            /usr/lib/systemd/system \
-            /var/lib/mysql \
+            /etc/passwd \
+            /etc/group \
+            /etc/shadow \
             /etc/sudoers.d/ \
+            /etc/systemd/system/ \
+            /etc/ssh/ \
+            /etc/apache2/ \
+            /etc/mysql/ \
+            /var/lib/tailscale/ \
+            /var/lib/mysql/ \
+            /var/www/ \
+            /opt/ \
+            /srv/ \
+            /www/ \
+            /root/ \
+            /home/jacky/ \
             /usr/bin/bt \
-            || true
-          echo "✅ Final backup created."
+            /usr/local/bin/ \
+            2>/dev/null || {
+              echo "⚠️ Some files failed to backup (this is often normal for system files)"
+            }
+          
+          # Verify backup was created and is not empty
+          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]] && [[ -s "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
+            BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
+            echo "✅ Backup created successfully (Size: $BACKUP_SIZE)"
+            
+            # Test backup integrity
+            if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
+              echo "✅ Backup integrity verified"
+            else
+              echo "❌ Backup may be corrupted"
+              exit 1
+            fi
+          else
+            echo "❌ Failed to create backup or backup is empty"
+            exit 1
+          fi
 
       - name: '☁️ Upload Final Backup to MEGA'
-        if: success() || failure()
+        if: always()  # Run even if previous steps failed
         run: |
-          echo "🚀 Uploading final backup to MEGA..."
-          rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
-          echo "✅ Final backup uploaded successfully."
+          set -euo pipefail
+          echo "🚀 Uploading backup to MEGA cloud storage..."
+          
+          # Check if backup file exists
+          if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
+            echo "❌ Backup file not found, skipping upload"
+            exit 1
+          fi
+          
+          # Upload with retry logic and progress
+          for i in {1..3}; do
+            if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" --progress --transfers 1; then
+              echo "✅ Backup uploaded successfully on attempt $i"
+              
+              # Verify upload
+              if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
+                echo "✅ Backup upload verified"
+                break
+              else
+                echo "❌ Upload verification failed on attempt $i"
+              fi
+            else
+              echo "⚠️ Upload attempt $i failed"
+              if [[ $i -eq 3 ]]; then
+                echo "❌ All upload attempts failed"
+                exit 1
+              fi
+              sleep 30
+            fi
+          done
+          
+          # Clean up local backup
+          sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+          echo "🗑️ Local backup cleaned up"
           
       - name: '📝 Final Status Report'
-        if: always()
+        if: always()  # Always run this step
         run: |
-          echo "========================="
-          echo "  VPS Session Concluded  "
-          echo "========================="
-          echo "Final job status: ${{ job.status }}"
-          if [[ "${{ job.status }}" == "success" || "${{ job.status }}" == "failure" ]]; then
-            echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "============================================="
+          echo "       VPS SESSION CONCLUDED"
+          echo "============================================="
+          echo "🏷️ Job Status: ${{ job.status }}"
+          echo "⏰ Completed at: $(date)"
+          echo "🖥️ Hostname: $(hostname)"
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ Session completed successfully"
+            echo "💾 Backup location: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          elif [[ "${{ job.status }}" == "failure" ]]; then
+            echo "❌ Session completed with errors"
+            echo "💾 Backup may still be available at: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           else
-            echo "Job was cancelled. Backup steps were skipped."
+            echo "⏹️ Session was cancelled"
+            echo "💾 Backup upload was likely skipped"
           fi
-          echo "========================="
+          
+          # Final service status
+          echo "🔍 Final service status:"
+          sudo systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null || echo "Services stopped"
+          
+          echo "============================================="
