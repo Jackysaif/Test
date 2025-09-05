@@ -31,12 +31,7 @@ jobs:
         run: |
           echo "🔐 Creating rclone configuration file from GitHub secrets..."
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-[mega]
-type = mega
-user = ${{ secrets.MEGA_USER }}
-pass = ${{ secrets.MEGA_PASS }}
-EOF
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
           echo "✅ rclone configuration file created."
 
       - name: '✅ Test Rclone Configuration'
