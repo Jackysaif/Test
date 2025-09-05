@@ -27,24 +27,22 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools, rclone, and tmate installed."
 
-      # Corrected Step Position: Now, rclone is installed before we try to use it.
+      # Corrected Step: The indentation for the final EOF has been removed.
       - name: '🛠️ Configure Rclone (MEGA)'
         run: |
           echo "🔐 Creating rclone configuration file from GitHub secrets..."
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
-          [mega]
-          type = mega
-          user = ${{ secrets.MEGA_USER }}
-          pass = ${{ secrets.MEGA_PASS }}
-          EOF
+[mega]
+type = mega
+user = ${{ secrets.MEGA_USER }}
+pass = ${{ secrets.MEGA_PASS }}
+EOF
           echo "✅ rclone configuration file created."
 
-      # NEW STEP: Test the rclone configuration and log the result.
       - name: '✅ Test Rclone Configuration'
         run: |
           echo "Testing connection to MEGA remote..."
-          # The rclone command should now be found and work.
           if rclone ls ${{ env.MEGA_REMOTE }} > /dev/null 2>&1; then
             echo "✅ Rclone configuration succeeded. Connection established to MEGA."
           else
@@ -117,12 +115,9 @@ jobs:
           echo "🔑 tmate SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           echo "---"
 
-      # This step now actively waits for a shutdown signal, allowing for graceful termination.
       - name: '⏳ Maintain VPS Session'
         run: |
           echo "🖥️ VPS is now running. To stop gracefully and trigger a backup, run this command in the VPS: touch /tmp/stop_session"
-          # Loop for 330 minutes (5.5 hours), checking for the stop file every 60 seconds.
-          # This leaves enough time for backup before the 350-minute job timeout.
           for i in {1..330}; do
             if [ -f /tmp/stop_session ]; then
               echo "🛑 Stop signal detected. Proceeding to backup..."
@@ -131,7 +126,6 @@ jobs:
             sleep 60
           done
 
-      # The backup steps now run on success OR failure, but NOT on cancellation.
       - name: '📦 Create Final Backup'
         if: success() || failure()
         run: |
