@@ -233,9 +233,13 @@ jobs:
             exit 0
           fi
           
-          # Install Aapanel with timeout and auto-answers
+          # 💡 Stop Apache to prevent installation conflicts
+          echo "🛑 Stopping apache2 to prevent conflicts..."
+          sudo systemctl stop apache2
+          
+          # Install Aapanel, automatically answering "yes" to the prompt
           echo "🔧 Installing Aapanel (this may take a few minutes)..."
-          timeout 300 bash -c 'yes "y" | sudo bash /tmp/install.sh' || {
+          timeout 300 bash -c 'echo "yes" | sudo bash /tmp/install.sh' || {
             echo "⚠️ Aapanel installation timed out or failed"
             echo "⚠️ Continuing without Aapanel..."
           }
