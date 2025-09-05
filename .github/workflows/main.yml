@@ -1,32 +1,23 @@
-# 🕷️ Spidey Persistent VPS - Fully Corrected & Optimized Workflow
-# This workflow creates a temporary server environment in a GitHub Actions runner.
-# It uses a backup/restore mechanism with rclone and MEGA to persist data between sessions.
-# The session is kept alive for ~5.5 hours using a sleep command, allowing remote access via Tailscale and tmate.
+# 🕷️ Spidey Persistent VPS - Optimized with Graceful Shutdown
 
 on:
   schedule:
-    # Runs automatically every 6 hours. The job timeout is 350 minutes (5h 50m),
-    # so a new session starts shortly after the old one is terminated.
     - cron: '0 */6 * * *'
-  # Allows manual triggering of the workflow from the GitHub Actions UI.
   workflow_dispatch:
 
 env:
   BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
-  MEGA_REMOTE: mega:vps-backup # Rclone remote path (e.g., mega:my-vps-backups)
+  MEGA_REMOTE: mega:vps-backup
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    # Set a long timeout. Max is 360 minutes (6 hours). 350m leaves time for cleanup and backup upload.
     timeout-minutes: 350
     steps:
-      # Step 1: Check out the repository code (good practice)
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
-      # Step 2: Install all necessary software
       - name: '⚡ Install System Tools, Rclone & tmate'
         run: |
           echo "🚀 Installing core system tools, rclone, and tmate..."
@@ -36,7 +27,6 @@ jobs:
           sudo systemctl enable --now ssh
           echo "✅ Core tools, rclone, and tmate installed."
 
-      # Step 3: Restore the previous session from backup, or initialize for the first run
       - name: '♻️ Restore from Backup OR Initialize'
         id: restore
         run: |
@@ -44,55 +34,43 @@ jobs:
           if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
             echo "✅ Backup found. Restoring system state..."
             rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
-            # Extract the backup to the root directory, preserving absolute paths
             sudo tar -xzpf /tmp/${BACKUP_NAME} --absolute-names -C /
-            # After restore, delete the old backup from remote to avoid re-using it if this run fails
             echo "🗑️ Deleting old backup from MEGA to prevent reuse on next run..."
             rclone delete ${MEGA_REMOTE}/${BACKUP_NAME}
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
             echo "ℹ️ No backup found. This will be a fresh installation."
-            # Create essential directories that will be backed up later
             sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
-      # Step 4: Perform first-time setup ONLY if it's a new installation
       - name: '👤 Initial Setup: Create User, Set Hostname & Aapanel'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
           echo "🚀 Performing first-time setup for a new VPS..."
-          # Create user 'jacky'
           sudo useradd -m -s /bin/bash jacky || true
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) ALL" | sudo tee /etc/sudoers.d/jacky
-          # Set a persistent hostname
           sudo hostnamectl set-hostname github-vps
-          # Install Aapanel
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
           echo "✅ Initial setup complete."
 
-      # Step 5: Start all system services
       - name: '🚀 Start System Services'
         run: |
           set -e
           echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
-          # Always start critical services
           sudo systemctl restart mariadb apache2 || true
-          # Start aapanel service
           sudo bt restart || true
           echo "✅ Core services (MariaDB, Apache, Aapanel) are running."
 
-      # Step 6: Configure credentials and remote access
       - name: '🔗 Configure Remote Access & Credentials'
         run: |
-          # Set Aapanel username/password only on new installs to avoid overwriting user changes
           if [ "${{ steps.restore.outputs.is_new_install }}" == "true" ]; then
             echo "🔐 Setting default Aapanel username and password..."
-            sleep 15 # Give Aapanel a moment to initialize fully
+            sleep 15
             echo "jacky" | sudo bt 6
             echo "spidey" | sudo bt 5
             echo "✅ Aapanel username set to 'jacky' and password to 'spidey'."
@@ -114,21 +92,26 @@ jobs:
           echo "🔑 tmate SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           echo "---"
 
-      # Step 7: THE CORE OF THE "PERSISTENT" SESSION. Keep the job running.
-      - name: '⏳ Maintain Connection (5 hours 20 minutes)'
+      # This step now actively waits for a shutdown signal, allowing for graceful termination.
+      - name: '⏳ Maintain VPS Session'
         run: |
-          echo "Session is active. The job will sleep to keep the runner alive."
-          echo "The workflow will automatically create a final backup before it times out."
-          sleep 19200 # 320 minutes * 60 seconds = 19200 seconds
+          echo "🖥️ VPS is now running. To stop gracefully and trigger a backup, run this command in the VPS: touch /tmp/stop_session"
+          # Loop for 330 minutes (5.5 hours), checking for the stop file every 60 seconds.
+          # This leaves enough time for backup before the 350-minute job timeout.
+          for i in {1..330}; do
+            if [ -f /tmp/stop_session ]; then
+              echo "🛑 Stop signal detected. Proceeding to backup..."
+              break
+            fi
+            sleep 60
+          done
 
-      # Step 8: Create the final backup before the job ends. This runs even if other steps fail.
+      # The backup steps now run on success OR failure, but NOT on cancellation.
       - name: '📦 Create Final Backup'
-        if: always()
+        if: success() || failure()
         run: |
           echo "📦 Creating final backup archive..."
           sudo mkdir -p ${{ env.BACKUP_STORE }}
-          # The tar command backs up all critical system and data directories.
-          # The '|| true' ensures that the workflow doesn't fail if a file is unreadable.
           sudo tar -czpf ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} \
             --absolute-names \
             --ignore-failed-read \
@@ -149,17 +132,15 @@ jobs:
             /etc/sudoers.d/ \
             /usr/bin/bt \
             || true
-          echo "✅ Final backup created at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
+          echo "✅ Final backup created."
 
-      # Step 9: Upload the final backup to MEGA. This runs even if other steps fail.
       - name: '☁️ Upload Final Backup to MEGA'
-        if: always()
+        if: success() || failure()
         run: |
           echo "🚀 Uploading final backup to MEGA..."
           rclone copy ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }} ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Final backup uploaded successfully."
           
-      # Step 10: A concluding message.
       - name: '📝 Final Status Report'
         if: always()
         run: |
@@ -167,5 +148,9 @@ jobs:
           echo "  VPS Session Concluded  "
           echo "========================="
           echo "Final job status: ${{ job.status }}"
-          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          if [[ "${{ job.status }}" == "success" || "${{ job.status }}" == "failure" ]]; then
+            echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          else
+            echo "Job was cancelled. Backup steps were skipped."
+          fi
           echo "========================="
