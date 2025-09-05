@@ -1,758 +1,214 @@
-name: Persistent VPS
-
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
-  workflow_dispatch:      # Manual trigger
-
-env:
-  BACKUP_STORE: /var/backups/vps
-  BACKUP_NAME: vps-backup-latest.tar.gz
-  MEGA_REMOTE: mega:vps-backup
-  VPS_USER: jacky
-  VPS_PASSWORD: root
-  AAPANEL_USER: jacky
-  AAPANEL_PASSWORD: spidey123
-  SESSION_TIMEOUT: 330
-
-jobs:
-  vps:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
+- name: '♻️ Restore from Backup OR Initialize - Enhanced Aapanel Support'
+  id: restore
+  run: |
+    set -euo pipefail
+    echo "🔍 Checking for existing backup..."
     
-    steps:
-      - name: '🕸️ Checkout Code'
-        uses: actions/checkout@v4
+    # Check if backup exists with proper error handling
+    if timeout 90 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
+      echo "✅ Backup found! Downloading and restoring..."
+      
+      # Create restore directory
+      mkdir -p /tmp/restore
+      
+      # Download backup with progress
+      echo "📥 Downloading backup..."
+      if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
+        echo "✅ Backup downloaded successfully"
+      else
+        echo "❌ Failed to download backup"
+        exit 1
+      fi
+      
+      # Verify backup integrity
+      echo "🔍 Verifying backup integrity..."
+      if tar -tzf "/tmp/restore/${BACKUP_NAME}" >/dev/null 2>&1; then
+        echo "✅ Backup integrity verified"
+      else
+        echo "❌ Backup is corrupted"
+        rm -f "/tmp/restore/${BACKUP_NAME}"
+        exit 1
+      fi
+      
+      # Extract backup
+      echo "📦 Restoring system state..."
+      sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
+        echo "⚠️ Some files failed to restore (normal for system files)"
+      }
+      
+      # Special handling for Aapanel restoration
+      echo "🔄 Special handling for Aapanel restoration..."
+      
+      # Reinstall Aapanel if /www directory exists but bt command is missing
+      if [ -d "/www" ] && ! command -v bt >/dev/null 2>&1; then
+        echo "⚠️ Aapanel detected but bt command missing - reinstalling..."
+        
+        # Download and install Aapanel
+        curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
+        curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
+          echo "❌ Failed to download Aapanel installer"
+          # Continue without Aapanel
+        }
+        
+        if [ -f "/tmp/install.sh" ]; then
+          chmod +x /tmp/install.sh
+          echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
+            echo "⚠️ Aapanel reinstallation failed, but continuing..."
+          }
+        fi
+      fi
+      
+      # Cleanup
+      rm -f "/tmp/restore/${BACKUP_NAME}"
+      
+      # Remove old backup from MEGA
+      echo "🗑️ Cleaning old backup from MEGA..."
+      rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
+      
+      echo "is_new_install=false" >> $GITHUB_OUTPUT
+    else
+      echo "ℹ️ No backup found. Setting up fresh installation..."
+      
+      # Create essential directories
+      sudo mkdir -p \
+        /home/jacky/.ssh \
+        /opt /srv /var/www/html \
+        /www/server \
+        /root/.ssh
+      
+      echo "is_new_install=true" >> $GITHUB_OUTPUT
+    fi
 
-      - name: '🔍 Pre-flight System Check'
-        run: |
-          echo "🔧 Checking system resources..."
-          # Check disk space
-          if [ $(df / --output=pcent | tail -1 | tr -d '% ') -gt 90 ]; then
-            echo "❌ Critical: Low disk space"
-            exit 1
-          fi
-          
-          # Check memory
-          MEM_AVAILABLE=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
-          if [ $MEM_AVAILABLE -lt 524288 ]; then  # 512MB
-            echo "⚠️ Warning: Low available memory"
-          fi
-          
-          echo "✅ System resources adequate for operation"
-
-      - name: '⚡ Install System Tools, Rclone & tmate'
-        run: |
-          set -euo pipefail
-          echo "🚀 Installing core system tools, rclone, and tmate..."
-          
-          # Update package lists
-          sudo apt-get update -qq
-          
-          # Install essential packages with error handling
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            psmisc screen openssh-server mariadb-server apache2 \
-            php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
-            curl wget unzip tar gzip htop nano vim git net-tools expect ufw fail2ban || {
-              echo "❌ Package installation failed"
-              exit 1
-            }
-          
-          # Install tmate (GitHub runner compatible)
-          echo "📥 Installing tmate..."
-          sudo apt-get install -y tmate || {
-            # Fallback: manual installation
-            wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
-            tar -xf /tmp/tmate.tar.xz -C /tmp/
-            sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-            sudo chmod +x /usr/local/bin/tmate
+- name: '🔄 Repair Aapanel After Restoration'
+  if: steps.restore.outputs.is_new_install == 'false'
+  run: |
+    set -euo pipefail
+    echo "🔧 Repairing Aapanel after restoration..."
+    
+    # Check if Aapanel should exist
+    if [ -d "/www" ]; then
+      echo "📋 Aapanel installation detected, checking status..."
+      
+      # Repair bt command if missing
+      if ! command -v bt >/dev/null 2>&1; then
+        echo "⚠️ bt command missing - repairing..."
+        
+        # Try to restore bt command from common locations
+        if [ -f "/www/server/panel/bt" ]; then
+          sudo ln -sf /www/server/panel/bt /usr/bin/bt
+          echo "✅ bt command restored from panel directory"
+        else
+          # Reinstall Aapanel
+          echo "🔄 Reinstalling Aapanel..."
+          curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
+          curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
+            echo "❌ Failed to download Aapanel installer"
+            exit 0
           }
           
-          # Install rclone
-          echo "📥 Installing rclone..."
-          curl -fsSL https://rclone.org/install.sh | sudo bash || {
-            echo "❌ Rclone installation failed"
-            exit 1
+          chmod +x /tmp/install.sh
+          echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
+            echo "⚠️ Aapanel reinstallation failed"
+            exit 0
           }
-          
-          # Verify installations
-          echo "✅ Verifying installations..."
-          rclone version
-          tmate -V
-          php -v | head -1
-          
-          echo "✅ All tools installed successfully."
+        fi
+      fi
+      
+      # Fix permissions
+      echo "🔒 Fixing Aapanel permissions..."
+      sudo chown -R www:www /www/wwwroot 2>/dev/null || true
+      sudo chmod -R 755 /www/server 2>/dev/null || true
+      
+      # Restart Aapanel services
+      echo "🔄 Restarting Aapanel services..."
+      if command -v bt >/dev/null 2>&1; then
+        sudo bt restart 2>/dev/null || {
+          echo "⚠️ Aapanel restart failed, trying start instead..."
+          sudo bt start 2>/dev/null || true
+        }
+        
+        # Reset Aapanel credentials to known values
+        echo "🔑 Resetting Aapanel credentials..."
+        echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
+        echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
+        
+        echo "✅ Aapanel repair completed"
+      else
+        echo "⚠️ Aapanel detected but bt command still missing after repair attempt"
+      fi
+    else
+      echo "ℹ️ No Aapanel installation detected, skipping repair"
+    fi
 
-      - name: '🛠️ Configure Rclone (MEGA) - Enhanced'
-        run: |
-          set -euo pipefail
-          echo "🔐 Setting up rclone configuration..."
-          
-          # Check if RCLONE_CONFIG secret exists and is not empty
-          if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "❌ RCLONE_CONFIG secret is missing!"
-            echo "ℹ️  Please add your rclone.conf content to GitHub secrets."
-            echo "ℹ️  To generate: run 'rclone config' locally and copy ~/.config/rclone/rclone.conf"
-            exit 1
+- name: '🚀 Start and Configure Services - Enhanced Aapanel Support'
+  run: |
+    set -euo pipefail
+    echo "🔄 Starting system services..."
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    
+    # Configure and start MariaDB
+    echo "🗄️ Configuring MariaDB..."
+    sudo systemctl enable mariadb
+    sudo systemctl start mariadb || {
+      echo "⚠️ MariaDB failed to start, attempting to fix..."
+      sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
+      sudo systemctl start mariadb || true
+    }
+    
+    # Configure and start Apache
+    echo "🌐 Configuring Apache..."
+    sudo systemctl enable apache2
+    sudo systemctl start apache2 || {
+      echo "⚠️ Apache failed to start"
+      sudo systemctl status apache2 --no-pager || true
+    }
+    
+    # Configure SSH
+    echo "🔑 Configuring SSH..."
+    sudo systemctl enable ssh
+    sudo systemctl start ssh
+    
+    # Start Aapanel if available - with enhanced detection
+    if [ -d "/www" ] || command -v bt >/dev/null 2>&1; then
+      echo "🎛️ Starting Aapanel..."
+      
+      # Check if panel service exists
+      if systemctl list-unit-files | grep -q "panel.service"; then
+        sudo systemctl enable panel 2>/dev/null || true
+        sudo systemctl start panel 2>/dev/null || true
+      fi
+      
+      # Use bt command if available
+      if command -v bt >/dev/null 2>&1; then
+        sudo bt start 2>/dev/null || {
+          echo "⚠️ Aapanel failed to start via bt command"
+          # Try alternative startup method
+          if [ -f "/www/server/panel/script/start" ]; then
+            sudo bash /www/server/panel/script/start 2>/dev/null || true
           fi
-          
-          # Create rclone config directory
-          mkdir -p ~/.config/rclone
-          
-          # Write config with proper formatting
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
-          ${{ secrets.RCLONE_CONFIG }}
-          EOF
-          
-          # Set proper permissions
-          chmod 600 ~/.config/rclone/rclone.conf
-          
-          # Validate config format
-          if ! rclone config show >/dev/null 2>&1; then
-            echo "❌ Invalid rclone configuration format"
-            echo "Available sections:"
-            rclone config show 2>&1 || true
-            exit 1
-          fi
-          
-          echo "✅ Rclone configuration created successfully."
-
-      - name: '✅ Test Rclone Configuration - Robust'
-        run: |
-          set -euo pipefail
-          echo "🔍 Testing MEGA connection..."
-          
-          # List available remotes
-          echo "Available remotes:"
-          rclone listremotes
-          
-          # Test connection with multiple methods
-          if rclone listremotes | grep -q "mega:"; then
-            echo "✅ MEGA remote found in configuration"
-            
-            # Test with timeout and retries
-            for i in {1..3}; do
-              echo "🔄 Connection test attempt $i/3..."
-              if timeout 60 rclone about ${{ env.MEGA_REMOTE }} >/dev/null 2>&1; then
-                echo "✅ MEGA connection successful!"
-                break
-              elif [[ $i -eq 3 ]]; then
-                echo "❌ MEGA connection failed after 3 attempts"
-                echo "🔍 Debugging information:"
-                rclone about ${{ env.MEGA_REMOTE }} 2>&1 || true
-                exit 1
-              else
-                echo "⚠️ Attempt $i failed, retrying in 10 seconds..."
-                sleep 10
-              fi
-            done
-          else
-            echo "❌ MEGA remote not found in configuration"
-            echo "Available remotes:"
-            rclone listremotes
-            exit 1
-          fi
-
-      - name: '♻️ Restore from Backup OR Initialize - Enhanced Aapanel Support'
-        id: restore
-        run: |
-          set -euo pipefail
-          echo "🔍 Checking for existing backup..."
-          
-          # Check if backup exists with proper error handling
-          if timeout 90 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found! Downloading and restoring..."
-            
-            # Create restore directory
-            mkdir -p /tmp/restore
-            
-            # Download backup with progress
-            echo "📥 Downloading backup..."
-            if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
-              echo "✅ Backup downloaded successfully"
-            else
-              echo "❌ Failed to download backup"
-              exit 1
-            fi
-            
-            # Verify backup integrity
-            echo "🔍 Verifying backup integrity..."
-            if tar -tzf "/tmp/restore/${BACKUP_NAME}" >/dev/null 2>&1; then
-              echo "✅ Backup integrity verified"
-            else
-              echo "❌ Backup is corrupted"
-              rm -f "/tmp/restore/${BACKUP_NAME}"
-              exit 1
-            fi
-            
-            # Extract backup
-            echo "📦 Restoring system state..."
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
-              echo "⚠️ Some files failed to restore (normal for system files)"
-            }
-            
-            # Special handling for Aapanel restoration
-            echo "🔄 Special handling for Aapanel restoration..."
-            
-            # Reinstall Aapanel if /www directory exists but bt command is missing
-            if [ -d "/www" ] && ! command -v bt >/dev/null 2>&1; then
-              echo "⚠️ Aapanel detected but bt command missing - reinstalling..."
-              
-              # Download and install Aapanel
-              curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
-              curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
-                echo "❌ Failed to download Aapanel installer"
-                # Continue without Aapanel
-              }
-              
-              if [ -f "/tmp/install.sh" ]; then
-                chmod +x /tmp/install.sh
-                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
-                  echo "⚠️ Aapanel reinstallation failed, but continuing..."
-                }
-              fi
-            fi
-            
-            # Cleanup
-            rm -f "/tmp/restore/${BACKUP_NAME}"
-            
-            # Remove old backup from MEGA
-            echo "🗑️ Cleaning old backup from MEGA..."
-            rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
-            
-            echo "is_new_install=false" >> $GITHUB_OUTPUT
-          else
-            echo "ℹ️ No backup found. Setting up fresh installation..."
-            
-            # Create essential directories
-            sudo mkdir -p \
-              /home/jacky/.ssh \
-              /opt /srv /var/www/html \
-              /www/server \
-              /root/.ssh
-            
-            echo "is_new_install=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: '🔄 Repair Aapanel After Restoration'
-        if: steps.restore.outputs.is_new_install == 'false'
-        run: |
-          set -euo pipefail
-          echo "🔧 Repairing Aapanel after restoration..."
-          
-          # Check if Aapanel should exist
-          if [ -d "/www" ]; then
-            echo "📋 Aapanel installation detected, checking status..."
-            
-            # Repair bt command if missing
-            if ! command -v bt >/dev/null 2>&1; then
-              echo "⚠️ bt command missing - repairing..."
-              
-              # Try to restore bt command from common locations
-              if [ -f "/www/server/panel/bt" ]; then
-                sudo ln -sf /www/server/panel/bt /usr/bin/bt
-                echo "✅ bt command restored from panel directory"
-              else
-                # Reinstall Aapanel
-                echo "🔄 Reinstalling Aapanel..."
-                curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh" || \
-                curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh" || {
-                  echo "❌ Failed to download Aapanel installer"
-                  exit 0
-                }
-                
-                chmod +x /tmp/install.sh
-                echo "y" | sudo bash /tmp/install.sh 2>/dev/null || {
-                  echo "⚠️ Aapanel reinstallation failed"
-                  exit 0
-                }
-              fi
-            fi
-            
-            # Fix permissions
-            echo "🔒 Fixing Aapanel permissions..."
-            sudo chown -R www:www /www/wwwroot 2>/dev/null || true
-            sudo chmod -R 755 /www/server 2>/dev/null || true
-            
-            # Restart Aapanel services
-            echo "🔄 Restarting Aapanel services..."
-            if command -v bt >/dev/null 2>&1; then
-              sudo bt restart 2>/dev/null || {
-                echo "⚠️ Aapanel restart failed, trying start instead..."
-                sudo bt start 2>/dev/null || true
-              }
-              
-              # Reset Aapanel credentials to known values
-              echo "🔑 Resetting Aapanel credentials..."
-              echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
-              echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
-              
-              echo "✅ Aapanel repair completed"
-            else
-              echo "⚠️ Aapanel detected but bt command still missing after repair attempt"
-            fi
-          else
-            echo "ℹ️ No Aapanel installation detected, skipping repair"
-          fi
-
-      - name: '👤 Initial Setup: User, Hostname & Services'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "🚀 Setting up fresh VPS environment..."
-          
-          # Create user jacky
-          if ! id "jacky" &>/dev/null; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "✅ User 'jacky' created"
-          fi
-          
-          # Set password and sudo privileges
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          
-          # Set hostname
-          sudo hostnamectl set-hostname github-vps
-          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-          
-          echo "✅ Basic system setup completed."
-
-      - name: '📦 Install Aapanel - Enhanced with Fallbacks'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "📥 Installing Aapanel control panel..."
-          
-          # Install required dependencies first
-          echo "🔧 Installing prerequisites..."
-          sudo apt-get install -y curl wget unzip tar expect || true
-          
-          # Method 1: Try official installation script with timeout
-          echo "🔄 Attempting official Aapanel installation..."
-          if timeout 300 bash -c '
-            if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
-              chmod +x /tmp/install.sh
-              # Use expect to handle interactive prompts
-              sudo expect -c "
-                set timeout 300
-                spawn bash /tmp/install.sh
-                expect \"Do you want to install aaPanel to the /www directory now?\\\\(y/n\\\\)\"
-                send \"y\\r\"
-                expect eof
-              "
-            else
-              echo "❌ Failed to download Aapanel installer"
-              exit 1
-            fi
-          '; then
-            echo "✅ Aapanel installation completed"
-          else
-            echo "⚠️ Official installation failed, trying alternative methods..."
-            
-            # Method 2: Try different download mirror
-            echo "🔄 Trying alternative download mirror..."
-            if curl -fsSL -o /tmp/install.sh "https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install.sh"; then
-              chmod +x /tmp/install.sh
-              echo "y" | sudo bash /tmp/install.sh
-              echo "✅ Aapanel installed via GitHub mirror"
-            else
-              echo "❌ All download methods failed"
-              echo "⚠️ Continuing without Aapanel..."
-            fi
-          fi
-          
-          # Verify installation
-          if command -v bt >/dev/null 2>&1; then
-            echo "✅ Aapanel installed successfully"
-            sudo bt --version 2>/dev/null || true
-            
-            # Set Aapanel credentials
-            echo "🔐 Setting Aapanel credentials..."
-            echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
-            echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
-          else
-            echo "⚠️ Aapanel command 'bt' not found in PATH"
-            echo "⚠️ Installation may have failed or be incomplete"
-          fi
-
-      - name: '🔒 Security Hardening'
-        run: |
-          set -euo pipefail
-          echo "🔒 Applying security hardening..."
-          
-          # Secure SSH configuration
-          sudo sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-          
-          # Configure firewall (ufw)
-          sudo ufw allow ssh
-          sudo ufw allow http
-          sudo ufw allow https
-          sudo ufw allow 7800/tcp  # Aapanel
-          echo "y" | sudo ufw enable
-          
-          # Set up fail2ban for brute force protection
-          sudo systemctl enable fail2ban
-          sudo systemctl start fail2ban
-          
-          # Create SSH key for jacky user if it doesn't exist
-          if [ ! -f /home/jacky/.ssh/id_rsa ]; then
-            sudo -u jacky ssh-keygen -t rsa -b 4096 -f /home/jacky/.ssh/id_rsa -N "" -q
-            sudo -u jacky cat /home/jacky/.ssh/id_rsa.pub >> /home/jacky/.ssh/authorized_keys
-            sudo chmod 600 /home/jacky/.ssh/authorized_keys
-            echo "✅ SSH key generated for jacky user"
-          fi
-          
-          echo "✅ Security hardening completed"
-
-      - name: '🚀 Start and Configure Services - Enhanced Aapanel Support'
-        run: |
-          set -euo pipefail
-          echo "🔄 Starting system services..."
-          
-          # Reload systemd
-          sudo systemctl daemon-reload
-          
-          # Configure and start MariaDB
-          echo "🗄️ Configuring MariaDB..."
-          sudo systemctl enable mariadb
-          sudo systemctl start mariadb || {
-            echo "⚠️ MariaDB failed to start, attempting to fix..."
-            sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
-            sudo systemctl start mariadb || true
-          }
-          
-          # Configure and start Apache
-          echo "🌐 Configuring Apache..."
-          sudo systemctl enable apache2
-          sudo systemctl start apache2 || {
-            echo "⚠️ Apache failed to start"
-            sudo systemctl status apache2 --no-pager || true
-          }
-          
-          # Configure SSH
-          echo "🔑 Configuring SSH..."
-          sudo systemctl enable ssh
-          sudo systemctl start ssh
-          
-          # Start Aapanel if available - with enhanced detection
-          if [ -d "/www" ] || command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Starting Aapanel..."
-            
-            # Check if panel service exists
-            if systemctl list-unit-files | grep -q "panel.service"; then
-              sudo systemctl enable panel 2>/dev/null || true
-              sudo systemctl start panel 2>/dev/null || true
-            fi
-            
-            # Use bt command if available
-            if command -v bt >/dev/null 2>&1; then
-              sudo bt start 2>/dev/null || {
-                echo "⚠️ Aapanel failed to start via bt command"
-                # Try alternative startup method
-                if [ -f "/www/server/panel/script/start" ]; then
-                  sudo bash /www/server/panel/script/start 2>/dev/null || true
-                fi
-              }
-            else
-              echo "⚠️ bt command missing, trying direct startup..."
-              if [ -f "/www/server/panel/script/start" ]; then
-                sudo bash /www/server/panel/script/start 2>/dev/null || true
-              fi
-            fi
-            
-            # Wait for panel to start
-            echo "⏳ Waiting for Aapanel to start..."
-            sleep 10
-            
-            # Check panel status
-            if command -v bt >/dev/null 2>&1; then
-              echo "📋 Aapanel status:"
-              sudo bt status 2>/dev/null || echo "⚠️ Could not get Aapanel status"
-            fi
-          fi
-          
-          # Service status check
-          echo "📊 Service Status:"
-          systemctl is-active mariadb apache2 ssh || true
-          
-          echo "✅ Services configured and started."
-
-      - name: '🔗 Configure Remote Access'
-        run: |
-          set -euo pipefail
-          
-          # Configure Aapanel if available and new install
-          if [[ "${{ steps.restore.outputs.is_new_install }}" == "true" ]] && command -v bt >/dev/null 2>&1; then
-            echo "🔐 Configuring Aapanel credentials..."
-            sleep 5
-            
-            # Set Aapanel credentials with error handling
-            echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
-            echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
-            
-            # Get panel information
-            echo "📋 Aapanel Information:"
-            sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
-          fi
-          
-          # Install and configure Tailscale
-          echo "🕸️ Setting up Tailscale VPN..."
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "❌ TAILSCALE_AUTHKEY secret is missing!"
-            echo "ℹ️ Please add your Tailscale auth key to GitHub secrets."
-            echo "ℹ️ Get it from: https://login.tailscale.com/admin/settings/keys"
-            exit 1
-          fi
-          
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable tailscaled
-          sudo systemctl start tailscaled
-          
-          # Connect with retry logic
-          for i in {1..3}; do
-            if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes; then
-              echo "✅ Tailscale connected on attempt $i"
-              break
-            else
-              echo "⚠️ Tailscale connection attempt $i failed"
-              if [[ $i -eq 3 ]]; then
-                echo "❌ Tailscale setup failed"
-                exit 1
-              fi
-              sleep 15
-            fi
-          done
-          
-          # Start tmate session
-          echo "💬 Starting tmate for SSH access..."
-          tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready - Welcome to GitHub VPS!"; bash'
-          
-          # Wait for tmate with timeout
-          timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || {
-            echo "⚠️ tmate session startup timeout"
-          }
-          
-          echo "================================================"
-          echo "🎉 VPS IS READY FOR CONNECTION! 🎉"
-          echo "================================================"
-          
-          # Get connection details
-          TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Failed to get IP")
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Failed to get tmate info")
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "Not available")
-          
-          echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          echo "🔑 SSH Access: $TMATE_SSH"
-          echo "🌍 Web Terminal: $TMATE_WEB"
-          echo "👤 Local User: ssh jacky@localhost (password: root)"
-          
-          if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (jacky/spidey123)"
-          fi
-          
-          echo "================================================"
-
-      - name: '📊 Health Monitoring'
-        run: |
-          set -euo pipefail
-          echo "📈 Starting health monitoring..."
-          
-          # Simple health check script that runs in background
-          cat > /tmp/health_monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            echo "$(date): CPU: $(top -bn1 | grep load | awk '{printf "%.2f", $(NF-2)}')%, Memory: $(free -m | awk '/Mem:/ {printf "%.1f%%", $3/$2*100}')" >> /tmp/health.log
-            sleep 300
-          done
-          EOF
-          chmod +x /tmp/health_monitor.sh
-          nohup /tmp/health_monitor.sh > /dev/null 2>&1 &
-          
-          echo "✅ Health monitoring started"
-
-      - name: '⏳ Maintain VPS Session'
-        run: |
-          set -euo pipefail
-          echo "🖥️ VPS session is running!"
-          echo "📝 To stop gracefully: touch /tmp/stop_session"
-          echo "⏰ Auto-stop in 5.5 hours for backup"
-          
-          # Main monitoring loop
-          for minute in {1..330}; do
-            # Check for stop signal
-            if [[ -f /tmp/stop_session ]]; then
-              echo "🛑 Stop signal detected at minute $minute"
-              break
-            fi
-            
-            # Status update every 30 minutes
-            if (( minute % 30 == 0 )); then
-              echo "⏰ Runtime: $minute minutes"
-              echo "📊 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ')"
-              
-              # Connection info reminder
-              if (( minute % 60 == 0 )); then
-                echo "🔗 Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'N/A')"
-              fi
-            fi
-            
-            sleep 60
-          done
-          
-          echo "🏁 VPS session maintenance completed at minute $minute"
-
-      - name: '📦 Create System Backup'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "📦 Creating comprehensive backup..."
-          
-          # Create backup directory
-          sudo mkdir -p "${{ env.BACKUP_STORE }}"
-          
-          # Stop services gracefully
-          echo "🛑 Stopping services for clean backup..."
-          sudo systemctl stop apache2 mariadb 2>/dev/null || true
-          if command -v bt >/dev/null 2>&1; then
-            sudo bt stop 2>/dev/null || true
-          fi
-          
-          # Wait for services to stop
-          sleep 5
-          
-          # Create comprehensive backup
-          echo "📁 Creating backup archive..."
-          sudo tar -czf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
-            --absolute-names \
-            --ignore-failed-read \
-            --warning=no-file-ignored \
-            --exclude='/proc/*' --exclude='/tmp/*' --exclude='/sys/*' \
-            --exclude='/dev/*' --exclude='/run/*' --exclude='/mnt/*' \
-            --exclude='/media/*' --exclude='/lost+found' \
-            --exclude='*.log' --exclude='*.pid' \
-            /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
-            /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
-            /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
-            /var/lib/mysql/ /var/www/ /opt/ /srv/ /www/ \
-            /root/ /home/jacky/ \
-            $(command -v bt >/dev/null && echo "/usr/bin/bt" || echo "") \
-            /usr/local/bin/ \
-            2>/dev/null || {
-              echo "⚠️ Some files couldn't be backed up (normal)"
-            }
-          
-          # Verify backup
-          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
-            echo "✅ Backup created: $BACKUP_SIZE"
-            
-            # Test integrity
-            if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-              echo "✅ Backup integrity verified"
-            else
-              echo "❌ Backup integrity check failed"
-              exit 1
-            fi
-          else
-            echo "❌ Backup creation failed"
-            exit 1
-          fi
-
-      - name: '✅ Verify Backup Integrity'
-        run: |
-          set -euo pipefail
-          echo "🔍 Verifying backup integrity..."
-          
-          # Test the backup we just created
-          if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-            echo "✅ Local backup verification successful"
-          else
-            echo "❌ Local backup verification failed"
-            exit 1
-          fi
-
-      - name: '☁️ Upload Backup to MEGA'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "🚀 Uploading backup to MEGA..."
-          
-          # Verify backup exists
-          if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            echo "❌ No backup file found to upload"
-            exit 1
-          fi
-          
-          # Upload with retry mechanism
-          for attempt in {1..5}; do
-            echo "📤 Upload attempt $attempt/5..."
-            
-            if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" \
-               --progress --transfers 1 --retries 3 --low-level-retries 3; then
-              
-              echo "✅ Upload successful on attempt $attempt"
-              
-              # Verify upload
-              if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-                echo "✅ Upload verified on MEGA"
-                break
-              else
-                echo "❌ Upload verification failed"
-              fi
-            else
-              echo "❌ Upload attempt $attempt failed"
-              
-              if [[ $attempt -eq 5 ]]; then
-                echo "❌ All upload attempts exhausted"
-                exit 1
-              fi
-              
-              echo "⏳ Waiting 30 seconds before retry..."
-              sleep 30
-            fi
-          done
-          
-          # Cleanup local backup
-          sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
-          echo "🗑️ Local backup cleaned up"
-
-      - name: '📋 Final Status Report'
-        if: always()
-        run: |
-          echo "============================================="
-          echo "         🕷️ VPS SESSION COMPLETE 🕷️"
-          echo "============================================="
-          echo "📅 Completed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "🏷️ Status: ${{ job.status }}"
-          echo "🖥️ Hostname: $(hostname)"
-          echo "🌍 Runner: $(whoami)@$(hostname)"
-          
-          case "${{ job.status }}" in
-            "success")
-              echo "✅ Session completed successfully!"
-              echo "💾 Backup stored: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-              ;;
-            "failure")
-              echo "❌ Session completed with errors"
-              echo "💾 Backup may be available at: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
-              ;;
-            *)
-              echo "⏹️ Session was cancelled or timed out"
-              echo "💾 Backup status unknown"
-              ;;
-          esac
-          
-          # Final system state
-          echo ""
-          echo "📊 Final System State:"
-          echo "💿 Disk Usage: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
-          echo "🧠 Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "⏱️ Uptime: $(uptime -p)"
-          echo "🔧 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
-          
-          echo "============================================="
-          echo "Thank you for using Spidey VPS! 🕸️"
-          echo "============================================="
+        }
+      else
+        echo "⚠️ bt command missing, trying direct startup..."
+        if [ -f "/www/server/panel/script/start" ]; then
+          sudo bash /www/server/panel/script/start 2>/dev/null || true
+        fi
+      fi
+      
+      # Wait for panel to start
+      echo "⏳ Waiting for Aapanel to start..."
+      sleep 10
+      
+      # Check panel status
+      if command -v bt >/dev/null 2>&1; then
+        echo "📋 Aapanel status:"
+        sudo bt status 2>/dev/null || echo "⚠️ Could not get Aapanel status"
+      fi
+    fi
+    
+    # Service status check
+    echo "📊 Service Status:"
+    systemctl is-active mariadb apache2 ssh || true
+    
+    echo "✅ Services configured and started."
