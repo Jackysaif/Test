@@ -21,6 +21,28 @@ jobs:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
+      - name: '👤 Initial Setup: User, Hostname & Services'
+        run: |
+          set -euo pipefail
+          echo "🚀 Setting up fresh VPS environment..."
+          
+          # Create user jacky
+          if ! id "jacky" &>/dev/null; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "✅ User 'jacky' created"
+          fi
+          
+          # Set password and sudo privileges
+          echo "jacky:root" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          
+          # Set hostname
+          sudo hostnamectl set-hostname github-vps
+          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
+          
+          echo "✅ Basic system setup completed."
+
       - name: '⚡ Install System Tools, Rclone & tmate'
         run: |
           set -euo pipefail
@@ -176,6 +198,11 @@ jobs:
             # Cleanup
             rm -f "/tmp/restore/${BACKUP_NAME}"
             
+            # Restore MySQL data permissions
+            echo "🔐 Setting permissions for restored MySQL data..."
+            sudo chown -R mysql:mysql /var/lib/mysql
+            sudo chmod -R 700 /var/lib/mysql
+            
             # Remove old backup from MEGA
             echo "️ Cleaning old backup from MEGA..."
             rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
@@ -227,29 +254,6 @@ jobs:
           fi
 
 
-      - name: '👤 Initial Setup: User, Hostname & Services'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "🚀 Setting up fresh VPS environment..."
-          
-          # Create user jacky
-          if ! id "jacky" &>/dev/null; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "✅ User 'jacky' created"
-          fi
-          
-          # Set password and sudo privileges
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          
-          # Set hostname
-          sudo hostnamectl set-hostname github-vps
-          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-          
-          echo "✅ Basic system setup completed."
-
       - name: '📦 Install Aapanel - Improved'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
@@ -287,6 +291,15 @@ jobs:
             echo "⚠️ Installation may have failed or be incomplete"
           fi
 
+      - name: '🔧 Unmask MariaDB Service'
+        run: |
+          set -euo pipefail
+          echo "Attempting to unmask mariadb.service..."
+          sudo systemctl unmask mariadb.service || {
+            echo "⚠️ MariaDB service is already unmasked or an error occurred. Continuing..."
+          }
+          sudo systemctl daemon-reload
+          echo "✅ MariaDB service unmasked and systemd reloaded."
 
       - name: '🚀 Start and Configure Services'
         run: |
@@ -332,8 +345,8 @@ jobs:
           
           echo "✅ Services configured and started."
 
-          - name: '🔗 Configure Remote Access'
-          run: |
+      - name: '🔗 Configure Remote Access'
+        run: |
           set -euo pipefail
           
           # The 'if' condition below is now simplified.
