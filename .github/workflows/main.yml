@@ -332,20 +332,24 @@ jobs:
           
           echo "✅ Services configured and started."
 
-      - name: '🔗 Configure Remote Access'
-        run: |
+          - name: '🔗 Configure Remote Access'
+          run: |
           set -euo pipefail
           
-          # Configure Aapanel if available and new install
-          if [[ "${{ steps.restore.outputs.is_new_install }}" == "true" ]] && command -v bt >/dev/null 2>&1; then
+          # The 'if' condition below is now simplified.
+          # It no longer checks for 'is_new_install' because we want to set credentials
+          # on BOTH new installs AND restores.
+          if command -v bt >/dev/null 2>&1; then
             echo "🔐 Configuring Aapanel credentials..."
-            sleep 5
+            sleep 5 # Give the panel a moment to fully initialize
             
-            # Set Aapanel credentials with error handling
-            echo "jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
-            echo "spidey123" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
+            # Set Aapanel credentials using the 'bt' command
+            # bt 6 => Change username
+            # bt 5 => Change password
+            echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
+            echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
             
-            # Get panel information
+            # Get panel information to display in logs
             echo "📋 Aapanel Information:"
             sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
           fi
@@ -403,10 +407,11 @@ jobs:
           echo "👤 Local User: ssh jacky@localhost (password: root)"
           
           if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (jacky/spidey123)"
+            echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
           fi
           
           echo "================================================"
+
 
       - name: '⏳ Maintain VPS Session'
         run: |
