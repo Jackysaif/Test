@@ -1,6 +1,4 @@
-# 🕷️ Spidey Persistent VPS - Production Ready
-
-name: Persistent VPS
+name:  🕷️ Spidey Persistent VPS - Production Ready
 
 on:
   schedule:
