@@ -234,8 +234,7 @@ jobs:
           fi
 
 
-      - name: '📦 Install Aapanel - Improved'
-        if: steps.restore.outputs.is_new_install == 'true'
+      - name: '📦 Install Aapanel 
         run: |
           set -euo pipefail
           echo "📥 Installing Aapanel control panel..."
