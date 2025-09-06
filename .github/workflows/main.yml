@@ -189,7 +189,11 @@ jobs:
               exit 1
             fi
             
-            # Extract backup
+            # Stop MariaDB service before restoring data
+            echo "🛑 Stopping MariaDB for data restoration..."
+            sudo systemctl stop mariadb || true
+            
+            # Restore backup
             echo " Restoring system state..."
             sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
               echo "⚠️ Some files failed to restore (normal for system files)"
@@ -198,10 +202,17 @@ jobs:
             # Cleanup
             rm -f "/tmp/restore/${BACKUP_NAME}"
             
-            # Restore MySQL data permissions
+            # Set permissions for restored MySQL data
             echo "🔐 Setting permissions for restored MySQL data..."
             sudo chown -R mysql:mysql /var/lib/mysql
             sudo chmod -R 700 /var/lib/mysql
+            
+            # Re-initialize the MariaDB system tables if they don't exist
+            # This is a safe guard in case the /var/lib/mysql was empty
+            if [ ! "$(ls -A /var/lib/mysql)" ]; then
+              echo "ℹ️ MySQL data directory is empty, initializing..."
+              sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
+            fi
             
             # Remove old backup from MEGA
             echo "️ Cleaning old backup from MEGA..."
@@ -308,6 +319,10 @@ jobs:
           
           # Reload systemd
           sudo systemctl daemon-reload
+          
+          # Configure MariaDB to listen on all interfaces
+          echo "🌐 Configuring MariaDB to allow external connections..."
+          sudo sed -i 's/^bind-address/#bind-address/' /etc/mysql/mariadb.conf.d/50-server.cnf || true
           
           # Configure and start MariaDB
           echo "🗄️ Configuring MariaDB..."
