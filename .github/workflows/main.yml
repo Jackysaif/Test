@@ -220,37 +220,6 @@ jobs:
             
             echo "is_new_install=false" >> $GITHUB_OUTPUT
             
-            # Reinstall Aapanel after restore
-            echo " Reinstalling Aapanel control panel..."
-            if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
-              chmod +x /tmp/install.sh
-              echo "✅ Aapanel installer downloaded"
-            else
-              echo "❌ Failed to download Aapanel installer"
-              echo "⚠️ Continuing without Aapanel..."
-              exit 0
-            fi
-            
-            # Stop Apache to prevent installation conflicts
-            echo " Stopping apache2 to prevent conflicts..."
-            sudo systemctl stop apache2
-            
-            # Automate sending 'y' and then 'yes' to the installer prompts
-            echo " Installing Aapanel (this may take up to 15 minutes)..."
-            timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || {
-              echo "⚠️ Aapanel installation timed out or failed"
-              echo "⚠️ Continuing without Aapanel..."
-            }
-            
-            # Verify installation
-            if command -v bt >/dev/null 2>&1; then
-              echo "✅ Aapanel installed successfully"
-              sudo bt --version 2>/dev/null || true
-            else
-              echo "⚠️ Aapanel command 'bt' not found in PATH"
-              echo "⚠️ Installation may have failed or be incomplete"
-            fi
-            
           else
             echo "ℹ️ No backup found. Setting up fresh installation..."
             
@@ -331,6 +300,19 @@ jobs:
             echo "⚠️ MariaDB failed to start, attempting to fix..."
             sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
             sudo systemctl start mariadb || true
+          }
+          
+          # Create a remote access MySQL user
+          echo "🔐 Creating 'remote_user' for external MySQL connections..."
+          # Wait for MariaDB to start up fully
+          sleep 10
+          sudo mysql -e "
+            CREATE USER IF NOT EXISTS 'remote_user'@'%' IDENTIFIED BY 'Spidey@123';
+            GRANT ALL PRIVILEGES ON *.* TO 'remote_user'@'%' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          " || {
+            echo "❌ Failed to create remote MySQL user"
+            # It's not a fatal error, the user can do this manually later
           }
           
           # Configure and start Apache
@@ -436,6 +418,7 @@ jobs:
           
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
+            echo "🗄️ MySQL: host: $TAILSCALE_IP | user: remote_user | password: Spidey@123"
           fi
           
           echo "================================================"
