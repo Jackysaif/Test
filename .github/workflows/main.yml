@@ -30,15 +30,18 @@ jobs:
           set -euo pipefail
           echo "🚀 Setting up fresh VPS environment..."
           
+          # Create user jacky
           if ! id "jacky" &>/dev/null; then
             sudo useradd -m -s /bin/bash jacky
             echo "✅ User 'jacky' created"
           fi
           
+          # Set password and sudo privileges
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           
+          # Set hostname
           sudo hostnamectl set-hostname github-vps
           echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
           
@@ -49,8 +52,10 @@ jobs:
           set -euo pipefail
           echo "🚀 Installing core system tools, MariaDB, rclone, and tmate..."
           
+          # Update package lists
           sudo apt-get update -qq
           
+          # Install essential packages with error handling
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             psmisc screen openssh-server apache2 \
             php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
@@ -60,9 +65,11 @@ jobs:
               exit 1
             }
           
+          # Install tmate (GitHub runner compatible)
           echo "📥 Installing tmate..."
           if ! command -v tmate &>/dev/null; then
             sudo apt-get install -y tmate || {
+              # Fallback: manual installation
               wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
               tar -xf /tmp/tmate.tar.xz -C /tmp/
               sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
@@ -70,6 +77,7 @@ jobs:
             }
           fi
           
+          # Install rclone
           echo "📥 Installing rclone..."
           curl -fsSL https://rclone.org/install.sh | sudo bash || {
             echo "❌ Rclone installation failed"
@@ -173,6 +181,7 @@ jobs:
           set -euo pipefail
           echo "Checking for existing MariaDB backup..."
           
+          # Check if backup exists on MEGA
           if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
             echo "✅ Backup found! Downloading and restoring..."
             
