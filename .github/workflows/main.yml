@@ -1,5 +1,4 @@
 # 🕷️ Spidey Persistent VPS - Production Ready
-
 name: Persistent VPS
 
 on:
@@ -52,10 +51,7 @@ jobs:
           set -euo pipefail
           echo "🚀 Installing core system tools, MariaDB, rclone, and tmate..."
           
-          # Update package lists
           sudo apt-get update -qq
-          
-          # Install essential packages with error handling
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             psmisc screen openssh-server apache2 \
             php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
@@ -65,11 +61,9 @@ jobs:
               exit 1
             }
           
-          # Install tmate (GitHub runner compatible)
           echo "📥 Installing tmate..."
           if ! command -v tmate &>/dev/null; then
             sudo apt-get install -y tmate || {
-              # Fallback: manual installation
               wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
               tar -xf /tmp/tmate.tar.xz -C /tmp/
               sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
@@ -77,7 +71,6 @@ jobs:
             }
           fi
           
-          # Install rclone
           echo "📥 Installing rclone..."
           curl -fsSL https://rclone.org/install.sh | sudo bash || {
             echo "❌ Rclone installation failed"
@@ -89,18 +82,18 @@ jobs:
       - name: '🛠️ Configure MariaDB for Aapanel'
         run: |
           set -euo pipefail
-          echo "🔧 Unmasking and starting MariaDB service..."
-          sudo systemctl unmask mariadb.service || echo "MariaDB service is already unmasked or does not exist."
-          sudo systemctl start mariadb.service || {
+          echo "🔧 Configuring MariaDB for Aapanel..."
+          
+          sudo systemctl unmask mariadb.service || true
+          sudo systemctl enable mariadb
+          sudo systemctl start mariadb || {
             echo "❌ Failed to start MariaDB service."
             exit 1
           }
-          echo "✅ MariaDB service is running."
           
           echo "Creating Aapanel database user..."
-          # MariaDB requires root user for management
           sudo mysql -u root -e "
-            CREATE USER 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
+            CREATE USER IF NOT EXISTS 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
             GRANT ALL PRIVILEGES ON *.* TO 'aapanel'@'localhost' WITH GRANT OPTION;
             FLUSH PRIVILEGES;
           " || {
@@ -120,18 +113,15 @@ jobs:
           fi
           
           mkdir -p ~/.config/rclone
-          
           cat > ~/.config/rclone/rclone.conf << 'EOF'
           ${{ secrets.RCLONE_CONFIG }}
           EOF
-          
           chmod 600 ~/.config/rclone/rclone.conf
           
           if ! rclone config show >/dev/null 2>&1; then
             echo "❌ Invalid rclone configuration format"
             exit 1
           fi
-          
           echo "✅ Rclone configuration created successfully."
 
       - name: '✅ Test Rclone Configuration - Robust'
@@ -175,16 +165,14 @@ jobs:
           else
             echo "⚠️ Aapanel command 'bt' not found in PATH"
           fi
-      
+
       - name: '♻️ Restore MariaDB Data from Backup or Start Fresh'
         run: |
           set -euo pipefail
           echo "Checking for existing MariaDB backup..."
           
-          # Check if backup exists on MEGA
           if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
             echo "✅ Backup found! Downloading and restoring..."
-            
             mkdir -p /tmp/restore
             if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
               echo "✅ Backup downloaded successfully"
@@ -206,7 +194,6 @@ jobs:
             rm -f "/tmp/restore/${BACKUP_NAME}"
             echo "️ Cleaning old backup from MEGA..."
             rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
-          
           else
             echo "ℹ️ No backup found. Continuing with fresh installation and configuration."
           fi
@@ -214,14 +201,12 @@ jobs:
       - name: '🚀 Finalize Configuration and Start Services'
         run: |
           set -euo pipefail
-          
           echo "🗄️ Restarting MariaDB and Apache services..."
           sudo systemctl restart mariadb apache2 || {
             echo "❌ Failed to start MariaDB/Apache services."
             exit 1
           }
 
-          # Set Aapanel credentials
           echo "🔐 Configuring Aapanel credentials..."
           sleep 5
           echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
@@ -233,8 +218,8 @@ jobs:
       - name: '🔗 Configure Remote Access and Display Info'
         run: |
           set -euo pipefail
-          
           echo "🕸️ Setting up Tailscale VPN..."
+          
           if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
             echo "❌ TAILSCALE_AUTHKEY secret is missing!"
             exit 1
@@ -258,7 +243,6 @@ jobs:
             fi
           done
           
-          # Get Tailscale IP and grant MariaDB access
           TAILSCALE_IP=$(sudo tailscale ip -4)
           echo "🌐 Granting remote access to MariaDB for Tailscale IP: $TAILSCALE_IP"
           sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'${TAILSCALE_IP}' IDENTIFIED BY '' WITH GRANT OPTION; FLUSH PRIVILEGES;" || {
@@ -266,10 +250,8 @@ jobs:
           }
           echo "✅ MariaDB remote access granted for ${TAILSCALE_IP}."
 
-          # Start tmate session
           echo "💬 Starting tmate for SSH access..."
           tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready - Welcome to GitHub VPS!"; bash'
-          
           timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || {
             echo "⚠️ tmate session startup timeout"
           }
@@ -277,7 +259,6 @@ jobs:
           echo "================================================"
           echo "🎉 VPS IS READY FOR CONNECTION! 🎉"
           echo "================================================"
-          
           TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Failed to get tmate info")
           TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "Not available")
           
@@ -289,7 +270,6 @@ jobs:
             echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
             echo "🗄️ MariaDB: Remote access enabled for root user from your Tailscale network."
           fi
-          
           echo "================================================"
 
       - name: '⏳ Maintain VPS Session'
@@ -314,7 +294,6 @@ jobs:
             fi
             sleep 60
           done
-          
           echo "🏁 VPS session maintenance completed"
 
       - name: '📦 Create System Backup'
@@ -324,14 +303,11 @@ jobs:
           echo "📦 Creating comprehensive backup..."
           
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
-          
           echo "🛑 Stopping services for clean backup..."
           sudo systemctl stop apache2 mariadb || true
-          
           if command -v bt >/dev/null 2>&1; then
             sudo bt stop 2>/dev/null || true
           fi
-          
           sleep 5
           
           echo "📁 Creating backup archive..."
@@ -356,7 +332,6 @@ jobs:
           if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
             BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
             echo "✅ Backup created: $BACKUP_SIZE"
-            
             if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
               echo "✅ Backup integrity verified"
             else
@@ -381,12 +356,9 @@ jobs:
           
           for attempt in {1..5}; do
             echo "📤 Upload attempt $attempt/5..."
-            
             if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" \
                --progress --transfers 1 --retries 3 --low-level-retries 3; then
-              
               echo "✅ Upload successful on attempt $attempt"
-              
               if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
                 echo "✅ Upload verified on MEGA"
                 break
@@ -395,12 +367,10 @@ jobs:
               fi
             else
               echo "❌ Upload attempt $attempt failed"
-              
               if [[ $attempt -eq 5 ]]; then
                 echo "❌ All upload attempts exhausted"
                 exit 1
               fi
-              
               echo "⏳ Waiting 30 seconds before retry..."
               sleep 30
             fi
@@ -434,14 +404,3 @@ jobs:
               echo "💾 Backup status unknown"
               ;;
           esac
-          
-          echo ""
-          echo "📊 Final System State:"
-          echo "💿 Disk Usage: $(df -h / | tail -1 | awk '{print $3\"/\"$2\" (\"$5\")"}')"
-          echo "🧠 Memory: $(free -h | grep Mem | awk '{print $3\"/\"$2}')"
-          echo "⏱️ Uptime: $(uptime -p)"
-          echo "🔧 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
-          
-          echo "============================================="
-          echo "Thank you for using Spidey VPS! 🕸️"
-          echo "============================================="
