@@ -1,236 +1,113 @@
-# 🕷️ Spidey Persistent VPS - Production Ready
-
-name: Persistent VPS
+name: RDP
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
-  workflow_dispatch:      # Manual trigger
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
-env:
-  BACKUP_STORE: /var/backups/vps
-  BACKUP_NAME: vps-backup-latest.tar.gz
-  MEGA_REMOTE: mega:vps-backup
+  workflow_dispatch:
 
 jobs:
-  vps:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-      - name: '🕸️ Checkout Code'
-        uses: actions/checkout@v4
-
-      - name: '👤 Initial Setup: User, Hostname & Services'
+      - name: Configure Core RDP Settings
         run: |
-          set -euo pipefail
-          echo "🚀 Setting up fresh VPS environment..."
-          
-          # Create user jacky
-          if ! id "jacky" &>/dev/null; then
-            sudo useradd -m -s /bin/bash jacky
-            echo "✅ User 'jacky' created"
-          fi
-          
-          # Set password and sudo privileges
-          echo "jacky:root" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          
-          # Set hostname
-          sudo hostnamectl set-hostname github-vps
-          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-          
-          echo "✅ Basic system setup completed."
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: '⚡ Install System Tools & MariaDB'
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
         run: |
-          set -euo pipefail
-          echo "🚀 Installing core system tools, MariaDB, rclone, and tmate..."
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            psmisc screen openssh-server apache2 \
-            php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
-            mariadb-server \
-            curl wget unzip tar gzip htop nano vim git net-tools
-
-          # Install tmate
-          if ! command -v tmate &>/dev/null; then
-            sudo apt-get install -y tmate || {
-              wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
-              tar -xf /tmp/tmate.tar.xz -C /tmp/
-              sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-              sudo chmod +x /usr/local/bin/tmate
-            }
-          fi
-
-          # Install rclone
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-
-          echo "✅ All tools installed successfully."
-
-      - name: '🛠️ Configure MariaDB for Aapanel & Tailscale'
-        run: |
-          set -euo pipefail
-          echo "🔧 Configuring MariaDB..."
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
           
-          sudo systemctl unmask mariadb.service || true
-          sudo systemctl enable --now mariadb.service
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
 
-          echo "Creating Aapanel database user..."
-          sudo mysql -u root -e "
-            CREATE USER IF NOT EXISTS 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
-            GRANT ALL PRIVILEGES ON *.* TO 'aapanel'@'localhost' WITH GRANT OPTION;
-            FLUSH PRIVILEGES;
-          "
-
-      - name: '🛠️ Configure Rclone (MEGA)'
+      - name: Install Tailscale
         run: |
-          set -euo pipefail
-          echo "🔐 Setting up rclone configuration..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
-          ${{ secrets.RCLONE_CONFIG }}
-          EOF
-          chmod 600 ~/.config/rclone/rclone.conf
-          rclone listremotes
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: '✅ Test Rclone Connection'
+      - name: Establish Tailscale Connection
         run: |
-          set -euo pipefail
-          if rclone about ${{ env.MEGA_REMOTE }}; then
-            echo "✅ MEGA connection works!"
-          else
-            echo "❌ MEGA connection failed"
-            exit 1
-          fi
-
-      - name: '📦 Install Aapanel'
-        run: |
-          set -euo pipefail
-          echo "📥 Installing Aapanel control panel..."
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          URL=https://www.aapanel.com/script/install_7.0_en.sh
-          if [ -f /usr/bin/curl ]; then 
-            curl -ksSO "$URL"
-          else 
-            wget --no-check-certificate -O install_7.0_en.sh "$URL"
-          fi
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
           
-          # Feed both prompts: "y" then "yes"
-          ( echo y ; echo yes ) | sudo bash install_7.0_en.sh aapanel
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           
-          if command -v bt >/dev/null 2>&1; then
-            echo "✅ Aapanel installed successfully"
-            sudo bt --version 2>/dev/null || true
-          else
-            echo "⚠️ Aapanel command 'bt' not found in PATH"
-          fi
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      - name: '♻️ Restore MariaDB Data from Backup'
+      - name: Maintain Connection
         run: |
-          set -euo pipefail
-          echo "Checking for existing MariaDB backup..."
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
           
-          if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found! Downloading and restoring..."
-            mkdir -p /tmp/restore
-            rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/
-            sudo systemctl stop mariadb apache2 || true
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C /
-            sudo chown -R mysql:mysql /www/server/data
-            sudo chmod -R 700 /www/server/data
-            rm -f "/tmp/restore/${BACKUP_NAME}"
-          else
-            echo "ℹ️ No backup found. Continuing fresh."
-          fi
-
-      - name: '🚀 Finalize Configuration & Services'
-        run: |
-          set -euo pipefail
-          sudo systemctl restart mariadb apache2
-          echo "Jacky" | sudo bt 6 2>/dev/null || true
-          echo "spidey" | sudo bt 5 2>/dev/null || true
-          sudo bt default 2>/dev/null || true
-
-      - name: '🔗 Configure Remote Access (Tailscale + MariaDB)'
-        run: |
-          set -euo pipefail
-          echo "🕸️ Setting up Tailscale..."
-          
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
-          
-          TAILSCALE_IP=$(sudo tailscale ip -4)
-          echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          
-          sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'${TAILSCALE_IP}' IDENTIFIED BY '' WITH GRANT OPTION; FLUSH PRIVILEGES;"
-
-          # Start tmate
-          tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready!"; bash'
-          timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || true
-          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-
-      - name: '⏳ Maintain VPS Session'
-        run: |
-          set -euo pipefail
-          echo "🖥️ VPS session running..."
-          for minute in {1..330}; do
-            if [[ -f /tmp/stop_session ]]; then break; fi
-            if (( minute % 30 == 0 )); then
-              echo "⏰ Runtime: $minute minutes"
-            fi
-            sleep 60
-          done
-
-      - name: '📦 Create Backup'
-        if: always()
-        run: |
-          set -euo pipefail
-          sudo mkdir -p "${BACKUP_STORE}"
-          sudo systemctl stop apache2 mariadb || true
-          sleep 5
-          sudo tar -czf "${BACKUP_STORE}/${BACKUP_NAME}" \
-            --absolute-names \
-            /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
-            /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
-            /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
-            /www/server/data/ /www/server/panel/ \
-            /var/www/ /opt/ /srv/ /root/ /home/jacky/ \
-            /usr/local/bin/ || true
-
-      - name: '☁️ Upload Backup to MEGA'
-        if: always()
-        run: |
-          set -euo pipefail
-          rclone copy "${BACKUP_STORE}/${BACKUP_NAME}" "${MEGA_REMOTE}" --progress
-          sudo rm -f "${BACKUP_STORE}/${BACKUP_NAME}"
-
-      - name: '🛑 Shutdown Runner on Cancel'
-        if: always()
-        run: |
-          if [ "${{ job.status }}" = "cancelled" ]; then
-            echo "⚠️ Workflow cancelled. Shutting down runner..."
-            sudo systemctl stop apache2 mariadb tailscaled || true
-            sudo pkill -u jacky || true
-            sudo shutdown -h now || true
-          else
-            echo "ℹ️ Workflow ended normally, no forced shutdown needed."
-          fi
-
-      - name: '📋 Final Status Report'
-        if: always()
-        run: |
-          echo "============================================="
-          echo "         🕷️ VPS SESSION COMPLETE 🕷️"
-          echo "============================================="
-          echo "📅 Completed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "🏷️ Status: ${{ job.status }}"
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
