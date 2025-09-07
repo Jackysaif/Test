@@ -30,45 +30,39 @@ jobs:
           set -euo pipefail
           echo "🚀 Setting up fresh VPS environment..."
           
-          # Create user jacky
           if ! id "jacky" &>/dev/null; then
             sudo useradd -m -s /bin/bash jacky
             echo "✅ User 'jacky' created"
           fi
           
-          # Set password and sudo privileges
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           
-          # Set hostname
           sudo hostnamectl set-hostname github-vps
           echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
           
           echo "✅ Basic system setup completed."
 
-      - name: '⚡ Install System Tools, Rclone & tmate'
+      - name: '⚡ Install System Tools & MariaDB'
         run: |
           set -euo pipefail
-          echo "🚀 Installing core system tools, rclone, and tmate..."
+          echo "🚀 Installing core system tools, MariaDB, rclone, and tmate..."
           
-          # Update package lists
           sudo apt-get update -qq
           
-          # Install essential packages with error handling
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             psmisc screen openssh-server apache2 \
             php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
+            mariadb-server \
             curl wget unzip tar gzip htop nano vim git net-tools || {
               echo "❌ Package installation failed"
               exit 1
             }
           
-          # Install tmate (GitHub runner compatible)
           echo "📥 Installing tmate..."
           if ! command -v tmate &>/dev/null; then
             sudo apt-get install -y tmate || {
-              # Fallback: manual installation
               wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
               tar -xf /tmp/tmate.tar.xz -C /tmp/
               sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
@@ -76,50 +70,57 @@ jobs:
             }
           fi
           
-          # Install rclone
           echo "📥 Installing rclone..."
           curl -fsSL https://rclone.org/install.sh | sudo bash || {
             echo "❌ Rclone installation failed"
             exit 1
           }
           
-          # Verify installations
-          echo "✅ Verifying installations..."
-          rclone version
-          tmate -V
-          php -v | head -1
-          
           echo "✅ All tools installed successfully."
+
+      - name: '🛠️ Configure MariaDB for Aapanel'
+        run: |
+          set -euo pipefail
+          echo "🔧 Unmasking and starting MariaDB service..."
+          sudo systemctl unmask mariadb.service || echo "MariaDB service is already unmasked or does not exist."
+          sudo systemctl start mariadb.service || {
+            echo "❌ Failed to start MariaDB service."
+            exit 1
+          }
+          echo "✅ MariaDB service is running."
+          
+          echo "Creating Aapanel database user..."
+          # MariaDB requires root user for management
+          sudo mysql -u root -e "
+            CREATE USER 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
+            GRANT ALL PRIVILEGES ON *.* TO 'aapanel'@'localhost' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          " || {
+            echo "❌ Failed to create Aapanel database user."
+            exit 1
+          }
+          echo "✅ Aapanel user for MariaDB created successfully."
 
       - name: '🛠️ Configure Rclone (MEGA) - Enhanced'
         run: |
           set -euo pipefail
           echo "🔐 Setting up rclone configuration..."
           
-          # Check if RCLONE_CONFIG secret exists and is not empty
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
             echo "❌ RCLONE_CONFIG secret is missing!"
-            echo "ℹ️  Please add your rclone.conf content to GitHub secrets."
-            echo "ℹ️  To generate: run 'rclone config' locally and copy ~/.config/rclone/rclone.conf"
             exit 1
           fi
           
-          # Create rclone config directory
           mkdir -p ~/.config/rclone
           
-          # Write config with proper formatting
           cat > ~/.config/rclone/rclone.conf << 'EOF'
           ${{ secrets.RCLONE_CONFIG }}
           EOF
           
-          # Set proper permissions
           chmod 600 ~/.config/rclone/rclone.conf
           
-          # Validate config format
           if ! rclone config show >/dev/null 2>&1; then
             echo "❌ Invalid rclone configuration format"
-            echo "Available sections:"
-            rclone config show 2>&1 || true
             exit 1
           fi
           
@@ -130,15 +131,8 @@ jobs:
           set -euo pipefail
           echo "🔍 Testing MEGA connection..."
           
-          # List available remotes
-          echo "Available remotes:"
-          rclone listremotes
-          
-          # Test connection with multiple methods
           if rclone listremotes | grep -q "mega:"; then
             echo "✅ MEGA remote found in configuration"
-            
-            # Test with timeout and retries
             for i in {1..3}; do
               echo "🔄 Connection test attempt $i/3..."
               if timeout 60 rclone about ${{ env.MEGA_REMOTE }} >/dev/null 2>&1; then
@@ -146,8 +140,6 @@ jobs:
                 break
               elif [[ $i -eq 3 ]]; then
                 echo "❌ MEGA connection failed after 3 attempts"
-                echo "🔍 Debugging information:"
-                rclone about ${{ env.MEGA_REMOTE }} -vv
                 exit 1
               else
                 echo "⚠️ Attempt $i failed, retrying in 10 seconds..."
@@ -156,17 +148,14 @@ jobs:
             done
           else
             echo "❌ MEGA remote not found in configuration"
-            echo "Available remotes:"
-            rclone listremotes
             exit 1
           fi
 
-      - name: '📦 Install Aapanel & Core Apps'
+      - name: '📦 Install Aapanel'
         run: |
           set -euo pipefail
           echo "📥 Installing Aapanel control panel..."
           
-          # Use the official Aapanel installation command for version 7.x
           URL=https://www.aapanel.com/script/install_7.0_en.sh && if [ -f /usr/bin/curl ];then curl -ksSO "$URL" ;else wget --no-check-certificate -O install_7.0_en.sh "$URL";fi;bash install_7.0_en.sh aapanel || {
             echo "❌ Aapanel installation failed"
             exit 1
@@ -175,25 +164,15 @@ jobs:
           if command -v bt >/dev/null 2>&1; then
             echo "✅ Aapanel installed successfully"
             sudo bt --version 2>/dev/null || true
-            
-            # Install MariaDB, Apache, and PHP via Aapanel's command-line tool
-            echo "📦 Installing MariaDB and other components via Aapanel..."
-            sudo bt install 1 2 3 || {
-              echo "❌ Failed to install MariaDB via Aapanel"
-              exit 1
-            }
-            echo "✅ MariaDB installed successfully via Aapanel."
           else
             echo "⚠️ Aapanel command 'bt' not found in PATH"
-            echo "⚠️ Installation may have failed or be incomplete"
           fi
       
-      - name: '♻️ Restore from Backup or Start Fresh'
+      - name: '♻️ Restore MariaDB Data from Backup or Start Fresh'
         run: |
           set -euo pipefail
-          echo "Checking for existing backup..."
+          echo "Checking for existing MariaDB backup..."
           
-          # Check if backup exists on MEGA
           if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
             echo "✅ Backup found! Downloading and restoring..."
             
@@ -209,7 +188,7 @@ jobs:
             sudo systemctl stop mariadb apache2 || true
             
             echo "📁 Restoring data from backup..."
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / --keep-old-files --exclude='/www/server/panel' || true
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / || true
             
             echo "🔐 Setting permissions for restored data..."
             sudo chown -R mysql:mysql /www/server/data
@@ -227,15 +206,18 @@ jobs:
         run: |
           set -euo pipefail
           
-          echo "🗄️ Starting MariaDB and Apache services..."
-          sudo systemctl start mariadb || true
-          sudo systemctl start apache2 || true
+          echo "🗄️ Restarting MariaDB and Apache services..."
+          sudo systemctl restart mariadb apache2 || {
+            echo "❌ Failed to start MariaDB/Apache services."
+            exit 1
+          }
 
           # Set Aapanel credentials
           echo "🔐 Configuring Aapanel credentials..."
           sleep 5
           echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
           echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
+          
           echo "📋 Aapanel Information:"
           sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
 
@@ -246,7 +228,6 @@ jobs:
           echo "🕸️ Setting up Tailscale VPN..."
           if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
             echo "❌ TAILSCALE_AUTHKEY secret is missing!"
-            echo "ℹ️ Please add your Tailscale auth key to GitHub secrets."
             exit 1
           fi
           
@@ -271,7 +252,7 @@ jobs:
           # Get Tailscale IP and grant MariaDB access
           TAILSCALE_IP=$(sudo tailscale ip -4)
           echo "🌐 Granting remote access to MariaDB for Tailscale IP: $TAILSCALE_IP"
-          sudo mysql -e "CREATE USER 'root'@'${TAILSCALE_IP}' IDENTIFIED BY 'root'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'${TAILSCALE_IP}' WITH GRANT OPTION; FLUSH PRIVILEGES;" || {
+          sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'${TAILSCALE_IP}' IDENTIFIED BY '' WITH GRANT OPTION; FLUSH PRIVILEGES;" || {
             echo "❌ Failed to grant remote MariaDB access to Tailscale IP."
           }
           echo "✅ MariaDB remote access granted for ${TAILSCALE_IP}."
@@ -318,12 +299,10 @@ jobs:
             if (( minute % 30 == 0 )); then
               echo "⏰ Runtime: $minute minutes"
               echo "📊 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
-              
               if (( minute % 60 == 0 )); then
                 echo "🔗 Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'N/A')"
               fi
             fi
-            
             sleep 60
           done
           
