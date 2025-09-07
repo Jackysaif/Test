@@ -327,3 +327,4 @@ jobs:
               Write-Host "`n[$(Get-Date)] Workflow terminating - running final backup..."
               & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $shutdownPath
           }
+
