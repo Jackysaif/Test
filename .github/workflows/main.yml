@@ -7,6 +7,10 @@ on:
     - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:      # Manual trigger
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 env:
   BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
@@ -157,13 +161,13 @@ jobs:
             exit 1
           fi
 
-      - name: '📦 Install Aapanel'
+      - name: '📦 Install Aapanel & Core Apps'
         run: |
           set -euo pipefail
           echo "📥 Installing Aapanel control panel..."
           
-          # Download Aapanel installer
-          if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
+          # Download the latest Aapanel installer script from the official domain
+          if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install.sh"; then
             chmod +x /tmp/install.sh
             echo "✅ Aapanel installer downloaded"
           else
@@ -185,12 +189,20 @@ jobs:
           if command -v bt >/dev/null 2>&1; then
             echo "✅ Aapanel installed successfully"
             sudo bt --version 2>/dev/null || true
+            
+            # Install MariaDB, Apache, and PHP via Aapanel's command-line tool
+            echo "📦 Installing MariaDB and other components via Aapanel..."
+            sudo bt install 1 2 3 || {
+              echo "❌ Failed to install MariaDB via Aapanel"
+              exit 1
+            }
+            echo "✅ MariaDB installed successfully via Aapanel."
           else
             echo "⚠️ Aapanel command 'bt' not found in PATH"
             echo "⚠️ Installation may have failed or be incomplete"
           fi
       
-      - name: '♻️ Restore from Backup'
+      - name: '♻️ Restore MariaDB Data from Backup'
         run: |
           set -euo pipefail
           echo "Checking for existing backup..."
@@ -208,59 +220,42 @@ jobs:
               exit 1
             fi
             
-            # Restore backup
-            echo "Restoring system state..."
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
-              echo "⚠️ Some files failed to restore (normal for system files)"
-            }
+            # Restore MariaDB data
+            echo "🛑 Stopping MariaDB for data restoration..."
+            sudo systemctl stop mariadb || true
+            
+            echo "📁 Restoring MariaDB data to /www/server/data..."
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / --keep-old-files --exclude='/www/server/panel' \
+              --exclude='/etc' --exclude='/var/www' --exclude='/home' || true
+            
+            echo "🔐 Setting permissions for restored MariaDB data..."
+            sudo chown -R mysql:mysql /www/server/data
+            sudo chmod -R 700 /www/server/data
+            
+            # Restore other directories
+            echo "Restoring other system files..."
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / \
+              --exclude='/www/server/data' --exclude='/var/www' || true
+            
+            echo "Restoring website files to /var/www..."
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / --exclude='/www/server' || true
+            
+            echo "Restoring user data to /home..."
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / --exclude='/www/server' || true
             
             # Cleanup
             rm -f "/tmp/restore/${BACKUP_NAME}"
             
-            # Set permissions for restored data
-            echo "🔐 Setting permissions for restored data..."
-            sudo chown -R www:www /var/www /www/server
-            sudo chown -R mysql:mysql /var/lib/mysql
-            
             echo "️ Cleaning old backup from MEGA..."
             rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
+            
           else
-            echo "ℹ️ No backup found. Starting with a fresh installation."
+            echo "ℹ️ No backup found. Continuing with fresh installation."
           fi
 
-      - name: '🔧 Install MariaDB via Aapanel'
+      - name: '🚀 Finalize Configuration and Start Services'
         run: |
           set -euo pipefail
-          
-          echo "⏳ Waiting for Aapanel to be ready..."
-          sleep 30
-          
-          echo "📦 Installing MariaDB and other components via Aapanel..."
-          
-          # Use the Aapanel command-line tool to install MariaDB, PHP, and Apache
-          # This command ensures MariaDB is installed and configured in a compatible way
-          sudo bt install 1 2 3 || {
-            echo "❌ Failed to install MariaDB via Aapanel"
-            exit 1
-          }
-          
-          echo "✅ MariaDB installed successfully via Aapanel."
-
-      - name: '🚀 Configure Remote Access & Restart Services'
-        run: |
-          set -euo pipefail
-          
-          # Ensure services are unmasked and reloaded
-          sudo systemctl unmask mariadb || true
-          sudo systemctl unmask mysql || true
-          sudo systemctl daemon-reload
-          
-          # Start MariaDB
-          echo "🗄️ Starting MariaDB..."
-          sudo systemctl start mariadb || {
-            echo "❌ MariaDB failed to start. Manual intervention needed."
-            exit 1
-          }
           
           # Use Aapanel to grant remote access
           echo "🌐 Granting remote access to MariaDB..."
@@ -268,24 +263,25 @@ jobs:
             echo "⚠️ Could not run bt 12 command, manual configuration may be needed"
           }
           
-          echo "✅ MariaDB is now configured for remote access."
+          # Set Aapanel credentials
+          echo "🔐 Configuring Aapanel credentials..."
+          sleep 5
+          echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
+          echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
+          echo "📋 Aapanel Information:"
+          sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
           
-          # Final service checks
+          # Start final services
+          echo "🗄️ Starting MariaDB and other services..."
+          sudo systemctl start mariadb || true
+          sudo systemctl start apache2 || true
+          
           echo "📊 Service Status:"
           systemctl is-active mariadb apache2 || true
 
       - name: '🔗 Configure Remote Access and Display Info'
         run: |
           set -euo pipefail
-          
-          if command -v bt >/dev/null 2>&1; then
-            echo "🔐 Configuring Aapanel credentials..."
-            sleep 5
-            echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
-            echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
-            echo "📋 Aapanel Information:"
-            sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
-          fi
           
           echo "🕸️ Setting up Tailscale VPN..."
           if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
@@ -334,8 +330,7 @@ jobs:
           
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
-            echo "🗄️ MySQL: This is now managed by Aapanel's database section."
-            echo "To connect, you must create a database and a remote user via the Aapanel UI."
+            echo "🗄️ MariaDB: Please create a remote user and database in the Aapanel UI."
           fi
           
           echo "================================================"
@@ -396,9 +391,8 @@ jobs:
             /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
             /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
             /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
-            /var/lib/mysql/ /var/www/ /opt/ /srv/ /www/ \
-            /root/ /home/jacky/ \
-            $(command -v bt >/dev/null && echo "/www/server/panel/pyenv/bin/bt" || echo "") \
+            /www/server/data/ /www/server/panel/ \
+            /var/www/ /opt/ /srv/ /root/ /home/jacky/ \
             /usr/local/bin/ \
             2>/dev/null || {
               echo "⚠️ Some files couldn't be backed up (normal)"
