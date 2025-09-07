@@ -4,8 +4,8 @@ name: Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # Every 6 hours
-  workflow_dispatch:        # Manual trigger
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:      # Manual trigger
 
 concurrency:
   group: ${{ github.workflow }}
@@ -19,338 +19,218 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350   # 5 hours 50 minutes (GitHub max = 6 hours)
+    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
 
     steps:
-    # ============================================================
-    - name: '🕸️ Checkout Code'
-      uses: actions/checkout@v4
-    # ============================================================
+      - name: '🕸️ Checkout Code'
+        uses: actions/checkout@v4
 
-    - name: '👤 Initial Setup: User, Hostname & Services'
-      run: |
-        set -euo pipefail
-        echo "🚀 Setting up fresh VPS environment..."
-        
-        # Create user jacky
-        if ! id "jacky" &>/dev/null; then
-          sudo useradd -m -s /bin/bash jacky
-          echo "✅ User 'jacky' created"
-        fi
-        
-        # Set password and sudo privileges
-        echo "jacky:root" | sudo chpasswd
-        sudo usermod -aG sudo jacky
-        echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-        
-        # Set hostname
-        sudo hostnamectl set-hostname github-vps
-        echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-        
-        echo "✅ Basic system setup completed."
-    # ============================================================
+      - name: '👤 Initial Setup: User, Hostname & Services'
+        run: |
+          set -euo pipefail
+          echo "🚀 Setting up fresh VPS environment..."
+          
+          # Create user jacky
+          if ! id "jacky" &>/dev/null; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "✅ User 'jacky' created"
+          fi
+          
+          # Set password and sudo privileges
+          echo "jacky:root" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          
+          # Set hostname
+          sudo hostnamectl set-hostname github-vps
+          echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
+          
+          echo "✅ Basic system setup completed."
 
-    - name: '⚡ Install System Tools & MariaDB'
-      run: |
-        set -euo pipefail
-        echo "🚀 Installing system tools, MariaDB, rclone, and tmate..."
-        
-        sudo apt-get update -qq
-        
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          psmisc screen openssh-server apache2 \
-          php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
-          mariadb-server \
-          curl wget unzip tar gzip htop nano vim git net-tools || {
-            echo "❌ Package installation failed"
+      - name: '⚡ Install System Tools & MariaDB'
+        run: |
+          set -euo pipefail
+          echo "🚀 Installing core system tools, MariaDB, rclone, and tmate..."
+          
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            psmisc screen openssh-server apache2 \
+            php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
+            mariadb-server \
+            curl wget unzip tar gzip htop nano vim git net-tools
+
+          # Install tmate
+          if ! command -v tmate &>/dev/null; then
+            sudo apt-get install -y tmate || {
+              wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
+              tar -xf /tmp/tmate.tar.xz -C /tmp/
+              sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
+              sudo chmod +x /usr/local/bin/tmate
+            }
+          fi
+
+          # Install rclone
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+          echo "✅ All tools installed successfully."
+
+      - name: '🛠️ Configure MariaDB for Aapanel & Tailscale'
+        run: |
+          set -euo pipefail
+          echo "🔧 Configuring MariaDB..."
+          
+          sudo systemctl unmask mariadb.service || true
+          sudo systemctl enable --now mariadb.service
+
+          echo "Creating Aapanel database user..."
+          sudo mysql -u root -e "
+            CREATE USER IF NOT EXISTS 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
+            GRANT ALL PRIVILEGES ON *.* TO 'aapanel'@'localhost' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          "
+
+      - name: '🛠️ Configure Rclone (MEGA)'
+        run: |
+          set -euo pipefail
+          echo "🔐 Setting up rclone configuration..."
+          
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          ${{ secrets.RCLONE_CONFIG }}
+          EOF
+          chmod 600 ~/.config/rclone/rclone.conf
+          rclone listremotes
+
+      - name: '✅ Test Rclone Connection'
+        run: |
+          set -euo pipefail
+          if rclone about ${{ env.MEGA_REMOTE }}; then
+            echo "✅ MEGA connection works!"
+          else
+            echo "❌ MEGA connection failed"
             exit 1
-          }
+          fi
 
-        # Unmask MariaDB service
-        echo "🔧 Ensuring MariaDB service is unmasked..."
-        sudo systemctl unmask mariadb.service || true
-        sudo systemctl enable mariadb.service
-        sudo systemctl start mariadb.service
-        
-        # Install tmate
-        echo "📥 Installing tmate..."
-        if ! command -v tmate &>/dev/null; then
-          sudo apt-get install -y tmate || {
-            wget -q -O /tmp/tmate.tar.xz https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
-            tar -xf /tmp/tmate.tar.xz -C /tmp/
-            sudo cp /tmp/tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-            sudo chmod +x /usr/local/bin/tmate
-          }
-        fi
-        
-        # Install rclone
-        echo "📥 Installing rclone..."
-        curl -fsSL https://rclone.org/install.sh | sudo bash || {
-          echo "❌ Rclone installation failed"
-          exit 1
-        }
-        
-        echo "✅ Tools installed successfully."
-    # ============================================================
+      - name: '📦 Install Aapanel'
+        run: |
+          set -euo pipefail
+          echo "📥 Installing Aapanel control panel..."
+          
+          URL=https://www.aapanel.com/script/install_7.0_en.sh
+          if [ -f /usr/bin/curl ]; then 
+            curl -ksSO "$URL"
+          else 
+            wget --no-check-certificate -O install_7.0_en.sh "$URL"
+          fi
+          
+          # Feed both prompts: "y" then "yes"
+          ( echo y ; echo yes ) | sudo bash install_7.0_en.sh aapanel
+          
+          if command -v bt >/dev/null 2>&1; then
+            echo "✅ Aapanel installed successfully"
+            sudo bt --version 2>/dev/null || true
+          else
+            echo "⚠️ Aapanel command 'bt' not found in PATH"
+          fi
 
-    - name: '🛠️ Configure MariaDB for Aapanel'
-      run: |
-        set -euo pipefail
-        echo "🔧 Configuring MariaDB service..."
-        
-        sudo systemctl restart mariadb.service || {
-          echo "❌ Failed to start MariaDB service"
-          exit 1
-        }
-        
-        echo "✅ MariaDB service is running."
-        
-        echo "🔧 Creating Aapanel database user..."
-        sudo mysql -u root -e "
-          CREATE USER IF NOT EXISTS 'aapanel'@'localhost' IDENTIFIED BY 'aapanelpass';
-          GRANT ALL PRIVILEGES ON *.* TO 'aapanel'@'localhost' WITH GRANT OPTION;
-          FLUSH PRIVILEGES;
-        "
-        echo "✅ MariaDB user 'aapanel' created."
-    # ============================================================
+      - name: '♻️ Restore MariaDB Data from Backup'
+        run: |
+          set -euo pipefail
+          echo "Checking for existing MariaDB backup..."
+          
+          if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
+            echo "✅ Backup found! Downloading and restoring..."
+            mkdir -p /tmp/restore
+            rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/
+            sudo systemctl stop mariadb apache2 || true
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C /
+            sudo chown -R mysql:mysql /www/server/data
+            sudo chmod -R 700 /www/server/data
+            rm -f "/tmp/restore/${BACKUP_NAME}"
+          else
+            echo "ℹ️ No backup found. Continuing fresh."
+          fi
 
-    - name: '🛠️ Configure Rclone (MEGA)'
-      run: |
-        set -euo pipefail
-        echo "🔐 Setting up rclone configuration..."
-        
-        if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-          echo "❌ RCLONE_CONFIG secret is missing!"
-          exit 1
-        fi
-        
-        mkdir -p ~/.config/rclone
-        cat > ~/.config/rclone/rclone.conf << 'EOF'
-        ${{ secrets.RCLONE_CONFIG }}
-        EOF
-        chmod 600 ~/.config/rclone/rclone.conf
-        
-        if ! rclone config show >/dev/null 2>&1; then
-          echo "❌ Invalid rclone configuration"
-          exit 1
-        fi
-        
-        echo "✅ Rclone configured successfully."
-    # ============================================================
+      - name: '🚀 Finalize Configuration & Services'
+        run: |
+          set -euo pipefail
+          sudo systemctl restart mariadb apache2
+          echo "Jacky" | sudo bt 6 2>/dev/null || true
+          echo "spidey" | sudo bt 5 2>/dev/null || true
+          sudo bt default 2>/dev/null || true
 
-    - name: '✅ Test Rclone Configuration'
-      run: |
-        set -euo pipefail
-        echo "🔍 Testing MEGA remote..."
-        
-        if rclone listremotes | grep -q "mega:"; then
-          echo "✅ MEGA remote found"
-          for i in {1..3}; do
-            echo "🔄 Test attempt $i/3..."
-            if timeout 60 rclone about ${{ env.MEGA_REMOTE }} >/dev/null 2>&1; then
-              echo "✅ MEGA connection successful"
-              break
-            elif [[ $i -eq 3 ]]; then
-              echo "❌ MEGA test failed"
-              exit 1
-            else
-              sleep 10
+      - name: '🔗 Configure Remote Access (Tailscale + MariaDB)'
+        run: |
+          set -euo pipefail
+          echo "🕸️ Setting up Tailscale..."
+          
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
+          
+          TAILSCALE_IP=$(sudo tailscale ip -4)
+          echo "🌐 Tailscale IP: $TAILSCALE_IP"
+          
+          sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'${TAILSCALE_IP}' IDENTIFIED BY '' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+
+          # Start tmate
+          tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready!"; bash'
+          timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || true
+          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+
+      - name: '⏳ Maintain VPS Session'
+        run: |
+          set -euo pipefail
+          echo "🖥️ VPS session running..."
+          for minute in {1..330}; do
+            if [[ -f /tmp/stop_session ]]; then break; fi
+            if (( minute % 30 == 0 )); then
+              echo "⏰ Runtime: $minute minutes"
             fi
+            sleep 60
           done
-        else
-          echo "❌ MEGA remote missing"
-          exit 1
-        fi
-    # ============================================================
 
-    - name: '📦 Install Aapanel'
-      run: |
-        set -euo pipefail
-        echo "📥 Installing Aapanel..."
-        
-        URL=https://www.aapanel.com/script/install_7.0_en.sh
-        if [ -f /usr/bin/curl ]; then 
-          curl -ksSO "$URL"
-        else 
-          wget --no-check-certificate -O install_7.0_en.sh "$URL"
-        fi
-        
-        sudo bash install_7.0_en.sh aapanel || {
-          echo "❌ Aapanel installation failed"
-          exit 1
-        }
-        
-        if command -v bt >/dev/null 2>&1; then
-          echo "✅ Aapanel installed"
-          sudo bt --version || true
-        else
-          echo "⚠️ Aapanel command not found"
-        fi
-    # ============================================================
+      - name: '📦 Create Backup'
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "${BACKUP_STORE}"
+          sudo systemctl stop apache2 mariadb || true
+          sleep 5
+          sudo tar -czf "${BACKUP_STORE}/${BACKUP_NAME}" \
+            --absolute-names \
+            /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
+            /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
+            /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
+            /www/server/data/ /www/server/panel/ \
+            /var/www/ /opt/ /srv/ /root/ /home/jacky/ \
+            /usr/local/bin/ || true
 
-    - name: '♻️ Restore MariaDB Data from Backup'
-      run: |
-        set -euo pipefail
-        echo "🔄 Checking for MariaDB backup..."
-        
-        if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-          echo "✅ Backup found, restoring..."
-          mkdir -p /tmp/restore
-          rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3
-          
-          sudo systemctl stop mariadb apache2 || true
-          sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / || true
-          sudo chown -R mysql:mysql /www/server/data
-          sudo chmod -R 700 /www/server/data
-          
-          rm -f "/tmp/restore/${BACKUP_NAME}"
-          rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
-        else
-          echo "ℹ️ No backup found. Skipping restore."
-        fi
-    # ============================================================
+      - name: '☁️ Upload Backup to MEGA'
+        if: always()
+        run: |
+          set -euo pipefail
+          rclone copy "${BACKUP_STORE}/${BACKUP_NAME}" "${MEGA_REMOTE}" --progress
+          sudo rm -f "${BACKUP_STORE}/${BACKUP_NAME}"
 
-    - name: '🚀 Finalize & Configure Services'
-      run: |
-        set -euo pipefail
-        sudo systemctl restart mariadb apache2
-        
-        echo "🔐 Configuring Aapanel..."
-        sleep 5
-        echo "Jacky" | sudo bt 6 2>/dev/null || true
-        echo "spidey" | sudo bt 5 2>/dev/null || true
-        
-        echo "📋 Aapanel Info:"
-        sudo bt default 2>/dev/null || true
-    # ============================================================
-
-    - name: '🔗 Configure Remote Access'
-      run: |
-        set -euo pipefail
-        echo "🕸️ Configuring Tailscale..."
-        
-        if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-          echo "❌ Missing TAILSCALE_AUTHKEY"
-          exit 1
-        fi
-        
-        curl -fsSL https://tailscale.com/install.sh | sh
-        sudo systemctl enable tailscaled
-        sudo systemctl start tailscaled
-        
-        for i in {1..3}; do
-          if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes; then
-            echo "✅ Tailscale connected"
-            break
-          elif [[ $i -eq 3 ]]; then
-            echo "❌ Tailscale failed"
-            exit 1
+      - name: '🛑 Shutdown Runner on Cancel'
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "cancelled" ]; then
+            echo "⚠️ Workflow cancelled. Shutting down runner..."
+            sudo systemctl stop apache2 mariadb tailscaled || true
+            sudo pkill -u jacky || true
+            sudo shutdown -h now || true
+          else
+            echo "ℹ️ Workflow ended normally, no forced shutdown needed."
           fi
-          sleep 15
-        done
-        
-        TAILSCALE_IP=$(sudo tailscale ip -4)
-        echo "🌐 Granting MariaDB access to subnet..."
-        SUBNET=$(echo $TAILSCALE_IP | cut -d. -f1-3).%
-        sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'${SUBNET}' IDENTIFIED BY '' WITH GRANT OPTION; FLUSH PRIVILEGES;"
-        
-        echo "✅ MariaDB remote access granted for subnet ${SUBNET}"
-        
-        echo "💬 Starting tmate..."
-        tmate -S /tmp/tmate.sock new-session -d 'echo "Welcome to GitHub VPS!"; bash'
-        timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || true
-        
-        TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' || echo "N/A")
-        TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' || echo "N/A")
-        
-        echo "================================================"
-        echo "🎉 VPS IS READY 🎉"
-        echo "🌐 Tailscale IP: $TAILSCALE_IP"
-        echo "🔑 SSH: $TMATE_SSH"
-        echo "🌍 Web Terminal: $TMATE_WEB"
-        echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
-        echo "================================================"
-    # ============================================================
 
-    - name: '⏳ Maintain VPS Session'
-      run: |
-        set -euo pipefail
-        echo "🖥️ VPS running..."
-        
-        for minute in {1..330}; do
-          if [[ -f /tmp/stop_session ]]; then
-            echo "🛑 Stop signal detected"
-            break
-          fi
-          
-          if (( minute % 30 == 0 )); then
-            echo "⏰ Runtime: $minute minutes"
-            echo "Services: $(systemctl is-active mariadb apache2 ssh tailscaled | tr '\n' ' ')"
-          fi
-          sleep 60
-        done
-    # ============================================================
-
-    - name: '📦 Create System Backup'
-      if: always()
-      run: |
-        set -euo pipefail
-        echo "📦 Creating backup..."
-        
-        sudo mkdir -p "${{ env.BACKUP_STORE }}"
-        sudo systemctl stop apache2 mariadb || true
-        sleep 5
-        
-        sudo tar -czf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
-          --absolute-names \
-          --exclude='/proc/*' --exclude='/tmp/*' --exclude='/sys/*' \
-          --exclude='/dev/*' --exclude='/run/*' --exclude='/mnt/*' \
-          --exclude='/media/*' --exclude='/lost+found' \
-          --exclude='*.log' --exclude='*.pid' \
-          /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
-          /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
-          /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
-          /www/server/data/ /www/server/panel/ \
-          /var/www/ /opt/ /srv/ /root/ /home/jacky/ /usr/local/bin/
-        
-        echo "✅ Backup created"
-    # ============================================================
-
-    - name: '☁️ Upload Backup to MEGA'
-      if: always()
-      run: |
-        set -euo pipefail
-        echo "🚀 Uploading backup..."
-        
-        for attempt in {1..5}; do
-          if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" --progress; then
-            echo "✅ Upload success"
-            break
-          elif [[ $attempt -eq 5 ]]; then
-            echo "❌ Upload failed"
-            exit 1
-          fi
-          sleep 30
-        done
-        sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
-    # ============================================================
-
-    - name: '📋 Final Status Report'
-      if: always()
-      run: |
-        echo "============================================="
-        echo "         🕷️ VPS SESSION COMPLETE 🕷️"
-        echo "============================================="
-        echo "📅 Completed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-        echo "🏷️ Status: ${{ job.status }}"
-        echo "============================================="
-    # ============================================================
-
-    - name: '🛑 Stop Runner on Cancel'
-      if: cancelled()
-      run: |
-        echo "⚠️ Workflow cancelled, stopping runner..."
-        sudo systemctl stop apache2 mariadb tailscaled || true
-        sudo pkill -u jacky || true
-        sudo shutdown -h now || true
-    # ============================================================
+      - name: '📋 Final Status Report'
+        if: always()
+        run: |
+          echo "============================================="
+          echo "         🕷️ VPS SESSION COMPLETE 🕷️"
+          echo "============================================="
+          echo "📅 Completed: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "🏷️ Status: ${{ job.status }}"
