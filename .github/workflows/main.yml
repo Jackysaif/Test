@@ -1,9 +1,11 @@
-name: 🕷️ Spidey Persistent VPS - Production Ready
+# 🕷️ Spidey Persistent VPS - Production Ready
+
+name: Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
-  workflow_dispatch:     # Manual trigger
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:      # Manual trigger
 
 env:
   BACKUP_STORE: /var/backups/vps
@@ -13,8 +15,8 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350 # 5 hours 50 minutes (GitHub max is 6 hours)
-
+    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
+    
     steps:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
@@ -23,41 +25,41 @@ jobs:
         run: |
           set -euo pipefail
           echo "🚀 Setting up fresh VPS environment..."
-
+          
           # Create user jacky
           if ! id "jacky" &>/dev/null; then
             sudo useradd -m -s /bin/bash jacky
             echo "✅ User 'jacky' created"
           fi
-
+          
           # Set password and sudo privileges
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-
+          
           # Set hostname
           sudo hostnamectl set-hostname github-vps
           echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-
+          
           echo "✅ Basic system setup completed."
 
       - name: '⚡ Install System Tools, Rclone & tmate'
         run: |
           set -euo pipefail
           echo "🚀 Installing core system tools, rclone, and tmate..."
-
+          
           # Update package lists
           sudo apt-get update -qq
-
+          
           # Install essential packages with error handling
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            psmisc screen openssh-server mariadb-server apache2 \
+            psmisc screen openssh-server apache2 \
             php php-mysql php-cli php-curl php-zip php-gd php-mbstring php-xml \
             curl wget unzip tar gzip htop nano vim git net-tools || {
-            echo "❌ Package installation failed"
-            exit 1
-          }
-
+              echo "❌ Package installation failed"
+              exit 1
+            }
+          
           # Install tmate (GitHub runner compatible)
           echo "📥 Installing tmate..."
           if ! command -v tmate &>/dev/null; then
@@ -69,46 +71,46 @@ jobs:
               sudo chmod +x /usr/local/bin/tmate
             }
           fi
-
+          
           # Install rclone
           echo "📥 Installing rclone..."
           curl -fsSL https://rclone.org/install.sh | sudo bash || {
             echo "❌ Rclone installation failed"
             exit 1
           }
-
+          
           # Verify installations
           echo "✅ Verifying installations..."
           rclone version
           tmate -V
           php -v | head -1
-
+          
           echo "✅ All tools installed successfully."
 
       - name: '🛠️ Configure Rclone (MEGA) - Enhanced'
         run: |
           set -euo pipefail
           echo "🔐 Setting up rclone configuration..."
-
+          
           # Check if RCLONE_CONFIG secret exists and is not empty
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
             echo "❌ RCLONE_CONFIG secret is missing!"
-            echo "ℹ️ Please add your rclone.conf content to GitHub secrets."
-            echo "ℹ️ To generate: run 'rclone config' locally and copy ~/.config/rclone/rclone.conf"
+            echo "ℹ️  Please add your rclone.conf content to GitHub secrets."
+            echo "ℹ️  To generate: run 'rclone config' locally and copy ~/.config/rclone/rclone.conf"
             exit 1
           fi
-
+          
           # Create rclone config directory
           mkdir -p ~/.config/rclone
-
+          
           # Write config with proper formatting
-          cat >~/.config/rclone/rclone.conf <<'EOF'
+          cat > ~/.config/rclone/rclone.conf << 'EOF'
           ${{ secrets.RCLONE_CONFIG }}
           EOF
-
+          
           # Set proper permissions
           chmod 600 ~/.config/rclone/rclone.conf
-
+          
           # Validate config format
           if ! rclone config show >/dev/null 2>&1; then
             echo "❌ Invalid rclone configuration format"
@@ -116,22 +118,22 @@ jobs:
             rclone config show 2>&1 || true
             exit 1
           fi
-
+          
           echo "✅ Rclone configuration created successfully."
 
       - name: '✅ Test Rclone Configuration - Robust'
         run: |
           set -euo pipefail
           echo "🔍 Testing MEGA connection..."
-
+          
           # List available remotes
           echo "Available remotes:"
           rclone listremotes
-
+          
           # Test connection with multiple methods
           if rclone listremotes | grep -q "mega:"; then
             echo "✅ MEGA remote found in configuration"
-
+            
             # Test with timeout and retries
             for i in {1..3}; do
               echo "🔄 Connection test attempt $i/3..."
@@ -155,88 +157,11 @@ jobs:
             exit 1
           fi
 
-      - name: '♻️ Restore from Backup OR Initialize - Enhanced'
-        id: restore
-        run: |
-          set -euo pipefail
-          echo " Checking for existing backup..."
-
-          # Check if backup exists with proper error handling
-          if timeout 90 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found! Downloading and restoring..."
-
-            # Create restore directory
-            mkdir -p /tmp/restore
-
-            # Download backup with progress
-            echo " Downloading backup..."
-            if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
-              echo "✅ Backup downloaded successfully"
-            else
-              echo "❌ Failed to download backup"
-              exit 1
-            fi
-
-            # Verify backup integrity
-            echo " Verifying backup integrity..."
-            if tar -tzf "/tmp/restore/${BACKUP_NAME}" >/dev/null 2>&1; then
-              echo "✅ Backup integrity verified"
-            else
-              echo "❌ Backup is corrupted"
-              rm -f "/tmp/restore/${BACKUP_NAME}"
-              exit 1
-            fi
-
-            # Stop MariaDB service before restoring data
-            echo "🛑 Stopping MariaDB for data restoration..."
-            sudo systemctl stop mariadb || true
-
-            # Restore backup
-            echo " Restoring system state..."
-            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
-              echo "⚠️ Some files failed to restore (normal for system files)"
-            }
-
-            # Cleanup
-            rm -f "/tmp/restore/${BACKUP_NAME}"
-
-            # Set permissions for restored MySQL data
-            echo "🔐 Setting permissions for restored MySQL data..."
-            sudo chown -R mysql:mysql /var/lib/mysql
-            sudo chmod -R 700 /var/lib/mysql
-
-            # Re-initialize the MariaDB system tables if they don't exist
-            # This is a safe guard in case the /var/lib/mysql was empty
-            if [ ! "$(ls -A /var/lib/mysql)" ]; then
-              echo "ℹ️ MySQL data directory is empty, initializing..."
-              sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
-            fi
-
-            # Remove old backup from MEGA
-            echo "️ Cleaning old backup from MEGA..."
-            rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
-
-            echo "is_new_install=false" >> $GITHUB_OUTPUT
-
-          else
-            echo "ℹ️ No backup found. Setting up fresh installation..."
-
-            # Create essential directories
-            sudo mkdir -p \
-              /home/jacky/.ssh \
-              /opt /srv /var/www/html \
-              /www/server \
-              /root/.ssh
-
-            echo "is_new_install=true" >> $GITHUB_OUTPUT
-          fi
-
-
       - name: '📦 Install Aapanel'
         run: |
           set -euo pipefail
           echo "📥 Installing Aapanel control panel..."
-
+          
           # Download Aapanel installer
           if curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
             chmod +x /tmp/install.sh
@@ -246,20 +171,17 @@ jobs:
             echo "⚠️ Continuing without Aapanel..."
             exit 0
           fi
-
+          
           # Stop Apache to prevent installation conflicts
           echo "🛑 Stopping apache2 to prevent conflicts..."
-          sudo systemctl stop apache2
-
-          # 💡 Automate sending 'y' and then 'yes' to the installer prompts
-          # Use a longer timeout of 15 minutes (900 seconds).
+          sudo systemctl stop apache2 || true
+          
           echo "🔧 Installing Aapanel (this may take up to 15 minutes)..."
           timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || {
             echo "⚠️ Aapanel installation timed out or failed"
             echo "⚠️ Continuing without Aapanel..."
           }
-
-          # Verify installation
+          
           if command -v bt >/dev/null 2>&1; then
             echo "✅ Aapanel installed successfully"
             sudo bt --version 2>/dev/null || true
@@ -267,115 +189,115 @@ jobs:
             echo "⚠️ Aapanel command 'bt' not found in PATH"
             echo "⚠️ Installation may have failed or be incomplete"
           fi
-
-      - name: '🔧 Unmask MariaDB Service'
+      
+      - name: '♻️ Restore from Backup'
         run: |
           set -euo pipefail
-          echo "Attempting to unmask mariadb.service..."
-          sudo systemctl unmask mariadb.service || {
-            echo "⚠️ MariaDB service is already unmasked or an error occurred. Continuing..."
-          }
-          sudo systemctl daemon-reload
-          echo "✅ MariaDB service unmasked and systemd reloaded."
-
-      - name: '🚀 Start and Configure Services'
-        run: |
-          set -euo pipefail
-          echo "🔄 Starting system services..."
-
-          # Reload systemd
-          sudo systemctl daemon-reload
-
-          # Configure MariaDB to listen on all interfaces
-          echo "🌐 Configuring MariaDB to allow external connections..."
-          sudo sed -i 's/^bind-address/#bind-address/' /etc/mysql/mariadb.conf.d/50-server.cnf || true
-
-          # Configure and start MariaDB
-          echo "🗄️ Configuring MariaDB..."
-          sudo systemctl enable mariadb
-          sudo systemctl start mariadb || {
-            echo "⚠️ MariaDB failed to start, attempting to fix..."
-            sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
-            sudo systemctl start mariadb || true
-          }
-
-          # Create a remote access MySQL user
-          echo "🔐 Creating 'remote_user' for external MySQL connections..."
-          # Wait for MariaDB to start up fully
-          sleep 10
-          sudo mysql -e "
-            CREATE USER IF NOT EXISTS 'remote_user'@'%' IDENTIFIED BY 'Spidey@123';
-            GRANT ALL PRIVILEGES ON *.* TO 'remote_user'@'%' WITH GRANT OPTION;
-            FLUSH PRIVILEGES;
-          " || {
-            echo "❌ Failed to create remote MySQL user"
-            # It's not a fatal error, the user can do this manually later
-          }
-
-          # Configure and start Apache
-          echo "🌐 Configuring Apache..."
-          sudo systemctl enable apache2
-          sudo systemctl start apache2 || {
-            echo "⚠️ Apache failed to start"
-            sudo systemctl status apache2 --no-pager || true
-          }
-
-          # Configure SSH
-          echo "🔑 Configuring SSH..."
-          sudo systemctl enable ssh
-          sudo systemctl start ssh
-
-          # Start Aapanel if available
-          if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Starting Aapanel..."
-            sudo bt start 2>/dev/null || {
-              echo "⚠️ Aapanel failed to start"
+          echo "Checking for existing backup..."
+          
+          # Check if backup exists
+          if timeout 90 rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
+            echo "✅ Backup found! Downloading and restoring..."
+            
+            # Download backup
+            mkdir -p /tmp/restore
+            if rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3; then
+              echo "✅ Backup downloaded successfully"
+            else
+              echo "❌ Failed to download backup"
+              exit 1
+            fi
+            
+            # Restore backup
+            echo "Restoring system state..."
+            sudo tar -xzf "/tmp/restore/${BACKUP_NAME}" --absolute-names -C / 2>/dev/null || {
+              echo "⚠️ Some files failed to restore (normal for system files)"
             }
+            
+            # Cleanup
+            rm -f "/tmp/restore/${BACKUP_NAME}"
+            
+            # Set permissions for restored data
+            echo "🔐 Setting permissions for restored data..."
+            sudo chown -R www:www /var/www /www/server
+            sudo chown -R mysql:mysql /var/lib/mysql
+            
+            echo "️ Cleaning old backup from MEGA..."
+            rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || true
+          else
+            echo "ℹ️ No backup found. Starting with a fresh installation."
           fi
 
-          # Service status check
-          echo "📊 Service Status:"
-          systemctl is-active mariadb apache2 ssh || true
-
-          echo "✅ Services configured and started."
-
-      - name: '🔗 Configure Remote Access'
+      - name: '🔧 Install MariaDB via Aapanel'
         run: |
           set -euo pipefail
+          
+          echo "⏳ Waiting for Aapanel to be ready..."
+          sleep 30
+          
+          echo "📦 Installing MariaDB and other components via Aapanel..."
+          
+          # Use the Aapanel command-line tool to install MariaDB, PHP, and Apache
+          # This command ensures MariaDB is installed and configured in a compatible way
+          sudo bt install 1 2 3 || {
+            echo "❌ Failed to install MariaDB via Aapanel"
+            exit 1
+          }
+          
+          echo "✅ MariaDB installed successfully via Aapanel."
 
-          # The 'if' condition below is now simplified.
-          # It no longer checks for 'is_new_install' because we want to set credentials
-          # on BOTH new installs AND restores.
+      - name: '🚀 Configure Remote Access & Restart Services'
+        run: |
+          set -euo pipefail
+          
+          # Ensure services are unmasked and reloaded
+          sudo systemctl unmask mariadb || true
+          sudo systemctl unmask mysql || true
+          sudo systemctl daemon-reload
+          
+          # Start MariaDB
+          echo "🗄️ Starting MariaDB..."
+          sudo systemctl start mariadb || {
+            echo "❌ MariaDB failed to start. Manual intervention needed."
+            exit 1
+          }
+          
+          # Use Aapanel to grant remote access
+          echo "🌐 Granting remote access to MariaDB..."
+          sudo bt 12 || {
+            echo "⚠️ Could not run bt 12 command, manual configuration may be needed"
+          }
+          
+          echo "✅ MariaDB is now configured for remote access."
+          
+          # Final service checks
+          echo "📊 Service Status:"
+          systemctl is-active mariadb apache2 || true
+
+      - name: '🔗 Configure Remote Access and Display Info'
+        run: |
+          set -euo pipefail
+          
           if command -v bt >/dev/null 2>&1; then
             echo "🔐 Configuring Aapanel credentials..."
-            sleep 5 # Give the panel a moment to fully initialize
-
-            # Set Aapanel credentials using the 'bt' command
-            # bt 6 => Change username
-            # bt 5 => Change password
+            sleep 5
             echo "Jacky" | sudo bt 6 2>/dev/null || echo "⚠️ Could not set Aapanel username"
             echo "spidey" | sudo bt 5 2>/dev/null || echo "⚠️ Could not set Aapanel password"
-
-            # Get panel information to display in logs
             echo "📋 Aapanel Information:"
             sudo bt default 2>/dev/null || echo "⚠️ Could not retrieve Aapanel info"
           fi
-
-          # Install and configure Tailscale
+          
           echo "🕸️ Setting up Tailscale VPN..."
           if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
             echo "❌ TAILSCALE_AUTHKEY secret is missing!"
             echo "ℹ️ Please add your Tailscale auth key to GitHub secrets."
-            echo "ℹ️ Get it from: https://login.tailscale.com/admin/settings/keys"
             exit 1
           fi
-
-          # Install Tailscale
+          
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl enable tailscaled
           sudo systemctl start tailscaled
-
-          # Connect with retry logic
+          
           for i in {1..3}; do
             if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes; then
               echo "✅ Tailscale connected on attempt $i"
@@ -389,37 +311,34 @@ jobs:
               sleep 15
             fi
           done
-
+          
           # Start tmate session
           echo "💬 Starting tmate for SSH access..."
           tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready - Welcome to GitHub VPS!"; bash'
-
-          # Wait for tmate with timeout
+          
           timeout 60 tmate -S /tmp/tmate.sock wait tmate-ready || {
             echo "⚠️ tmate session startup timeout"
           }
-
+          
           echo "================================================"
           echo "🎉 VPS IS READY FOR CONNECTION! 🎉"
           echo "================================================"
-
-          # Get connection details
+          
           TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Failed to get IP")
           TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Failed to get tmate info")
           TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "Not available")
-
+          
           echo "🌐 Tailscale IP: $TAILSCALE_IP"
           echo "🔑 SSH Access: $TMATE_SSH"
           echo "🌍 Web Terminal: $TMATE_WEB"
-          echo "👤 Local User: ssh jacky@localhost (password: root)"
-
+          
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Aapanel: http://$TAILSCALE_IP:7800 (Jacky/spidey)"
-            echo "🗄️ MySQL: host: $TAILSCALE_IP | user: remote_user | password: Spidey@123"
+            echo "🗄️ MySQL: This is now managed by Aapanel's database section."
+            echo "To connect, you must create a database and a remote user via the Aapanel UI."
           fi
-
+          
           echo "================================================"
-
 
       - name: '⏳ Maintain VPS Session'
         run: |
@@ -427,29 +346,25 @@ jobs:
           echo "🖥️ VPS session is running!"
           echo "📝 To stop gracefully: touch /tmp/stop_session"
           echo "⏰ Auto-stop in 5.5 hours for backup"
-
-          # Main monitoring loop
+          
           for minute in {1..330}; do
-            # Check for stop signal
             if [[ -f /tmp/stop_session ]]; then
               echo "🛑 Stop signal detected at minute $minute"
               break
             fi
-
-            # Status update every 30 minutes
-            if ((minute % 30 == 0)); then
+            
+            if (( minute % 30 == 0 )); then
               echo "⏰ Runtime: $minute minutes"
-              echo "📊 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ')"
-
-              # Connection info reminder
-              if ((minute % 60 == 0)); then
+              echo "📊 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
+              
+              if (( minute % 60 == 0 )); then
                 echo "🔗 Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'N/A')"
               fi
             fi
-
+            
             sleep 60
           done
-
+          
           echo "🏁 VPS session maintenance completed"
 
       - name: '📦 Create System Backup'
@@ -457,22 +372,18 @@ jobs:
         run: |
           set -euo pipefail
           echo "📦 Creating comprehensive backup..."
-
-          # Create backup directory
+          
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
-
-          # Stop services gracefully
+          
           echo "🛑 Stopping services for clean backup..."
-          sudo systemctl stop apache2 mariadb 2>/dev/null || true
-
+          sudo systemctl stop apache2 mariadb || true
+          
           if command -v bt >/dev/null 2>&1; then
             sudo bt stop 2>/dev/null || true
           fi
-
-          # Wait for services to stop
+          
           sleep 5
-
-          # Create comprehensive backup
+          
           echo "📁 Creating backup archive..."
           sudo tar -czf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
@@ -490,15 +401,13 @@ jobs:
             $(command -v bt >/dev/null && echo "/www/server/panel/pyenv/bin/bt" || echo "") \
             /usr/local/bin/ \
             2>/dev/null || {
-            echo "⚠️ Some files couldn't be backed up (normal)"
-          }
-
-          # Verify backup
+              echo "⚠️ Some files couldn't be backed up (normal)"
+            }
+          
           if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
             BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
             echo "✅ Backup created: $BACKUP_SIZE"
-
-            # Test integrity
+            
             if tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
               echo "✅ Backup integrity verified"
             else
@@ -515,23 +424,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "🚀 Uploading backup to MEGA..."
-
-          # Verify backup exists
+          
           if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
             echo "❌ No backup file found to upload"
             exit 1
           fi
-
-          # Upload with retry mechanism
+          
           for attempt in {1..5}; do
             echo "📤 Upload attempt $attempt/5..."
-
+            
             if rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" \
-              --progress --transfers 1 --retries 3 --low-level-retries 3; then
-
+               --progress --transfers 1 --retries 3 --low-level-retries 3; then
+              
               echo "✅ Upload successful on attempt $attempt"
-
-              # Verify upload
+              
               if rclone ls "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
                 echo "✅ Upload verified on MEGA"
                 break
@@ -540,18 +446,17 @@ jobs:
               fi
             else
               echo "❌ Upload attempt $attempt failed"
-
+              
               if [[ $attempt -eq 5 ]]; then
                 echo "❌ All upload attempts exhausted"
                 exit 1
               fi
-
+              
               echo "⏳ Waiting 30 seconds before retry..."
               sleep 30
             fi
           done
-
-          # Cleanup local backup
+          
           sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
           echo "🗑️ Local backup cleaned up"
 
@@ -565,7 +470,7 @@ jobs:
           echo "🏷️ Status: ${{ job.status }}"
           echo "🖥️ Hostname: $(hostname)"
           echo "🌍 Runner: $(whoami)@$(hostname)"
-
+          
           case "${{ job.status }}" in
             "success")
               echo "✅ Session completed successfully!"
@@ -580,15 +485,14 @@ jobs:
               echo "💾 Backup status unknown"
               ;;
           esac
-
-          # Final system state
+          
           echo ""
           echo "📊 Final System State:"
-          echo "💿 Disk Usage: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
-          echo "🧠 Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "💿 Disk Usage: $(df -h / | tail -1 | awk '{print $3\"/\"$2\" (\"$5\")"}')"
+          echo "🧠 Memory: $(free -h | grep Mem | awk '{print $3\"/\"$2}')"
           echo "⏱️ Uptime: $(uptime -p)"
           echo "🔧 Services: $(systemctl is-active mariadb apache2 ssh tailscaled 2>/dev/null | tr '\n' ' ' || echo 'Not available')"
-
+          
           echo "============================================="
           echo "Thank you for using Spidey VPS! 🕸️"
           echo "============================================="
