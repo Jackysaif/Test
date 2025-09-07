@@ -1,3 +1,12 @@
+# IMPORTANT: For persistent Tailscale IP, you must:
+# 1. Use a reusable auth key from Tailscale admin console (not ephemeral)
+# 2. The static hostname below ensures the same device identity across runs
+#
+# For persistent storage with Mega:
+# 1. Create a Mega account at mega.nz
+# 2. Add MEGA_EMAIL and MEGA_PASSWORD as GitHub secrets
+# 3. User data and installed apps will be backed up/restored automatically
+
 name: RDP
 
 on:
@@ -9,6 +18,143 @@ jobs:
     timeout-minutes: 3600
 
     steps:
+      - name: Install rclone for Mega Storage
+        run: |
+          Write-Host "Installing rclone..."
+          $rcloneUrl = "https://downloads.rclone.org/v1.64.2/rclone-v1.64.2-windows-amd64.zip"
+          $zipPath = "$env:TEMP\rclone.zip"
+          $extractPath = "$env:TEMP\rclone"
+          
+          Invoke-WebRequest -Uri $rcloneUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+          
+          # Move rclone.exe to Program Files
+          $rcloneBin = "$env:ProgramFiles\rclone"
+          New-Item -ItemType Directory -Path $rcloneBin -Force | Out-Null
+          Move-Item "$extractPath\rclone-*\rclone.exe" "$rcloneBin\rclone.exe" -Force
+          
+          # Add to PATH
+          $env:PATH = "$rcloneBin;$env:PATH"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
+          
+          Write-Host "rclone installed successfully"
+          & "$rcloneBin\rclone.exe" version
+      
+      - name: Configure rclone with Mega
+        run: |
+          Write-Host "Configuring rclone with Mega..."
+          
+          # Create rclone config directory
+          $configDir = "$env:APPDATA\rclone"
+          New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+          
+          # Create rclone config for Mega
+          $config = @"
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_EMAIL }}
+          pass = ${{ secrets.MEGA_PASSWORD }}
+          "@
+          
+          $configPath = "$configDir\rclone.conf"
+          Set-Content -Path $configPath -Value $config -Force
+          
+          # Test connection
+          & "$env:ProgramFiles\rclone\rclone.exe" lsd mega: --config $configPath
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Mega connection test failed. Storage persistence may not work."
+          } else {
+              Write-Host "Mega connection successful"
+          }
+      
+      - name: Restore User Data from Mega
+        run: |
+          Write-Host "Checking for existing user data in Mega..."
+          $configPath = "$env:APPDATA\rclone\rclone.conf"
+          $rclone = "$env:ProgramFiles\rclone\rclone.exe"
+          
+          # Define paths to restore
+          $restorePaths = @{
+              "mega:rdp-backup/Desktop" = "$env:USERPROFILE\Desktop"
+              "mega:rdp-backup/Documents" = "$env:USERPROFILE\Documents"
+              "mega:rdp-backup/Downloads" = "$env:USERPROFILE\Downloads"
+              "mega:rdp-backup/AppData/Roaming" = "$env:APPDATA"
+              "mega:rdp-backup/AppData/Local" = "$env:LOCALAPPDATA"
+              "mega:rdp-backup/ProgramData" = "C:\ProgramData"
+              "mega:rdp-backup/Programs" = "$env:ProgramFiles"
+          }
+          
+          foreach ($source in $restorePaths.Keys) {
+              $dest = $restorePaths[$source]
+              Write-Host "Restoring from $source to $dest..."
+              
+              # Check if source exists in Mega
+              $checkCmd = "& `"$rclone`" lsf `"$source`" --config `"$configPath`" --max-depth 0 2>null"
+              $exists = Invoke-Expression $checkCmd
+              
+              if ($exists) {
+                  & $rclone sync $source $dest --config $configPath --progress --transfers 8
+                  Write-Host "Restored: $source"
+              } else {
+                  Write-Host "No backup found for: $source (will be created on first backup)"
+              }
+          }
+          
+          Write-Host "User data restoration completed"
+      
+      - name: Setup Automatic Backup Schedule
+        run: |
+          Write-Host "Setting up automatic backup to Mega..."
+          
+          # Create backup script
+          $backupScript = @'
+          $configPath = "$env:APPDATA\rclone\rclone.conf"
+          $rclone = "$env:ProgramFiles\rclone\rclone.exe"
+          
+          $backupPaths = @{
+              "$env:USERPROFILE\Desktop" = "mega:rdp-backup/Desktop"
+              "$env:USERPROFILE\Documents" = "mega:rdp-backup/Documents"
+              "$env:USERPROFILE\Downloads" = "mega:rdp-backup/Downloads"
+              "$env:APPDATA" = "mega:rdp-backup/AppData/Roaming"
+              "$env:LOCALAPPDATA" = "mega:rdp-backup/AppData/Local"
+              "C:\ProgramData" = "mega:rdp-backup/ProgramData"
+              "$env:ProgramFiles" = "mega:rdp-backup/Programs"
+          }
+          
+          Write-Host "[$(Get-Date)] Starting backup to Mega..."
+          
+          foreach ($source in $backupPaths.Keys) {
+              $dest = $backupPaths[$source]
+              Write-Host "Backing up $source to $dest..."
+              
+              & $rclone sync $source $dest --config $configPath `
+                  --exclude "*.tmp" `
+                  --exclude "*.temp" `
+                  --exclude "Temp/**" `
+                  --exclude "Cache/**" `
+                  --exclude "*.log" `
+                  --transfers 8 `
+                  --checkers 8
+          }
+          
+          Write-Host "[$(Get-Date)] Backup completed"
+          '@
+          
+          $scriptPath = "C:\backup-to-mega.ps1"
+          Set-Content -Path $scriptPath -Value $backupScript -Force
+          
+          # Create scheduled task for periodic backups (every 30 minutes)
+          $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+          $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
+          $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+          
+          Register-ScheduledTask -TaskName "MegaBackup" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force
+          
+          Write-Host "Automatic backup scheduled every 30 minutes"
+          
+          # Run initial backup
+          Start-ScheduledTask -TaskName "MegaBackup"
       - name: Configure Core RDP Settings
         run: |
           # Enable Remote Desktop and disable Network Level Authentication (if needed)
@@ -21,7 +167,7 @@ jobs:
 
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
+         
           # For testing, allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
@@ -49,9 +195,9 @@ jobs:
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
+         
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
+         
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
               exit 1
@@ -61,16 +207,20 @@ jobs:
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
+         
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          # Use a static hostname for persistent IP across workflow runs
+          # IMPORTANT: This requires a reusable auth key, not an ephemeral one
+          $staticHostname = "gh-runner-rdp-persistent"
           
+          # Bring up Tailscale with the provided auth key and static hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$staticHostname
+         
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
@@ -79,17 +229,26 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          
+         
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+          
+          # Also get the Tailscale hostname for easy access
+          $tsHostname = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json | Select-Object -ExpandProperty Self | Select-Object -ExpandProperty DNSName
+          if ($tsHostname) {
+              echo "TAILSCALE_HOSTNAME=$tsHostname" >> $env:GITHUB_ENV
+          }
+     
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
+          if ($env:TAILSCALE_HOSTNAME) {
+              Write-Host "Tailscale Hostname: $env:TAILSCALE_HOSTNAME"
+          }
+         
           # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
@@ -101,13 +260,70 @@ jobs:
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "IP Address: $env:TAILSCALE_IP"
+          if ($env:TAILSCALE_HOSTNAME) {
+              Write-Host "Hostname: $env:TAILSCALE_HOSTNAME"
+              Write-Host "(You can use either the IP or hostname to connect)"
+          }
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "`n=== IMPORTANT NOTES ==="
+          Write-Host "1. This workflow uses a static hostname for persistent IP"
+          Write-Host "2. Ensure you're using a REUSABLE Tailscale auth key"
+          Write-Host "3. The IP will remain the same across workflow runs"
+          Write-Host "4. User data is automatically backed up to Mega every 30 minutes"
+          Write-Host "5. All installed apps and user data will persist across sessions"
           Write-Host "==================`n"
+         
+          # Setup graceful shutdown with final backup
+          $shutdownScript = @'
+          Write-Host "`n[$(Get-Date)] Performing final backup before shutdown..."
+          $configPath = "$env:APPDATA\rclone\rclone.conf"
+          $rclone = "$env:ProgramFiles\rclone\rclone.exe"
+          
+          $backupPaths = @{
+              "$env:USERPROFILE\Desktop" = "mega:rdp-backup/Desktop"
+              "$env:USERPROFILE\Documents" = "mega:rdp-backup/Documents"
+              "$env:USERPROFILE\Downloads" = "mega:rdp-backup/Downloads"
+              "$env:APPDATA" = "mega:rdp-backup/AppData/Roaming"
+              "$env:LOCALAPPDATA" = "mega:rdp-backup/AppData/Local"
+              "C:\ProgramData" = "mega:rdp-backup/ProgramData"
+              "$env:ProgramFiles" = "mega:rdp-backup/Programs"
+          }
+          
+          foreach ($source in $backupPaths.Keys) {
+              $dest = $backupPaths[$source]
+              Write-Host "Final backup: $source to $dest..."
+              & $rclone sync $source $dest --config $configPath `
+                  --exclude "*.tmp" `
+                  --exclude "*.temp" `
+                  --exclude "Temp/**" `
+                  --exclude "Cache/**" `
+                  --exclude "*.log" `
+                  --transfers 8 `
+                  --checkers 8
+          }
+          Write-Host "[$(Get-Date)] Final backup completed successfully"
+          '@
+          
+          $shutdownPath = "C:\final-backup.ps1"
+          Set-Content -Path $shutdownPath -Value $shutdownScript -Force
+          
+          # Register shutdown event
+          Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+              & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\final-backup.ps1"
+          }
           
           # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+          try {
+              while ($true) {
+                  Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+                  Write-Host "                     Last automatic backup: $(Get-ScheduledTask -TaskName 'MegaBackup' | Get-ScheduledTaskInfo | Select-Object -ExpandProperty LastRunTime)"
+                  Start-Sleep -Seconds 300
+              }
+          }
+          finally {
+              # Ensure final backup runs on termination
+              Write-Host "`n[$(Get-Date)] Workflow terminating - running final backup..."
+              & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $shutdownPath
           }
