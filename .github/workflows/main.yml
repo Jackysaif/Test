@@ -26,9 +26,24 @@ jobs:
       - name: '🔧 Install Pre-Restore Tools (curl, rclone, docker)'
         run: |
           set -euo pipefail
+          echo "🌐 Updating package list..."
           sudo apt-get update -qq
-          sudo apt-get install -y curl tar gzip docker.io
+          
+          # Install Docker using the official Docker install script
+          echo "🐳 Installing Docker from official script..."
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          
+          # Install rclone using the official rclone install script
+          echo "☁️ Installing Rclone from official script..."
           curl -fsSL https://rclone.org/install.sh | sudo bash
+          
+          # Install other necessary tools
+          echo "📦 Installing other core tools..."
+          sudo apt-get install -y tar gzip
+          
+          echo "✅ All tools installed successfully."
+
 
       - name: '🛠️ Configure Rclone (MEGA)'
         run: |
