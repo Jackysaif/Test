@@ -1,4 +1,4 @@
-name: Persistent VPS
+Name: Persistent VPS
 
 on:
   schedule:
@@ -23,11 +23,11 @@ jobs:
       # Part 1: Restore or Initial Setup Decision
       # ------------------------------------------------------------------
 
-      - name: '🔧 Install Pre-Restore Tools (curl, rclone)'
+      - name: '🔧 Install Pre-Restore Tools (curl, rclone, docker)'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y curl tar gzip
+          sudo apt-get install -y curl tar gzip docker.io
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: '🛠️ Configure Rclone (MEGA)'
@@ -57,7 +57,7 @@ jobs:
             rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3
             
             echo "📂 Restoring entire system state from backup..."
-            # <-- FIX: This comprehensive restore brings back Aapanel, its software, and all configs.
+            # This comprehensive restore brings back Aapanel, its software, Docker, and all configs.
             sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
             
             rm -f "/tmp/restore/${BACKUP_NAME}"
@@ -77,6 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "🚀 Performing fresh installation of base tools..."
+          # docker.io was already installed in the pre-restore step
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             psmisc screen openssh-server mariadb-server mariadb-client \
@@ -136,31 +137,31 @@ jobs:
           set -euo pipefail
           echo "🔄 Configuring and starting all system services..."
           
-          # <-- CRITICAL FIX: This reloads service definitions after restoring them from backup.
+          # CRITICAL: This reloads service definitions after restoring them from backup.
           echo "Reloading systemd manager configuration..."
           sudo systemctl daemon-reload
           
-          # Enable and start services. On restore, this brings your Aapanel services back online.
-          sudo systemctl enable ssh mariadb
+          # Enable and start services. On restore, this brings your Aapanel and Docker services back online.
+          # <-- FIX: Added Docker to the list of services to start.
+          sudo systemctl enable ssh mariadb docker
           sudo systemctl start ssh
           sudo systemctl start mariadb
+          sudo systemctl start docker
           
           # Start Aapanel and all services managed by it (Apache, PHP, etc.)
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Starting Aapanel and its services..."
             sudo bt start
-            # The 'bt start' command also restarts services managed by Aapanel.
           fi
           
           echo "📊 Final Service Status Check:"
-          for service in ssh mariadb; do
+          for service in ssh mariadb docker; do
             if systemctl is-active --quiet $service; then
               echo "✅ $service (system): active"
             else
               echo "❌ $service (system): inactive"
             fi
           done
-          # Aapanel services run under different names, but starting the panel is sufficient.
 
       - name: '🔗 Configure Remote Access'
         run: |
@@ -192,8 +193,21 @@ jobs:
 
       - name: '⏳ Maintain VPS Session'
         run: |
-          echo "🖥️ VPS session is running. Auto-stop in ~5.5 hours for backup."
-          sleep 19800 # 5.5 hours
+          echo "🖥️ VPS session is running. To stop it gracefully and trigger a backup, create the file /tmp/stop"
+          echo "Example: touch /tmp/stop"
+          
+          end_time=$((SECONDS + 19800)) # 5.5 hours in seconds
+          
+          while [ $SECONDS -lt $end_time ]; do
+            if [ -f "/tmp/stop" ]; then
+              echo "✅ Graceful shutdown requested. Exiting session early."
+              rm -f "/tmp/stop"
+              exit 0 # Exit the loop and proceed to the next step
+            fi
+            sleep 60 # Check every 60 seconds
+          done
+          
+          echo "⏰ Session duration has been reached. Proceeding to backup."
 
       # ------------------------------------------------------------------
       # Part 4: Backup Creation (Runs at the end of every session)
@@ -207,10 +221,11 @@ jobs:
           
           echo "🛑 Stopping services for a clean backup..."
           if command -v bt >/dev/null 2>&1; then sudo bt stop; fi
-          sudo systemctl stop ssh mariadb tailscaled
+          # <-- FIX: Added Docker to the list of services to stop before backup.
+          sudo systemctl stop ssh mariadb tailscaled docker
           sleep 5
           
-          # <-- FIX: This comprehensive list ensures a perfect restore of Aapanel and its software.
+          # This comprehensive list ensures a perfect restore of Aapanel, its software, and Docker.
           BACKUP_PATHS="
             /etc/
             /home/
@@ -220,6 +235,7 @@ jobs:
             /srv/
             /usr/
             /var/lib/dpkg/
+            /var/lib/docker/   # <-- FIX: Added the Docker data directory to the backup.
             /var/lib/mysql/
             /var/lib/tailscale/
             /var/spool/cron/
@@ -272,4 +288,3 @@ jobs:
             echo "❌ Session failed. A backup was still attempted."
           fi
           echo "============================================="
-
