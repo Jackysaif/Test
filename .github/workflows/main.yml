@@ -1,4 +1,4 @@
-Name: Persistent VPS
+name: Persistent VPS
 
 on:
   schedule:
