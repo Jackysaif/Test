@@ -1,103 +1,99 @@
+# A robust GitHub Actions workflow to create and maintain a persistent VPS.
+# It automatically restores the system state from a cloud backup on each run.
+# If no backup exists, it performs a one-time fresh installation.
+# The session is kept alive for ~5.5 hours, then a new backup is created.
+
 name: Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
-  workflow_dispatch:      # Manual trigger
+    # Runs automatically every 6 hours to refresh the session.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    # Allows for manual triggering of the workflow from the Actions tab.
 
 env:
+  # Configuration for the backup archive.
   BACKUP_STORE: /var/backups/vps
   BACKUP_NAME: vps-backup-latest.tar.gz
+  # Rclone remote and path for cloud storage.
   MEGA_REMOTE: mega:vps-backup
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350  # 5 hours 50 minutes (GitHub max is 6 hours)
-    
+    # Set a generous timeout. GitHub Actions max is 6 hours (360 minutes).
+    timeout-minutes: 350
+
     steps:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
-      # Part 1: Restore or Initial Setup Decision
+      # Part 1: Initial Setup & Restore Logic
       # ------------------------------------------------------------------
 
-      - name: '🔧 Install Pre-Restore Tools (curl, rclone, docker)'
+      - name: '🔧 Install Core Tools (One-Time Setup)'
+        # <-- IMPROVEMENT: Consolidated all installations into a single, efficient step.
         run: |
           set -euo pipefail
           echo "🌐 Updating package list..."
           sudo apt-get update -qq
-          
-          # Install Docker using the official Docker install script
+
           echo "🐳 Installing Docker from official script..."
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          
-          # Install rclone using the official rclone install script
+          curl -fsSL https://get.docker.com | sudo sh
+
           echo "☁️ Installing Rclone from official script..."
           curl -fsSL https://rclone.org/install.sh | sudo bash
           
-          # Install other necessary tools
-          echo "📦 Installing other core tools..."
-          sudo apt-get install -y tar gzip
+          echo "📦 Installing other necessary system tools..."
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            tar gzip psmisc screen openssh-server mariadb-server \
+            mariadb-client wget unzip htop nano vim git net-tools tmate
           
-          echo "✅ All tools installed successfully."
+          echo "✅ All required tools are installed."
 
-
-      - name: '🛠️ Configure Rclone (MEGA)'
+      - name: '🛠️ Configure Rclone'
         run: |
           set -euo pipefail
-          echo "🔐 Setting up rclone configuration..."
+          echo "🔐 Setting up rclone configuration from secrets..."
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "❌ RCLONE_CONFIG secret is missing or empty!"
+            echo "❌ ERROR: RCLONE_CONFIG secret is missing or empty!" >&2
             exit 1
           fi
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
-          echo "✅ Rclone configuration created."
-          
+          echo "✅ Rclone configured successfully."
+
       - name: '♻️ Restore from Backup OR Initialize'
         id: restore
         run: |
           set -euo pipefail
-          echo "📦 Checking for existing backup on MEGA..."
+          echo "🔎 Checking for existing backup on MEGA..."
           
           if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found! Downloading and restoring..."
+            echo "✅ Backup found! Preparing to download and restore..."
             mkdir -p /tmp/restore
             
-            echo "📥 Downloading backup..."
+            echo "📥 Downloading backup from ${MEGA_REMOTE}..."
             rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3
             
-            echo "📂 Restoring entire system state from backup..."
-            # This comprehensive restore brings back Aapanel, its software, Docker, and all configs.
+            echo "📂 Restoring system state from backup..."
+            # This comprehensive restore brings back the entire system, including Docker, Aapanel, and configs.
             sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
             
             rm -f "/tmp/restore/${BACKUP_NAME}"
-            echo "✅ Restore complete."
+            echo "✅ System restore complete."
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No backup found. Preparing for a fresh installation..."
+            echo "ℹ️ No backup found. The system will be set up as a fresh installation."
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
 
       # ------------------------------------------------------------------
-      # Part 2: Fresh Installation (Only runs if no backup was found)
+      # Part 2: Fresh Installation Steps (Conditional)
       # ------------------------------------------------------------------
-
-      - name: '⚡ Install Base System Tools (Fresh Install Only)'
-        if: steps.restore.outputs.is_new_install == 'true'
-        run: |
-          set -euo pipefail
-          echo "🚀 Performing fresh installation of base tools..."
-          # docker.io was already installed in the pre-restore step
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            psmisc screen openssh-server mariadb-server mariadb-client \
-            wget unzip htop nano vim git net-tools tmate
-          echo "✅ Base tools installed."
 
       - name: '🗄️ Configure MariaDB (Fresh Install Only)'
         if: steps.restore.outputs.is_new_install == 'true'
@@ -107,44 +103,52 @@ jobs:
           sudo systemctl enable mariadb
           sudo systemctl start mariadb
           
-          echo "🔒 Securing MariaDB..."
-          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('root');"
-          sudo mysql -u root -proot -e "DELETE FROM mysql.user WHERE User='';"
-          sudo mysql -u root -proot -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-          sudo mysql -u root -proot -e "DROP DATABASE IF EXISTS test;"
-          sudo mysql -u root -proot -e "FLUSH PRIVILEGES;"
-          echo "✅ MariaDB secured."
+          echo "🔒 Securing MariaDB installation..."
+          # <-- IMPROVEMENT: Using a secret for the DB password.
+          if [[ -z "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
+             echo "❌ ERROR: DB_ROOT_PASSWORD secret is not set for fresh install!" >&2
+             exit 1
+          fi
+          
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${{ secrets.DB_ROOT_PASSWORD }}');"
+          sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "DELETE FROM mysql.user WHERE User='';"
+          sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+          sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "DROP DATABASE IF EXISTS test;"
+          sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "FLUSH PRIVILEGES;"
+          echo "✅ MariaDB security configuration complete."
 
-      - name: '👤 Initial User Setup (Fresh Install Only)'
+      - name: '👤 Initial User & Hostname Setup (Fresh Install Only)'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
           set -euo pipefail
-          echo "🚀 Setting up user and hostname..."
-          sudo useradd -m -s /bin/bash jacky || echo "User jacky already exists"
-          echo "jacky:root" | sudo chpasswd
+          echo "👤 Setting up user, password, and hostname..."
+          sudo useradd -m -s /bin/bash jacky || echo "User 'jacky' already exists, skipping."
+          # <-- IMPROVEMENT: Using a secret for the user password.
+          echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
           echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
-          echo "✅ Basic system setup completed."
+          echo "✅ System user and hostname configured."
 
       - name: '📦 Install Aapanel (Fresh Install Only)'
         if: steps.restore.outputs.is_new_install == 'true'
         run: |
           set -euo pipefail
-          echo "📥 Installing Aapanel control panel..."
+          echo "📥 Downloading and installing Aapanel..."
           curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-          timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || echo "⚠️ Aapanel installation timed out or failed"
+          # Use a timeout to prevent the installation from hanging indefinitely.
+          timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || echo "⚠️ Aapanel installation timed out or failed. Check logs."
           
           if command -v bt >/dev/null 2>&1; then
-            echo "✅ Aapanel installed. Setting default credentials for first run..."
+            echo "✅ Aapanel installed. Setting default credentials..."
             sleep 5
-            echo "Jacky" | sudo bt 6
-            echo "spidey" | sudo bt 5
+            echo "Jacky" | sudo bt 6  # Set default username
+            echo "spidey" | sudo bt 5 # Set default password
           fi
 
       # ------------------------------------------------------------------
-      # Part 3: Service Start & Session (Runs every time)
+      # Part 3: Service Start & Session (Runs on every execution)
       # ------------------------------------------------------------------
 
       - name: '🚀 Start All Services'
@@ -152,38 +156,38 @@ jobs:
           set -euo pipefail
           echo "🔄 Configuring and starting all system services..."
           
-          # CRITICAL: This reloads service definitions after restoring them from backup.
+          # This is CRITICAL for restoring services correctly from the backup.
           echo "Reloading systemd manager configuration..."
           sudo systemctl daemon-reload
           
-          # Enable and start services. On restore, this brings your Aapanel and Docker services back online.
-          # <-- FIX: Added Docker to the list of services to start.
+          # Enable and start core services.
+          # <-- FIX: Added 'docker' to the list of services to manage.
           sudo systemctl enable ssh mariadb docker
           sudo systemctl start ssh
           sudo systemctl start mariadb
           sudo systemctl start docker
           
-          # Start Aapanel and all services managed by it (Apache, PHP, etc.)
+          # Start Aapanel and all services managed by it (e.g., Apache, Nginx, PHP).
           if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Starting Aapanel and its services..."
+            echo "🎛️ Starting Aapanel..."
             sudo bt start
           fi
           
           echo "📊 Final Service Status Check:"
           for service in ssh mariadb docker; do
             if systemctl is-active --quiet $service; then
-              echo "✅ $service (system): active"
+              echo "  ✅ $service is active."
             else
-              echo "❌ $service (system): inactive"
+              echo "  ❌ $service is INACTIVE."
             fi
           done
 
-      - name: '🔗 Configure Remote Access'
+      - name: '🔗 Configure Remote Access (Tailscale & tmate)'
         run: |
           set -euo pipefail
-          echo "🕸️ Setting up Tailscale VPN..."
+          echo "🕸️ Setting up Tailscale VPN for secure access..."
           if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "❌ TAILSCALE_AUTHKEY secret is missing!"
+            echo "❌ ERROR: TAILSCALE_AUTHKEY secret is missing!" >&2
             exit 1
           fi
           
@@ -191,16 +195,18 @@ jobs:
           sudo systemctl enable --now tailscaled
           sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
           
-          echo "💬 Starting tmate for SSH access..."
-          tmate -S /tmp/tmate.sock new-session -d 'echo "VPS Ready!"; bash'
+          echo "💬 Starting tmate for emergency SSH access..."
+          tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           
           echo "================================================"
-          echo "🎉 VPS IS READY FOR CONNECTION! 🎉"
+          echo "🎉          VPS IS READY FOR CONNECTION         🎉"
+          echo "================================================"
           TAILSCALE_IP=$(sudo tailscale ip -4)
           echo "🌐 Tailscale IP: $TAILSCALE_IP"
-          echo "🔑 tmate SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "🔑 tmate SSH:    $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           if command -v bt >/dev/null 2>&1; then
+            echo ""
             echo "🎛️ Aapanel Panel Details:"
             sudo bt default || true
           fi
@@ -208,24 +214,25 @@ jobs:
 
       - name: '⏳ Maintain VPS Session'
         run: |
-          echo "🖥️ VPS session is running. To stop it gracefully and trigger a backup, create the file /tmp/stop"
-          echo "Example: touch /tmp/stop"
+          echo "🖥️ VPS session is running. This step will time out after ~5.5 hours."
+          echo "To stop the session gracefully and trigger the backup early, create a file: touch /tmp/stop"
           
-          end_time=$((SECONDS + 19800)) # 5.5 hours in seconds
+          # 5.5 hours = 19800 seconds
+          end_time=$((SECONDS + 19800))
           
           while [ $SECONDS -lt $end_time ]; do
             if [ -f "/tmp/stop" ]; then
-              echo "✅ Graceful shutdown requested. Exiting session early."
+              echo "✅ Graceful shutdown signal detected. Exiting session."
               rm -f "/tmp/stop"
-              exit 0 # Exit the loop and proceed to the next step
+              exit 0
             fi
-            sleep 60 # Check every 60 seconds
+            sleep 60
           done
           
-          echo "⏰ Session duration has been reached. Proceeding to backup."
+          echo "⏰ Session duration reached. Proceeding to backup."
 
       # ------------------------------------------------------------------
-      # Part 4: Backup Creation (Runs at the end of every session)
+      # Part 4: Backup Creation (Always runs at the end)
       # ------------------------------------------------------------------
       - name: '📦 Create Full System Backup'
         if: always()
@@ -234,13 +241,13 @@ jobs:
           echo "📦 Creating comprehensive system backup..."
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
           
-          echo "🛑 Stopping services for a clean backup..."
+          echo "🛑 Stopping services for a clean, consistent backup..."
           if command -v bt >/dev/null 2>&1; then sudo bt stop; fi
-          # <-- FIX: Added Docker to the list of services to stop before backup.
+          # <-- FIX: Added 'docker' to the list of services to stop.
           sudo systemctl stop ssh mariadb tailscaled docker
           sleep 5
           
-          # This comprehensive list ensures a perfect restore of Aapanel, its software, and Docker.
+          # This comprehensive list ensures a perfect restore of the entire system state.
           BACKUP_PATHS="
             /etc/
             /home/
@@ -249,16 +256,16 @@ jobs:
             /root/
             /srv/
             /usr/
-            /var/lib/dpkg/
-            /var/lib/docker/   # <-- FIX: Added the Docker data directory to the backup.
+            /var/lib/dpkg/      # <-- IMPROVEMENT: Backup installed package state.
+            /var/lib/docker/    # <-- FIX: Critical for Docker persistence.
             /var/lib/mysql/
-            /var/lib/tailscale/
+            /var/lib/tailscale/ # <-- IMPROVEMENT: Backup Tailscale node identity.
             /var/spool/cron/
             /var/www/
             /www/
           "
           
-          echo "📁 Creating backup archive..."
+          echo "Создание архива резервной копии..."
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --warning=no-file-changed \
@@ -271,18 +278,18 @@ jobs:
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
           echo "✅ Backup created successfully. Size: $BACKUP_SIZE"
 
-      - name: '☁️ Upload Backup to MEGA'
+      - name: '☁️ Upload Backup to Cloud'
         if: always()
         run: |
           set -euo pipefail
           echo "🚀 Uploading backup to MEGA..."
           if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            echo "❌ No backup file found to upload."
+            echo "❌ No backup file found at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}. Skipping upload." >&2
             exit 1
           fi
           
-          echo "🗑️ Removing old backup from MEGA to prevent conflicts..."
-          rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || echo "No old backup to remove."
+          echo "🗑️ Removing old backup from MEGA..."
+          rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || echo "No old backup to remove, proceeding."
 
           echo "📤 Uploading new backup..."
           rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" --progress
@@ -294,12 +301,12 @@ jobs:
         if: always()
         run: |
           echo "============================================="
-          echo "         🕷️ VPS SESSION COMPLETE 🕷️"
+          echo "         ✅ VPS SESSION COMPLETE ✅"
           echo "============================================="
           echo "Job Status: ${{ job.status }}"
           if [[ "${{ job.status }}" == "success" ]]; then
-            echo "✅ Session completed and backup was successful."
+            echo "The session completed normally and the backup was successful."
           else
-            echo "❌ Session failed. A backup was still attempted."
+            echo "The session failed or was cancelled. A backup was still attempted."
           fi
           echo "============================================="
