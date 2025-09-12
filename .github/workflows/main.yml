@@ -1,8 +1,3 @@
-# A robust GitHub Actions workflow to create and maintain a persistent VPS.
-# It automatically restores the system state from a cloud backup on each run.
-# If no backup exists, it performs a one-time fresh installation.
-# The session is kept alive for ~5.5 hours, then a new backup is created.
-
 name: Persistent VPS
 
 on:
@@ -34,7 +29,6 @@ jobs:
       # ------------------------------------------------------------------
 
       - name: '🔧 Install Core Tools (One-Time Setup)'
-        # <-- IMPROVEMENT: Consolidated all installations into a single, efficient step.
         run: |
           set -euo pipefail
           echo "🌐 Updating package list..."
@@ -77,10 +71,9 @@ jobs:
             mkdir -p /tmp/restore
             
             echo "📥 Downloading backup from ${MEGA_REMOTE}..."
-            rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 3
+            rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 5
             
             echo "📂 Restoring system state from backup..."
-            # This comprehensive restore brings back the entire system, including Docker, Aapanel, and configs.
             sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
             
             rm -f "/tmp/restore/${BACKUP_NAME}"
@@ -104,7 +97,6 @@ jobs:
           sudo systemctl start mariadb
           
           echo "🔒 Securing MariaDB installation..."
-          # <-- IMPROVEMENT: Using a secret for the DB password.
           if [[ -z "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
              echo "❌ ERROR: DB_ROOT_PASSWORD secret is not set for fresh install!" >&2
              exit 1
@@ -123,7 +115,6 @@ jobs:
           set -euo pipefail
           echo "👤 Setting up user, password, and hostname..."
           sudo useradd -m -s /bin/bash jacky || echo "User 'jacky' already exists, skipping."
-          # <-- IMPROVEMENT: Using a secret for the user password.
           echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
@@ -137,14 +128,13 @@ jobs:
           set -euo pipefail
           echo "📥 Downloading and installing Aapanel..."
           curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-          # Use a timeout to prevent the installation from hanging indefinitely.
           timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || echo "⚠️ Aapanel installation timed out or failed. Check logs."
           
           if command -v bt >/dev/null 2>&1; then
             echo "✅ Aapanel installed. Setting default credentials..."
             sleep 5
-            echo "Jacky" | sudo bt 6  # Set default username
-            echo "spidey" | sudo bt 5 # Set default password
+            echo "Jacky" | sudo bt 6
+            echo "spidey" | sudo bt 5
           fi
 
       # ------------------------------------------------------------------
@@ -156,18 +146,14 @@ jobs:
           set -euo pipefail
           echo "🔄 Configuring and starting all system services..."
           
-          # This is CRITICAL for restoring services correctly from the backup.
           echo "Reloading systemd manager configuration..."
           sudo systemctl daemon-reload
           
-          # Enable and start core services.
-          # <-- FIX: Added 'docker' to the list of services to manage.
           sudo systemctl enable ssh mariadb docker
           sudo systemctl start ssh
           sudo systemctl start mariadb
           sudo systemctl start docker
           
-          # Start Aapanel and all services managed by it (e.g., Apache, Nginx, PHP).
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Starting Aapanel..."
             sudo bt start
@@ -217,7 +203,6 @@ jobs:
           echo "🖥️ VPS session is running. This step will time out after ~5.5 hours."
           echo "To stop the session gracefully and trigger the backup early, create a file: touch /tmp/stop"
           
-          # 5.5 hours = 19800 seconds
           end_time=$((SECONDS + 19800))
           
           while [ $SECONDS -lt $end_time ]; do
@@ -243,40 +228,34 @@ jobs:
           
           echo "🛑 Stopping services for a clean, consistent backup..."
           if command -v bt >/dev/null 2>&1; then sudo bt stop; fi
-          # <-- FIX: Added 'docker' to the list of services to stop.
           sudo systemctl stop ssh mariadb tailscaled docker
           sleep 5
           
-          # This comprehensive list ensures a perfect restore of the entire system state.
           BACKUP_PATHS="
             /etc/
             /home/
-            /lib/
-            /opt/
             /root/
-            /srv/
-            /usr/
-            /var/lib/dpkg/      # <-- IMPROVEMENT: Backup installed package state.
-            /var/lib/docker/    # <-- FIX: Critical for Docker persistence.
+            /var/lib/docker/
             /var/lib/mysql/
-            /var/lib/tailscale/ # <-- IMPROVEMENT: Backup Tailscale node identity.
-            /var/spool/cron/
             /var/www/
+            /var/spool/cron/
+            /var/lib/dpkg/
+            /var/lib/tailscale/
+            /opt/
+            /srv/
             /www/
           "
           
-          echo "Создание архива резервной копии..."
-          sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
+          echo "Creating optimized backup archive..."
+          # The '-v' flag provides a verbose output, showing files as they are added.
+          sudo tar -czvpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --warning=no-file-changed \
-            --exclude='/proc' --exclude='/tmp' --exclude='/sys' \
-            --exclude='/dev' --exclude='/run' --exclude='/mnt' \
-            --exclude='/media' --exclude='/lost+found' \
             --exclude='*.log*' --exclude='*.pid' --exclude='*.sock' \
             $BACKUP_PATHS
           
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
-          echo "✅ Backup created successfully. Size: $BACKUP_SIZE"
+          echo "✅ Optimized backup created successfully. Size: $BACKUP_SIZE"
 
       - name: '☁️ Upload Backup to Cloud'
         if: always()
