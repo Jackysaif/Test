@@ -369,7 +369,7 @@ jobs:
           # Ensure directories exist
           sudo mkdir -p /home/ /root/ /var/lib/mysql/ /var/www/ /etc/ssh/ \
                        /etc/letsencrypt/ /opt/ /srv/ /www/ /var/spool/cron/ \
-                       /etc/sudoers.d 
+                       /etc/sudoers.d/ 
           
           # Backup only what we need for persistence
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
@@ -494,6 +494,7 @@ jobs:
           echo "   ✓ Database data (/var/lib/mysql/)"
           echo "   ✓ Web data (/var/www/, /www/, /srv/)"
           echo "   ✓ SSH keys & configs"
+          echo "   ✓ Tailscale state (/var/lib/tailscale/)"
           echo "   ✓ Cron jobs & sudoers"
           echo "   ✓ Aapanel configs (if present)"
           echo "   ✓ Docker volumes (if present)"
