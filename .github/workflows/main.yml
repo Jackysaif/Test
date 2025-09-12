@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 350
     permissions:
       contents: read
-      actions: write  # Added permission for upload-artifact
+      actions: write
 
     steps:
       - name: '🕸️ Checkout Code'
@@ -94,8 +94,16 @@ jobs:
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           set -euo pipefail
-          echo "📂 Restoring system state from backup..."
-          sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
+          echo "📂 Restoring system state from downloaded backup..."
+          
+          # The artifact is a ZIP file. Unzip it first.
+          echo "📂 Unzipping artifact to extract tarball..."
+          unzip "/tmp/restore/${{ env.BACKUP_NAME }}.zip" -d /tmp/restore
+          
+          # Now, extract the tarball.
+          echo "📂 Restoring system state from tarball..."
+          sudo tar -xzpf "/tmp/restore/${{ env.BACKUP_NAME }}" -C /
+          
           echo "✅ System restore complete."
 
       # ------------------------------------------------------------------
