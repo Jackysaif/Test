@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-22.04
     # Set a generous timeout. GitHub Actions max is 6 hours (360 minutes).
     timeout-minutes: 350
+    permissions:
+      contents: read
+      actions: write  # Added permission for upload-artifact
 
     steps:
       - name: '🕸️ Checkout Code'
@@ -43,7 +46,7 @@ jobs:
           echo "📦 Installing other necessary system tools..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             tar gzip psmisc screen openssh-server mariadb-server \
-            mariadb-client wget unzip htop nano vim git net-tools tmate
+            mariadb-client wget unzip htop nano vim git net-tools tmate jq
           
           echo "✅ All required tools are installed."
 
@@ -64,25 +67,36 @@ jobs:
         id: restore
         run: |
           set -euo pipefail
-          echo "🔎 Checking for existing backup on MEGA..."
-          
-          if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found! Preparing to download and restore..."
-            mkdir -p /tmp/restore
-            
-            echo "📥 Downloading backup from ${MEGA_REMOTE}..."
-            rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /tmp/restore/ --progress --retries 5
-            
-            echo "📂 Restoring system state from backup..."
-            sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
-            
-            rm -f "/tmp/restore/${BACKUP_NAME}"
-            echo "✅ System restore complete."
+          echo "🔎 Checking for existing backup link on MEGA..."
+
+          # Try to get the artifact link from MEGA
+          ARTIFACT_LINK=$(rclone cat "${MEGA_REMOTE}/latest_backup_link.txt" 2>/dev/null || true)
+
+          if [[ -n "$ARTIFACT_LINK" ]]; then
+            echo "✅ Backup link found! Preparing to download and restore..."
+            echo "artifact_url=${ARTIFACT_LINK}" >> $GITHUB_OUTPUT
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No backup found. The system will be set up as a fresh installation."
+            echo "ℹ️ No backup link found on MEGA. The system will be set up as a fresh installation."
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
+
+      - name: '📥 Download Backup Artifact'
+        if: steps.restore.outputs.is_new_install == 'false'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          url: ${{ steps.restore.outputs.artifact_url }}
+          path: /tmp/restore
+          name: ${{ env.BACKUP_NAME }}
+
+      - name: '📂 Restore from Downloaded Backup'
+        if: steps.restore.outputs.is_new_install == 'false'
+        run: |
+          set -euo pipefail
+          echo "📂 Restoring system state from backup..."
+          sudo tar -xzpf "/tmp/restore/${BACKUP_NAME}" -C /
+          echo "✅ System restore complete."
 
       # ------------------------------------------------------------------
       # Part 2: Fresh Installation Steps (Conditional)
@@ -257,23 +271,34 @@ jobs:
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
           echo "✅ Optimized backup created successfully. Size: $BACKUP_SIZE"
 
-      - name: '☁️ Upload Backup to Cloud'
+      - name: '⬆️ Upload Backup to GitHub Artifacts'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}
+          retention-days: 7  # Store for 7 days
+
+      - name: '🔗 Get Artifact Direct Link and Upload to MEGA'
         if: always()
         run: |
           set -euo pipefail
-          echo "🚀 Uploading backup to MEGA..."
-          if [[ ! -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            echo "❌ No backup file found at ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}. Skipping upload." >&2
-            exit 1
-          fi
-          
-          echo "🗑️ Removing old backup from MEGA..."
-          rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || echo "No old backup to remove, proceeding."
+          echo "🔗 Getting direct link for the uploaded artifact..."
 
-          echo "📤 Uploading new backup..."
-          rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${{ env.MEGA_REMOTE }}" --progress
-          
-          echo "✅ Upload complete."
+          # Note: The 'jq' tool is now installed in the setup step for this to work.
+          ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            | jq -r '.artifacts[] | select(.name == "${{ env.BACKUP_NAME }}") | .id')
+
+          ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
+
+          echo "🗑️ Removing old link file from MEGA..."
+          rclone delete "${MEGA_REMOTE}/latest_backup_link.txt" || echo "No old link file to remove, proceeding."
+
+          echo "📤 Uploading new artifact link to MEGA..."
+          echo "$ARTIFACT_LINK" | rclone rcat "${MEGA_REMOTE}/latest_backup_link.txt"
+
+          echo "✅ New link uploaded complete."
           sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
       - name: '📋 Final Status Report'
