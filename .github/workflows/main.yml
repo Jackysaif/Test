@@ -369,7 +369,7 @@ jobs:
           # Ensure directories exist
           sudo mkdir -p /home/ /root/ /var/lib/mysql/ /var/www/ /etc/ssh/ \
                        /etc/letsencrypt/ /opt/ /srv/ /www/ /var/spool/cron/ \
-                       /etc/sudoers.d/ /etc/hostname /etc/hosts
+                       /etc/sudoers.d 
           
           # Backup only what we need for persistence
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
