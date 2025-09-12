@@ -69,18 +69,17 @@ jobs:
           set -euo pipefail
           echo "🔎 Checking for existing backup link on MEGA..."
 
-          # Try to get the artifact link from MEGA
-          ARTIFACT_LINK=$(rclone cat "${MEGA_REMOTE}/latest_backup_link.txt" 2>/dev/null || true)
-
-          if [[ -n "$ARTIFACT_LINK" ]]; then
-            echo "✅ Backup link found! Preparing to download and restore..."
-            echo "artifact_url=${ARTIFACT_LINK}" >> $GITHUB_OUTPUT
-            echo "is_new_install=false" >> $GITHUB_OUTPUT
+          # Try to get the artifact link from MEGA. This is more robust.
+          if rclone ls "${MEGA_REMOTE}/latest_backup_link.txt" >/dev/null 2>&1; then
+              ARTIFACT_LINK=$(rclone cat "${MEGA_REMOTE}/latest_backup_link.txt")
+              echo "✅ Backup link found! Preparing to download and restore..."
+              echo "artifact_url=${ARTIFACT_LINK}" >> $GITHUB_OUTPUT
+              echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No backup link found on MEGA. The system will be set up as a fresh installation."
-            echo "is_new_install=true" >> $GITHUB_OUTPUT
+              echo "ℹ️ No backup link found on MEGA. The system will be set up as a fresh installation."
+              echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-
+          
       - name: '📥 Download Backup Artifact'
         if: steps.restore.outputs.is_new_install == 'false'
         uses: dawidd6/action-download-artifact@v3
@@ -96,12 +95,11 @@ jobs:
           set -euo pipefail
           echo "📂 Restoring system state from downloaded backup..."
           
-          # The artifact is a ZIP file. Unzip it first.
+          # Unzip the artifact. The 'unzip' command is pre-installed on the runner.
           echo "📂 Unzipping artifact to extract tarball..."
           unzip "/tmp/restore/${{ env.BACKUP_NAME }}.zip" -d /tmp/restore
           
-          # Now, extract the tarball.
-          echo "📂 Restoring system state from tarball..."
+          # Now, extract the original tarball that was inside the zip.
           sudo tar -xzpf "/tmp/restore/${{ env.BACKUP_NAME }}" -C /
           
           echo "✅ System restore complete."
@@ -248,6 +246,9 @@ jobs:
           echo "📦 Creating comprehensive system backup..."
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
           
+          # Ensure all backup paths exist to prevent tar errors on a fresh install.
+          sudo mkdir -p /etc/ /home/ /root/ /var/lib/docker/ /var/lib/mysql/ /var/www/ /var/spool/cron/ /var/lib/dpkg/ /var/lib/tailscale/ /opt/ /srv/ /www/
+          
           echo "🛑 Stopping services for a clean, consistent backup..."
           if command -v bt >/dev/null 2>&1; then sudo bt stop; fi
           sudo systemctl stop ssh mariadb tailscaled docker
@@ -269,7 +270,6 @@ jobs:
           "
           
           echo "Creating optimized backup archive..."
-          # The '-v' flag has been removed to prevent log truncation.
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --warning=no-file-changed \
@@ -285,7 +285,7 @@ jobs:
         with:
           name: ${{ env.BACKUP_NAME }}
           path: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}
-          retention-days: 7  # Store for 7 days
+          retention-days: 7
 
       - name: '🔗 Get Artifact Direct Link and Upload to MEGA'
         if: always()
@@ -293,7 +293,6 @@ jobs:
           set -euo pipefail
           echo "🔗 Getting direct link for the uploaded artifact..."
 
-          # Note: The 'jq' tool is now installed in the setup step for this to work.
           ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
             | jq -r '.artifacts[] | select(.name == "${{ env.BACKUP_NAME }}") | .id')
