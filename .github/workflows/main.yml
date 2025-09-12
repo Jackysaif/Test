@@ -247,8 +247,8 @@ jobs:
           "
           
           echo "Creating optimized backup archive..."
-          # The '-v' flag provides a verbose output, showing files as they are added.
-          sudo tar -czvpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
+          # The '-v' flag has been removed to prevent log truncation.
+          sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --warning=no-file-changed \
             --exclude='*.log*' --exclude='*.pid' --exclude='*.sock' \
