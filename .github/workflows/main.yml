@@ -209,33 +209,46 @@ jobs:
       # Part 3: Full System Backup
       # ------------------------------------------------------------------
 
-      - name: '📦 Create Full System Backup'
+      - name: '📦 Create System Backup'
         if: always()
         run: |
           set -euo pipefail
-          echo "📦 Creating full system backup..."
+          echo "📦 Creating comprehensive backup..."
+          
+          # Create backup directory
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
           
-          echo "🛑 Stopping services for a consistent backup..."
-          if command -v bt >/dev/null 2>&1; then sudo bt stop; fi
-          sudo systemctl stop ssh mariadb docker tailscaled
+          # Stop services gracefully
+          echo "🛑 Stopping services for clean backup..."
+          sudo systemctl stop apache2 mariadb 2>/dev/null || true
+
+          if command -v bt >/dev/null 2>&1; then
+            sudo bt stop 2>/dev/null || true
+          fi
+          
+          # Wait for services to stop
           sleep 5
-
-          echo "🗜️ Compressing the entire filesystem..."
-          sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
+          
+          # Create comprehensive backup
+          echo "📁 Creating backup archive..."
+          sudo tar -czf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
-            --warning=no-file-changed \
-            -C / . \
-            --exclude='/proc' \
-            --exclude='/sys' \
-            --exclude='/dev' \
-            --exclude='/run' \
-            --exclude='/tmp' \
-            --exclude='/mnt' \
-            --exclude='/media' \
-            --exclude='/lost+found' \
-            --exclude='${{ env.BACKUP_STORE }}'
-
+            --ignore-failed-read \
+            --warning=no-file-ignored \
+            --exclude='/proc/*' --exclude='/tmp/*' --exclude='/sys/*' \
+            --exclude='/dev/*' --exclude='/run/*' --exclude='/mnt/*' \
+            --exclude='/media/*' --exclude='/lost+found' \
+            --exclude='*.log' --exclude='*.pid' \
+            /etc/hostname /etc/hosts /etc/passwd /etc/group /etc/shadow \
+            /etc/sudoers.d/ /etc/systemd/system/ /etc/ssh/ \
+            /etc/apache2/ /etc/mysql/ /var/lib/tailscale/ \
+            /var/lib/mysql/ /var/www/ /opt/ /srv/ /www/ \
+            /root/ /home/jacky/ \
+            $(command -v bt >/dev/null && echo "/www/server/panel/pyenv/bin/bt" || echo "") \
+            /usr/local/bin/ \
+            2>/dev/null || {
+              echo "⚠️ Some files couldn't be backed up (normal)"
+            }
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
           echo "✅ Full system backup created. Size: $BACKUP_SIZE"
 
