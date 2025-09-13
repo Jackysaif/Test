@@ -7,7 +7,7 @@ on:
 
 env:
   BACKUP_STORE: /var/backups/vps
-  BACKUP_NAME: vps-full-backup.tar.gz # Changed name for clarity
+  BACKUP_NAME: vps-full-backup.tar.gz
   MEGA_REMOTE: mega:vps-backup
 
 jobs:
@@ -100,17 +100,26 @@ jobs:
           echo "✅ Full system restoration complete."
           echo "is_new_install=false" >> $GITHUB_OUTPUT
 
+      # ✨ THIS STEP IS MODIFIED ✨
       - name: '🌱 Perform Fresh Install Steps'
         id: fresh_install
         if: steps.check_backup.outputs.has_backup != 'true'
         run: |
           echo "is_new_install=true" >> $GITHUB_OUTPUT
           echo "🌱 Performing first-time setup for a new system."
+
+          echo "🐳 Checking for Docker..."
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "Docker not found. Installing with the official script..."
+            curl -fsSL https://get.docker.com | sudo sh
+          else
+            echo "Docker is already installed. Skipping installation."
+          fi
           
-          echo "🔧 Installing services for fresh install..."
+          echo "🔧 Installing other services for fresh install..."
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            docker.io openssh-server mariadb-server mariadb-client
+            openssh-server mariadb-server mariadb-client
           
           echo "👤 Setting up user..."
           sudo useradd -m -s /bin/bash jacky 2>/dev/null || echo "User exists."
@@ -140,10 +149,8 @@ jobs:
           set -euo pipefail
           echo "🚀 Starting all services..."
           
-          # This ensures that services restored from backup can start correctly
           sudo systemctl daemon-reload
           
-          # List of services to start
           SERVICES="ssh docker mariadb"
           
           for SERVICE in $SERVICES; do
@@ -162,7 +169,6 @@ jobs:
       - name: '🔗 Setup Remote Access'
         run: |
           set -euo pipefail
-          # Install Tailscale if it's not already there from backup
           if ! command -v tailscale >/dev/null 2>&1; then
              curl -fsSL https://tailscale.com/install.sh | sh
           fi
@@ -215,7 +221,7 @@ jobs:
           sudo systemctl stop ssh mariadb docker tailscaled
           sleep 5
 
-          echo " compressing the entire filesystem..."
+          echo "🗜️ Compressing the entire filesystem..."
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
             --warning=no-file-changed \
@@ -257,7 +263,6 @@ jobs:
           
           ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
           
-          # Use a different link file to avoid confusion with the smart backup method
           rclone delete "${MEGA_REMOTE}/latest_full_backup_link.txt" || echo "No old link file to delete."
           echo "$ARTIFACT_LINK" | rclone rcat "${MEGA_REMOTE}/latest_full_backup_link.txt"
 
