@@ -1,15 +1,14 @@
 # -----------------------------------------------------------------------------------
 # Persistent VPS (Immortal Edition)
 #
-# v10 - Final. Fixes critical syntax errors (missing EOF, dangerous eval) and
-#       adds the graceful shutdown feature (touch /tmp/stop).
+# v10.1 - Fixed critical syntax errors and improved reliability
 # -----------------------------------------------------------------------------------
 
 name: Persistent VPS (Immortal Edition)
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */4 * * *'  # Runs every 4 hours
   workflow_dispatch:
     inputs:
       force_fresh_install:
@@ -33,7 +32,7 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 235
+    timeout-minutes: 235  # Just under 4 hours to avoid timeout issues
     permissions:
       contents: read
       actions: write
@@ -41,15 +40,19 @@ jobs:
     steps:
       - name: '🚀 Initialize Environment'
         uses: actions/checkout@v4
+        # This step checks out the repository code, which might be needed for any scripts
 
       - name: '🔧 Install Enhanced Toolchain'
         run: |
-          set -euo pipefail
+          set -euo pipefail  # Exit on error, undefined variables, and pipe failures
           sudo apt-get update -qq
+          # Install essential utilities for the VPS operation
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             zstd pv rsync jq curl wget psmisc screen tmate \
             htop fail2ban ufw python3-pip
+          # Install rclone for cloud storage operations
           curl -fsSL https://rclone.org/install.sh | sudo bash
+          # Install Python utilities for system monitoring
           pip3 install --user psutil requests
           echo "✅ Enhanced toolchain installed."
 
@@ -57,11 +60,13 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "❌ CRITICAL: RCLONE_CONFIG secret is missing!" >&2; exit 1
+            echo "❌ CRITICAL: RCLONE_CONFIG secret is missing!" >&2
+            exit 1
           fi
+          # Set up rclone configuration for cloud backups
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-          chmod 600 ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf  # Secure the config file
           echo "✅ Rclone configured."
 
       - name: '🔍 Advanced Backup Discovery'
@@ -69,54 +74,113 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔎 Performing advanced backup discovery..."
-          BACKUP_FOUND=false; BACKUP_SOURCE="github_artifact"; BACKUP_URL=""; BACKUP_TYPE=""
+          BACKUP_FOUND=false
+          BACKUP_SOURCE="github_artifact"
+          BACKUP_URL=""
+          BACKUP_TYPE=""
+          
+          # Check if fresh installation is forced
           if [[ "${{ github.event.inputs.force_fresh_install || 'false' }}" == "true" ]]; then
-            echo "🔄 Fresh installation forced."; echo "backup_found=false" >> $GITHUB_OUTPUT; exit 0
+            echo "🔄 Fresh installation forced."
+            echo "backup_found=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          
+          # Try to find recent successful workflow runs
           WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
             | jq -r '.workflows[] | select(.name == "Persistent VPS (Immortal Edition)") | .id' | head -1)
+          
           if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
+            # Get the latest successful run (excluding current run)
             LATEST_RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?status=success&per_page=5" \
-              | jq -r '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' | head -1)
+              | jq -r --arg current_id "${{ github.run_id }}" '.workflow_runs[] | select(.id != ($current_id | tonumber)) | .id' | head -1)
+            
             if [[ -n "$LATEST_RUN_ID" && "$LATEST_RUN_ID" != "null" ]]; then
-              ARTIFACTS_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/actions/runs/${LATEST_RUN_ID}/artifacts")
+              # Check for artifacts from that run
+              ARTIFACTS_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${LATEST_RUN_ID}/artifacts")
+              
+              # Look for full backup first
               FULL_ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r ".artifacts[] | select(.name == \"${{ env.FULL_BACKUP_NAME }}\") | .id")
               if [[ -n "$FULL_ARTIFACT_ID" && "$FULL_ARTIFACT_ID" != "null" ]]; then
-                BACKUP_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${FULL_ARTIFACT_ID}/zip"; BACKUP_TYPE="full"; BACKUP_FOUND=true
+                BACKUP_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${FULL_ARTIFACT_ID}/zip"
+                BACKUP_TYPE="full"
+                BACKUP_FOUND=true
               else
+                # Fall back to incremental backup
                 INCR_ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r ".artifacts[] | select(.name == \"${{ env.INCREMENTAL_BACKUP_NAME }}\") | .id")
                 if [[ -n "$INCR_ARTIFACT_ID" && "$INCR_ARTIFACT_ID" != "null" ]]; then
-                  BACKUP_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${INCR_ARTIFACT_ID}/zip"; BACKUP_TYPE="incremental"; BACKUP_FOUND=true
+                  BACKUP_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${INCR_ARTIFACT_ID}/zip"
+                  BACKUP_TYPE="incremental"
+                  BACKUP_FOUND=true
                 fi
               fi
             fi
           fi
+          
+          # If no GitHub artifacts found, check MEGA backup links
           if [[ "$BACKUP_FOUND" == "false" ]]; then
             if rclone ls "${MEGA_REMOTE}/full_backup_link.txt" >/dev/null 2>&1; then
-              BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/full_backup_link.txt"); BACKUP_TYPE="full"; BACKUP_SOURCE="mega_link"; BACKUP_FOUND=true
+              BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/full_backup_link.txt")
+              BACKUP_TYPE="full"
+              BACKUP_SOURCE="mega_link"
+              BACKUP_FOUND=true
             elif rclone ls "${MEGA_REMOTE}/incremental_backup_link.txt" >/dev/null 2>&1; then
-              BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/incremental_backup_link.txt"); BACKUP_TYPE="incremental"; BACKUP_SOURCE="mega_link"; BACKUP_FOUND=true
+              BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/incremental_backup_link.txt")
+              BACKUP_TYPE="incremental"
+              BACKUP_SOURCE="mega_link"
+              BACKUP_FOUND=true
             fi
           fi
-          echo "backup_found=$BACKUP_FOUND" >> $GITHUB_OUTPUT; echo "backup_source=$BACKUP_SOURCE" >> $GITHUB_OUTPUT
-          echo "backup_url=$BACKUP_URL" >> $GITHUB_OUTPUT; echo "backup_type=$BACKUP_TYPE" >> $GITHUB_OUTPUT
-          if [[ "$BACKUP_FOUND" == "true" ]]; then echo "✅ Backup Found (Type: $BACKUP_TYPE, Source: $BACKUP_SOURCE)"; else echo "ℹ️ No backups found."; fi
+          
+          # Set output variables for subsequent steps
+          echo "backup_found=$BACKUP_FOUND" >> $GITHUB_OUTPUT
+          echo "backup_source=$BACKUP_SOURCE" >> $GITHUB_OUTPUT
+          echo "backup_url=$BACKUP_URL" >> $GITHUB_OUTPUT
+          echo "backup_type=$BACKUP_TYPE" >> $GITHUB_OUTPUT
+          
+          if [[ "$BACKUP_FOUND" == "true" ]]; then
+            echo "✅ Backup Found (Type: $BACKUP_TYPE, Source: $BACKUP_SOURCE)"
+          else
+            echo "ℹ️ No backups found."
+          fi
 
       - name: '🔄 Advanced System Restoration'
         if: steps.discover_backup.outputs.backup_found == 'true'
         run: |
           set -euo pipefail
           echo "🚀 Beginning system restoration..."
-          sudo mkdir -p /mnt/restore; cd /mnt/restore
-          timeout 600 curl --retry 5 -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "${{ steps.discover_backup.outputs.backup_url }}" -o "backup.zip"
+          sudo mkdir -p /mnt/restore
+          cd /mnt/restore
+          
+          # Download the backup with timeout and retries
+          timeout 600 curl --retry 5 -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ steps.discover_backup.outputs.backup_url }}" -o "backup.zip"
+          
+          # Extract the backup archive
           sudo unzip -q backup.zip
+          
+          # Find the backup file
           BACKUP_FILE=$(find . -name "*.tar.zst" -type f | head -1)
-          if [[ ! -f "$BACKUP_FILE" ]]; then echo "❌ No backup file found!" >&2; exit 1; fi
-          if ! zstd -t "$BACKUP_FILE"; then echo "❌ Backup file is corrupted!" >&2; exit 1; fi
+          if [[ ! -f "$BACKUP_FILE" ]]; then
+            echo "❌ No backup file found!" >&2
+            exit 1
+          fi
+          
+          # Verify backup integrity
+          if ! zstd -t "$BACKUP_FILE"; then
+            echo "❌ Backup file is corrupted!" >&2
+            exit 1
+          fi
+          
           echo "✅ Backup verified (Size: $(du -h "$BACKUP_FILE" | cut -f1)). Restoring..."
+          
+          # Restore the system from backup
           pv "$BACKUP_FILE" | sudo tar -I zstd -xpf - -C /
+          
+          # Clean up
           sudo rm -rf /mnt/restore
           echo "✅ System restoration completed."
 
@@ -125,12 +189,28 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔧 Performing post-restoration system repair..."
+          
+          # Update package lists
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall docker-ce mariadb-server openssh-server ufw fail2ban
-          if [[ -d "/var/lib/mysql" ]]; then sudo chown -R mysql:mysql /var/lib/mysql; fi
+          
+          # Reinstall critical services to ensure they work correctly
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall \
+            docker-ce mariadb-server openssh-server ufw fail2ban
+          
+          # Fix permissions for MySQL if it exists
+          if [[ -d "/var/lib/mysql" ]]; then
+            sudo chown -R mysql:mysql /var/lib/mysql
+          fi
+          
+          # Reload systemd and restart services
           sudo systemctl daemon-reload
           sudo systemctl restart docker mariadb ssh
-          if [[ -f "/www/server/panel/init.sh" ]]; then sudo /www/server/panel/init.sh restart; fi
+          
+          # Restart aaPanel if installed
+          if [[ -f "/www/server/panel/init.sh" ]]; then
+            sudo /www/server/panel/init.sh restart
+          fi
+          
           echo "✅ System repair completed."
 
       - name: '🆕 Enhanced Fresh Installation'
@@ -138,10 +218,19 @@ jobs:
         run: |
           set -euo pipefail
           echo "🚀 Performing enhanced fresh installation..."
+          
+          # Install Docker
           curl -fsSL https://get.docker.com | sudo sh
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server fail2ban ufw openssh-server
+          
+          # Install essential services
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            mariadb-server fail2ban ufw openssh-server
+          
+          # Install aaPanel (web control panel)
           curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-          timeout 1200 bash -c "printf 'y\\nyes\\n' | sudo bash /tmp/install.sh" || echo "⚠️ Aapanel install timed out."
+          timeout 1200 bash -c "printf 'y\\nyes\\n' | sudo bash /tmp/install.sh" || \
+            echo "⚠️ Aapanel install timed out but continuing..."
+          
           echo "✅ Fresh installation completed."
 
       - name: '🔐 Security & User Setup (Fresh Install)'
@@ -149,44 +238,82 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔐 Setting up security and user credentials..."
+          
+          # Create user if doesn't exist
           sudo useradd -m -s /bin/bash -G sudo,docker jacky 2>/dev/null || true
+          
+          # Set password from secret
           echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
+          
+          # Grant sudo privileges without password
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          
+          # Secure MySQL root account
           sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${{ secrets.DB_ROOT_PASSWORD }}'); FLUSH PRIVILEGES;"
+          
+          # Configure aaPanel if installed
           if [[ -f "/www/server/panel/init.sh" ]]; then
-            echo "Jacky" | sudo bt 6; echo "spidey" | sudo bt 5
+            echo "Jacky" | sudo bt 6  # Set username
+            echo "spidey" | sudo bt 5  # Set password
           fi
-          sudo ufw --force reset; sudo ufw default deny incoming; sudo ufw default allow outgoing
-          sudo ufw allow ssh; sudo ufw allow http; sudo ufw allow https; sudo ufw allow 8888/tcp
+          
+          # Configure firewall
+          sudo ufw --force reset
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          sudo ufw allow ssh
+          sudo ufw allow http
+          sudo ufw allow https
+          sudo ufw allow 8888/tcp  # aaPanel port
           sudo ufw --force enable
+          
+          # Enable and start services
           sudo systemctl enable --now fail2ban ssh mariadb docker
+          
           echo "✅ Security setup complete."
 
       - name: '🌐 Configure Network Access'
         run: |
           set -euo pipefail
           echo "🌐 Setting up network access..."
+          
+          # Install and configure Tailscale for secure remote access
           curl -fsSL https://tailscale.com/install.sh | sh
+          
           if [ -f "/var/lib/tailscale/tailscaled.state" ]; then
-            sudo systemctl enable --now tailscaled; sudo tailscale up --accept-routes
-          else
+            # Already configured, just start it
             sudo systemctl enable --now tailscaled
-            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps-immortal --reset --accept-routes
+            sudo tailscale up --accept-routes
+          else
+            # First-time setup with auth key
+            sudo systemctl enable --now tailscaled
+            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
+              --hostname=github-vps-immortal --reset --accept-routes
           fi
-          tmate -S /tmp/tmate.sock new-session -d; tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          # Set up tmate for instant SSH access
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          # Display connection information
           echo "================================================="
           echo "🎉      IMMORTAL VPS IS READY FOR CONNECTION      🎉"
           echo "================================================="
           echo "🌐 Tailscale IP: $(sudo tailscale ip -4)"
           echo "🔑 tmate SSH:    $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          if [[ -f "/www/server/panel/init.sh" ]]; then sudo bt default; fi
+          
+          # Display aaPanel info if installed
+          if [[ -f "/www/server/panel/init.sh" ]]; then
+            sudo bt default
+          fi
           echo "================================================="
 
       - name: '⏳ Enhanced Session Maintenance'
         run: |
           set -euo pipefail
           echo "⏳ Starting enhanced session maintenance..."
-          log_message() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"; }
+          
+          # Create session keeper script with proper EOF termination
           cat << 'EOF' > /tmp/session_keeper.sh
           #!/bin/bash
           log_message() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"; }
@@ -203,44 +330,74 @@ jobs:
               fi
               sleep 300
           done
-         EOF
+          EOF
+          
+          # Make the script executable and run it in background
+          chmod +x /tmp/session_keeper.sh
           nohup bash /tmp/session_keeper.sh > /tmp/session_keeper.log 2>&1 &
           
+          # Calculate end time (3 hours 50 minutes from now)
           END_TIME=$((SECONDS + 13800))
-          log_message "🖥️ Session active. To shut down early, run: touch /tmp/stop"
+          echo "🖥️ Session active. To shut down early, run: touch /tmp/stop"
           
+          # Main session loop with graceful shutdown capability
           while [ $SECONDS -lt $END_TIME ]; do
             if [ -f "/tmp/stop" ]; then
-              log_message "✅ Graceful shutdown signal detected. Proceeding to backup stage."
+              echo "✅ Graceful shutdown signal detected. Proceeding to backup stage."
               sudo rm -f "/tmp/stop"
               break
             fi
             sleep 60
           done
-          log_message "⏰ Session time concluded. Proceeding to backup."
+          
+          echo "⏰ Session time concluded. Proceeding to backup."
 
       - name: '🔄 Create Intelligent Multi-Layer Backup'
         id: create_backup
-        if: always()
+        if: always()  # Run this step even if previous steps failed
         run: |
           set -euo pipefail
           echo "📦 Creating intelligent backup..."
+          
+          # Create backup directories
           sudo mkdir -p "${{ env.BACKUP_STORE }}" "${{ env.INCREMENTAL_STORE }}"
+          
+          # Determine backup strategy
           BACKUP_STRATEGY="full"
-          if [[ "${{ steps.discover_backup.outputs.backup_found }}" == "true" ]]; then BACKUP_STRATEGY="incremental"; fi
-          if [[ -f "/www/server/panel/init.sh" ]]; then sudo /www/server/panel/init.sh stop; fi
+          if [[ "${{ steps.discover_backup.outputs.backup_found }}" == "true" ]]; then
+            BACKUP_STRATEGY="incremental"
+          fi
+          
+          # Stop services to ensure consistent backup
+          if [[ -f "/www/server/panel/init.sh" ]]; then
+            sudo /www/server/panel/init.sh stop
+          fi
           sudo systemctl stop mariadb docker tailscaled || true
           
           if [[ "$BACKUP_STRATEGY" == "full" ]]; then
+            # Create full backup
             BACKUP_FILE="${{ env.BACKUP_STORE }}/${{ env.FULL_BACKUP_NAME }}"
             ARTIFACT_NAME="${{ env.FULL_BACKUP_NAME }}"
-            sudo tar -cf - --absolute-names --directory=/ --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run --exclude=./mnt --exclude=./tmp --exclude=./home/runner --exclude=${{ env.BACKUP_STORE }} . | zstd -T0 -3 > "$BACKUP_FILE"
+            sudo tar -cf - --absolute-names \
+              --directory=/ \
+              --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run \
+              --exclude=./mnt --exclude=./tmp --exclude=./home/runner \
+              --exclude="${{ env.BACKUP_STORE }}" . \
+              | zstd -T0 -3 > "$BACKUP_FILE"
           else
+            # Create incremental backup (only changes in last 4 hours)
             BACKUP_FILE="${{ env.INCREMENTAL_STORE }}/${{ env.INCREMENTAL_BACKUP_NAME }}"
             ARTIFACT_NAME="${{ env.INCREMENTAL_BACKUP_NAME }}"
-            sudo tar -cf - --absolute-names --directory=/ --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run --exclude=./mnt --exclude=./tmp --exclude=./home/runner --exclude=${{ env.BACKUP_STORE }} --newer-mtime='4 hours ago' . | zstd -T0 -3 > "$BACKUP_FILE"
+            sudo tar -cf - --absolute-names \
+              --directory=/ \
+              --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run \
+              --exclude=./mnt --exclude=./tmp --exclude=./home/runner \
+              --exclude="${{ env.BACKUP_STORE }}" \
+              --newer-mtime='4 hours ago' . \
+              | zstd -T0 -3 > "$BACKUP_FILE"
           fi
           
+          # Set output variables
           echo "✅ Backup created (Size: $(du -h "$BACKUP_FILE" | cut -f1))"
           echo "backup_file=$BACKUP_FILE" >> $GITHUB_OUTPUT
           echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
@@ -260,27 +417,43 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔗 Storing backup link in MEGA..."
+          
+          # Wait for artifact to be available
           sleep 45
+          
           ARTIFACT_NAME="${{ steps.create_backup.outputs.artifact_name }}"
           BACKUP_STRATEGY="${{ steps.create_backup.outputs.backup_strategy }}"
           ARTIFACT_ID=""
+          
+          # Try multiple times to get the artifact ID
           for attempt in {1..10}; do
             ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
               | jq -r ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .id")
-            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then break; fi
+            
+            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
+              break
+            fi
             sleep 30
           done
-          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then echo "❌ Failed to retrieve artifact ID!" >&2; exit 1; fi
           
+          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then
+            echo "❌ Failed to retrieve artifact ID!" >&2
+            exit 1
+          fi
+          
+          # Create the artifact download link
           ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
           
+          # Update the appropriate link file in MEGA
           if [[ "$BACKUP_STRATEGY" == "full" ]]; then
             REMOTE_LINK_FILE="full_backup_link.txt"
+            # Remove incremental backup link when creating a new full backup
             rclone delete "${MEGA_REMOTE}/incremental_backup_link.txt" || true
           else
             REMOTE_LINK_FILE="incremental_backup_link.txt"
           fi
           
+          # Store the link in MEGA
           echo "$ARTIFACT_LINK" | rclone rcat "${MEGA_REMOTE}/${REMOTE_LINK_FILE}"
           echo "✅ New '$BACKUP_STRATEGY' backup link stored in MEGA."
