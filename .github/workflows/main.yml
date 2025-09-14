@@ -1,9 +1,9 @@
 # -----------------------------------------------------------------------------------
 # Persistent VPS (Full System Backup Edition)
 #
-# v3 - With Restore Verification and Robust Service Startup
-# This version adds a verification step after restoring and uses a more reliable
-# method to start Aapanel, solving issues where the 'bt' command is not found.
+# v4 - Fixes Execute Permissions Post-Restore
+# This version corrects an issue where file permissions were lost during the
+# backup/artifact process, by explicitly restoring them before starting services.
 # -----------------------------------------------------------------------------------
 
 name: Persistent VPS (Full System Backup Edition)
@@ -122,25 +122,6 @@ jobs:
           sudo rm -rf /mnt/restore
           echo "✅ Full system restoration complete."
 
-      # --- NEW STEP: Verify that the restore was successful before proceeding ---
-      - name: '🕵️ Verify Restore Integrity'
-        if: steps.check_backup.outputs.has_backup == 'true'
-        run: |
-          set -euo pipefail
-          echo "--- Verifying key Aapanel files ---"
-          if [ -f "/www/server/panel/init.sh" ]; then
-            echo "✅ Aapanel init script found at /www/server/panel/init.sh"
-          else
-            echo "❌ CRITICAL: Aapanel init script NOT found. The restore may have failed."
-            # Optionally, exit here if this is a fatal error for you
-            # exit 1 
-          fi
-          echo "--- Checking system PATH ---"
-          echo "$PATH"
-          echo "--- Checking for 'bt' command location ---"
-          which bt || echo "ℹ️ 'bt' command not in standard PATH."
-          ls -l /usr/bin/bt || echo "ℹ️ '/usr/bin/bt' symlink does not exist."
-
       # ------------------------------------------------------------------
       # Part 2: Fresh Installation Steps (Conditional)
       # ------------------------------------------------------------------
@@ -180,7 +161,7 @@ jobs:
           echo "👤 Setting up user, password, and hostname..."
           sudo useradd -m -s /bin/bash jacky || echo "User 'jacky' already exists."
           echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
-          sudo usmod -aG sudo,docker jacky
+          sudo usermod -aG sudo,docker jacky
           echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
           echo "127.0.1.1 github-vps" | sudo tee -a /etc/hosts
@@ -190,28 +171,37 @@ jobs:
       # Part 3: Service Start & Session (Runs on EVERY execution)
       # ------------------------------------------------------------------
 
-      # --- MODIFIED: This step is now more robust for starting restored services ---
+      # --- CRITICAL FIX: Restore permissions and recreate 'bt' command ---
       - name: '🚀 Start All Services (Post-Restore)'
         run: |
           set -euo pipefail
           echo "🔄 Configuring and starting all system services..."
+
+          # --- FIX: Restore executable permissions and recreate 'bt' symlink ---
+          if [ -f "/www/server/panel/init.sh" ]; then
+            echo "✅ Restoring execute permissions for Aapanel script..."
+            sudo chmod +x /www/server/panel/init.sh
+            echo "✅ Recreating 'bt' command symlink..."
+            sudo ln -sf /www/server/panel/init.sh /usr/bin/bt
+          fi
+
           sudo systemctl daemon-reload
           echo "Ensuring essential services are correctly installed and configured..."
           sudo apt-get install -y --reinstall mariadb-server docker-ce
           if [ -d "/var/lib/mysql" ]; then
             sudo chown -R mysql:mysql /var/lib/mysql
           fi
+          
           sudo systemctl enable ssh mariadb docker
           sudo systemctl start ssh
           sudo systemctl start mariadb
           sudo systemctl start docker
           
-          # Use the full path to the init script for maximum reliability after a restore
-          if [ -f "/www/server/panel/init.sh" ]; then
-            echo "🎛️ Starting Aapanel using its init script..."
-            sudo /www/server/panel/init.sh start
+          if command -v bt >/dev/null 2>&1; then
+            echo "🎛️ Starting Aapanel..."
+            sudo bt start
           else
-            echo "⚠️ Aapanel init script not found, cannot start Aapanel."
+            echo "⚠️ Aapanel 'bt' command not found, cannot start Aapanel."
           fi
           
           echo "📊 Final Service Status Check:"
@@ -223,7 +213,6 @@ jobs:
             fi
           done
           
-          # Aapanel's service has a different name, so we check it separately.
           if systemctl is-active --quiet bt-panel; then
             echo "  ✅ bt-panel (Aapanel) is active."
           else
@@ -290,7 +279,7 @@ jobs:
           echo "📦 Creating comprehensive system backup..."
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
           echo "🛑 Stopping services for a clean, consistent backup..."
-          if [ -f "/www/server/panel/init.sh" ]; then sudo /www/server/panel/init.sh stop; fi
+          if command -v bt >/dev/null 2>&1; then sudo bt stop; else echo "Aapanel not running, skipping stop."; fi
           sudo systemctl stop ssh mariadb tailscaled docker || true
           sleep 5
           echo "Creating archive..."
