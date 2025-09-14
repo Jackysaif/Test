@@ -205,13 +205,22 @@ jobs:
         run: |
           set -euo pipefail
           echo "🕸️ Setting up Tailscale VPN for secure access..."
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "❌ ERROR: TAILSCALE_AUTHKEY secret is missing!" >&2
-            exit 1
+          
+          # Restore Tailscale state if a backup exists.
+          if [[ -f "/var/lib/tailscale/tailscaled.state" ]]; then
+            echo "✅ Tailscale state file found and restored. Activating..."
+            sudo systemctl enable --now tailscaled
+          else
+            echo "⚠️ Tailscale state not found. Running fresh setup..."
+            if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
+              echo "❌ ERROR: TAILSCALE_AUTHKEY secret is missing!" >&2
+              exit 1
+            fi
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo systemctl enable --now tailscaled
+            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
           fi
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
+          
           echo "💬 Starting tmate for emergency SSH access..."
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
@@ -297,6 +306,7 @@ jobs:
             /var/spool/cron/crontabs \
             /etc/bt/ \
             /etc/init.d/bt \
+            /var/lib/tailscale/ \
             2>/dev/null || {
             echo "⚠️ Some paths were missing (normal for fresh install)"
           }
@@ -363,5 +373,6 @@ jobs:
           echo "   ✓ Essential configuration files"
           echo "   ✓ User data, databases, and Docker volumes"
           echo "   ✓ Installed application data (Aapanel, web content)"
+          echo "   ✓ Tailscale identity for consistent IP"
           echo "   ✗ Large, non-essential files (Docker images, logs)"
           echo "============================================="
