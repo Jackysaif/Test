@@ -1,12 +1,6 @@
-# -----------------------------------------------------------------------------------
-# Persistent VPS (Hybrid Restore Edition)
-#
-# v5 - This version combines the stable "re-install, then restore data" method
-# with the dual-backup source feature (GitHub Artifacts + MEGA). It is the most
-# robust and feature-complete version.
-# -----------------------------------------------------------------------------------
 
-name: Persistent VPS (Hybrid Restore Edition)
+
+name: 🚀
 
 on:
   schedule:
@@ -64,8 +58,6 @@ jobs:
           set -euo pipefail
           echo "🔎 Checking for existing backup..."
           ARTIFACT_URL=""
-          
-          # Method 1: Search recent successful runs for a backup artifact.
           echo "🔍 Searching recent workflow runs for artifacts..."
           WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
@@ -84,8 +76,6 @@ jobs:
               fi
             fi
           fi
-
-          # Method 2: If no artifact was found, check MEGA for a fallback link.
           if [[ -z "$ARTIFACT_URL" ]]; then
             echo "ℹ️ No recent artifact found. Checking MEGA for a backup link..."
             if rclone ls "${MEGA_REMOTE}/latest_backup_link.txt" >/dev/null 2>&1; then
@@ -93,8 +83,6 @@ jobs:
               echo "✅ Found fallback backup link in MEGA!"
             fi
           fi
-
-          # Final Decision
           if [[ -n "$ARTIFACT_URL" ]]; then
             echo "has_backup=true" >> $GITHUB_OUTPUT
             echo "artifact_url=${ARTIFACT_URL}" >> $GITHUB_OUTPUT
@@ -131,13 +119,10 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "${{ steps.check_backup.outputs.artifact_url }}" \
             -o "backup.zip"
-            
           echo "Extracting ZIP archive..."
           sudo unzip -q backup.zip
-          
           echo "📂 Restoring data on top of the fresh installation..."
           sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C /
-          
           sudo rm -rf /mnt/restore
           echo "✅ Data restoration complete."
 
@@ -149,8 +134,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "🔄 Applying final configurations and starting all services..."
-          
-          # This block only runs on a completely fresh install where no backup was found
           if [[ "${{ steps.check_backup.outputs.has_backup }}" == "false" ]]; then
             echo "🔒 Performing first-time security and credential setup..."
             sudo systemctl enable mariadb
@@ -163,33 +146,45 @@ jobs:
             echo "Jacky" | sudo bt 6
             echo "spidey" | sudo bt 5
           fi
-
-          # This runs every time to ensure services are healthy
           sudo chown -R mysql:mysql /var/lib/mysql
           sudo systemctl daemon-reload
           sudo systemctl restart mariadb
           sudo systemctl restart docker
-          
           echo "🎛️ Starting Aapanel panel and all managed services..."
           sudo bt start
           sleep 5 
           sudo bt 1 
-
           echo "📊 Final Service Status Check:"
           sudo bt status
 
-      - name: '🔗 Configure Remote Access'
+      # --- MODIFIED: This step now correctly handles Tailscale persistence ---
+      - name: '🔗 Configure Remote Access with Persistent Tailscale IP'
         run: |
           set -euo pipefail
           echo "🕸️ Setting up Tailscale VPN..."
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "❌ ERROR: TAILSCALE_AUTHKEY is missing!" >&2; exit 1
-          fi
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
           
-          echo "💬 Starting tmate..."
+          # First, ensure the Tailscale binary is installed on the runner
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Check if a state file was restored from the backup
+          if [ -f "/var/lib/tailscale/tailscaled.state" ]; then
+            echo "✅ Tailscale state file found! Restoring persistent session."
+            # Start the daemon, which will pick up the restored state file
+            sudo systemctl enable --now tailscaled
+            # Bring the connection up using the restored identity. DO NOT use an auth key or --reset here.
+            sudo tailscale up --accept-routes
+          else
+            echo "ℹ️ No Tailscale state found. Performing fresh setup..."
+            if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
+              echo "❌ ERROR: TAILSCALE_AUTHKEY is missing for fresh install!" >&2
+              exit 1
+            fi
+            sudo systemctl enable --now tailscaled
+            # Use the auth key for the first-time connection
+            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=github-vps --reset --accept-routes
+          fi
+
+          echo "💬 Starting tmate for emergency SSH access..."
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
 
