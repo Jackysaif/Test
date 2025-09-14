@@ -186,6 +186,16 @@ jobs:
           set -euo pipefail
           echo "🔄 Configuring and starting all system services..."
           sudo systemctl daemon-reload
+          
+          # Handle MariaDB persistence by reinstalling and setting correct permissions
+          echo "MariaDB service check and setup..."
+          if [[ -d "/var/lib/mysql/" ]]; then
+            echo "MariaDB data directory found. Setting permissions..."
+            sudo chown -R mysql:mysql /var/lib/mysql/
+          fi
+          # Install MariaDB and other services. This is idempotent and won't re-install
+          sudo apt-get install -y mariadb-server mariadb-client
+          
           sudo systemctl enable --now ssh docker mariadb || true
           if command -v bt >/dev/null 2>&1; then
             echo "🎛️ Starting Aapanel..."
@@ -374,5 +384,4 @@ jobs:
           echo "   ✓ User data, databases, and Docker volumes"
           echo "   ✓ Installed application data (Aapanel, web content)"
           echo "   ✓ Tailscale identity for consistent IP"
-          echo "   ✗ Large, non-essential files (Docker images, logs)"
           echo "============================================="
