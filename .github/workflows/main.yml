@@ -107,7 +107,7 @@ jobs:
           echo "📥 Downloading and restoring full system backup..."
           
           # Use /mnt for temporary storage to save root disk space
-          mkdir -p /mnt/restore
+          sudo mkdir -p /mnt/restore
           cd /mnt/restore
           
           # Download the backup
