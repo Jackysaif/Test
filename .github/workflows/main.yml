@@ -9,7 +9,7 @@ on:
 
 env:
   # Configuration for the full system backup.
-  BACKUP_STORE: /var/backups/vps
+  BACKUP_STORE: /mnt/backups/vps
   BACKUP_NAME: vps-full-backup.tar.gz
   # Rclone remote and path for cloud storage.
   MEGA_REMOTE: mega:vps-backup
@@ -105,26 +105,40 @@ jobs:
         run: |
           set -euo pipefail
           echo "📥 Downloading and restoring full system backup..."
-          mkdir -p /tmp/restore
-          cd /tmp/restore
+          
+          # Use /mnt for temporary storage to save root disk space
+          mkdir -p /mnt/restore
+          cd /mnt/restore
+          
+          # Download the backup
           curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "${{ steps.check_backup.outputs.artifact_url }}" \
             -o "backup.zip"
+          
+          # Extract the GitHub artifact (always a zip)
           unzip -q backup.zip
+          
+          # Verify backup file
           if [[ ! -f "${{ env.BACKUP_NAME }}" ]]; then
             echo "❌ Backup file not found after extraction!"
             ls -la
             exit 1
           fi
+          
           echo "📋 Backup file details:"
           ls -lh "${{ env.BACKUP_NAME }}"
+          
+          # Test backup integrity
           echo "🧪 Testing backup integrity..."
           if ! tar -tzf "${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
             echo "❌ Backup is corrupted!"
             exit 1
           fi
+          
           echo "📂 Restoring data..."
+          # Restore the entire filesystem from the backup
           sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C / --warning=no-timestamp
+          
           echo "✅ Full system restoration complete."
 
       # ------------------------------------------------------------------
@@ -234,35 +248,62 @@ jobs:
           done
           echo "⏰ Session ending, preparing backup..."
           
-      - name: '💾 Create Full System Backup'
+      - name: '💾 Create Smart Data Backup'
         if: always()
         run: |
           set -euo pipefail
-          echo "💾 Creating full system backup..."
+          echo "💾 Creating smart data backup..."
+          # Use /mnt for backup storage to save root disk space
           sudo mkdir -p "${{ env.BACKUP_STORE }}"
+          
           echo "🛑 Stopping services cleanly for consistent backup..."
           if command -v bt >/dev/null 2>&1; then sudo bt stop || true; fi
           sudo systemctl stop mariadb || true
           sudo systemctl stop docker || true
           sleep 5
-          echo "📦 Backing up entire root filesystem..."
+          
+          # Create backup of only essential data to prevent hangs
+          echo "📦 Backing up essential data only..."
+          
           sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
             --absolute-names \
-            --exclude=/dev \
-            --exclude=/proc \
-            --exclude=/sys \
-            --exclude=/tmp \
-            --exclude=/run \
-            --exclude=/mnt \
-            --exclude=/media \
-            --exclude=/var/backups \
-            --exclude=/lost+found \
-            / || {
-            echo "⚠️ Tar encountered some missing files, continuing..."
+            --warning=no-file-changed \
+            --warning=no-file-removed \
+            --exclude='/var/lib/docker/overlay2' \
+            --exclude='/var/lib/docker/containers' \
+            --exclude='/var/log' \
+            --exclude='/var/cache' \
+            --exclude='/var/tmp' \
+            --exclude='/var/spool' \
+            --exclude='/var/backups' \
+            /home/ \
+            /root/ \
+            /var/lib/mysql/ \
+            /var/lib/docker/volumes/ \
+            /www/ \
+            /srv/ \
+            /opt/ \
+            /etc/ssh/ \
+            /etc/letsencrypt/ \
+            /etc/sudoers.d/ \
+            /etc/hostname \
+            /etc/hosts \
+            /etc/default/docker \
+            /etc/docker/daemon.json \
+            /etc/apache2/ \
+            /etc/php/ \
+            /etc/nginx/ \
+            /etc/fail2ban/ \
+            /var/spool/cron/crontabs \
+            /etc/bt/ \
+            /etc/init.d/bt \
+            2>/dev/null || {
+            echo "⚠️ Some paths were missing (normal for fresh install)"
           }
+          
           if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
             BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
-            echo "✅ Full system backup created. Size: $BACKUP_SIZE"
+            echo "✅ Smart backup created. Size: $BACKUP_SIZE"
             echo "📋 Backup contents:"
             sudo tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | head -10
           else
@@ -303,6 +344,7 @@ jobs:
           rclone delete "${MEGA_REMOTE}/latest_backup_link.txt" 2>/dev/null || true
           echo "$ARTIFACT_LINK" | rclone rcat "${MEGA_REMOTE}/latest_backup_link.txt"
           echo "✅ Backup link stored in MEGA."
+          # Clean up local backup file from /mnt to free up disk space
           sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
 
       - name: '📋 Session Summary'
@@ -317,9 +359,9 @@ jobs:
           echo "Had Previous Backup: ${{ steps.check_backup.outputs.has_backup }}"
           echo "Runtime: $((SECONDS / 60)) minutes"
           echo ""
-          echo "💾 Full System Backup Used"
-          echo "   ✓ All installed software (Apache, PHP, etc.)"
-          echo "   ✓ All configuration files"
-          echo "   ✓ All user data, databases, and Docker volumes"
-          echo "   ✗ Temporary and virtual filesystems (dev, proc, etc.)"
+          echo "💾 Smart Data Backup Used"
+          echo "   ✓ Essential configuration files"
+          echo "   ✓ User data, databases, and Docker volumes"
+          echo "   ✓ Installed application data (Aapanel, web content)"
+          echo "   ✗ Large, non-essential files (Docker images, logs)"
           echo "============================================="
