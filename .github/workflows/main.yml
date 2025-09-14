@@ -1,13 +1,12 @@
 # -----------------------------------------------------------------------------------
-# Persistent VPS (Targeted Restore Edition)
+# Persistent VPS (Hybrid Restore Edition)
 #
-# v4 - This version uses a more robust "re-install, then restore data" strategy.
-# It installs core applications on every run and then overlays the user data and
-# configurations from a targeted backup. This avoids OS-level conflicts and is
-# the most reliable method for persistence in an ephemeral environment.
+# v5 - This version combines the stable "re-install, then restore data" method
+# with the dual-backup source feature (GitHub Artifacts + MEGA). It is the most
+# robust and feature-complete version.
 # -----------------------------------------------------------------------------------
 
-name: Persistent VPS (Targeted Restore Edition)
+name: Persistent VPS (Hybrid Restore Edition)
 
 on:
   schedule:
@@ -17,7 +16,7 @@ on:
 env:
   # Using /mnt for more space
   BACKUP_STORE: /mnt/vps-backups
-  # This is now a targeted data backup, not a full system one
+  # This is a targeted data backup
   BACKUP_NAME: vps-data-backup.tar.gz
   MEGA_REMOTE: mega:vps-backup
 
@@ -27,14 +26,14 @@ jobs:
     timeout-minutes: 350
     permissions:
       contents: read
-      actions: write
+      actions: write # Required for artifact interaction
 
     steps:
       - name: '🕸️ Checkout Code'
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
-      # Part 1: Setup and Application Installation (Runs Every Time)
+      # Part 1: Setup and Backup Check
       # ------------------------------------------------------------------
 
       - name: '🔧 Install Core Tools & Rclone'
@@ -59,74 +58,105 @@ jobs:
           chmod 600 ~/.config/rclone/rclone.conf
           echo "✅ Rclone configured successfully."
 
-      - name: '🔍 Check for Existing Backup'
+      - name: '🔍 Check for Backup (Artifact First, then MEGA)'
         id: check_backup
         run: |
           set -euo pipefail
-          echo "🔎 Checking for existing data backup..."
-          if rclone ls "${MEGA_REMOTE}/${BACKUP_NAME}" >/dev/null 2>&1; then
-            echo "✅ Backup found in MEGA. Proceeding to restore after installation."
+          echo "🔎 Checking for existing backup..."
+          ARTIFACT_URL=""
+          
+          # Method 1: Search recent successful runs for a backup artifact.
+          echo "🔍 Searching recent workflow runs for artifacts..."
+          WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
+            | jq -r '.workflows[] | select(.name == "Persistent VPS (Hybrid Restore Edition)") | .id' | head -1)
+          if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
+            LATEST_RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?status=success&per_page=3" \
+              | jq -r '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' | head -1)
+            if [[ -n "$LATEST_RUN_ID" && "$LATEST_RUN_ID" != "null" ]]; then
+              ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${LATEST_RUN_ID}/artifacts" \
+                | jq -r '.artifacts[] | select(.name == "${{ env.BACKUP_NAME }}") | .id')
+              if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
+                ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
+                echo "✅ Found backup in a recent successful run!"
+              fi
+            fi
+          fi
+
+          # Method 2: If no artifact was found, check MEGA for a fallback link.
+          if [[ -z "$ARTIFACT_URL" ]]; then
+            echo "ℹ️ No recent artifact found. Checking MEGA for a backup link..."
+            if rclone ls "${MEGA_REMOTE}/latest_backup_link.txt" >/dev/null 2>&1; then
+              ARTIFACT_URL=$(rclone cat "${MEGA_REMOTE}/latest_backup_link.txt")
+              echo "✅ Found fallback backup link in MEGA!"
+            fi
+          fi
+
+          # Final Decision
+          if [[ -n "$ARTIFACT_URL" ]]; then
             echo "has_backup=true" >> $GITHUB_OUTPUT
+            echo "artifact_url=${ARTIFACT_URL}" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No backup found. This will be a fresh session."
+            echo "ℹ️ No backup found anywhere. This will be a fresh session."
             echo "has_backup=false" >> $GITHUB_OUTPUT
           fi
           
-      - name: '📦 Install All Applications'
-        id: install_apps
+      # ------------------------------------------------------------------
+      # Part 2: Application Installation & Data Restore
+      # ------------------------------------------------------------------
+
+      - name: '📦 Install All Applications (Runs Every Time)'
         run: |
           set -euo pipefail
           echo "🚀 Installing all necessary applications (Docker, MariaDB, Aapanel)..."
-          
           echo "🐳 Installing Docker..."
           curl -fsSL https://get.docker.com | sudo sh
-
           echo "🗄️ Installing MariaDB..."
           sudo apt-get install -y mariadb-server mariadb-client
-          sudo systemctl enable mariadb
-          sudo systemctl start mariadb
-          
           echo "📥 Installing Aapanel..."
           curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-          # The install will fail if it detects an existing installation, which is fine.
-          # We care about ensuring the binaries and services are set up correctly.
           timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || echo "ℹ️ Aapanel installation script finished or timed out."
-
           echo "✅ Application installation step complete."
 
-      # ------------------------------------------------------------------
-      # Part 2: Data Restore (Conditional)
-      # ------------------------------------------------------------------
-
-      - name: '♻️ Restore Data & Configurations'
+      - name: '♻️ Restore Data & Configurations (If Backup Exists)'
         if: steps.check_backup.outputs.has_backup == 'true'
         run: |
           set -euo pipefail
-          echo "📥 Downloading backup from MEGA..."
+          echo "📥 Downloading backup from URL: ${{ steps.check_backup.outputs.artifact_url }}"
           sudo mkdir -p /mnt/restore
-          rclone copy "${MEGA_REMOTE}/${BACKUP_NAME}" /mnt/restore/ --progress
+          cd /mnt/restore
+          sudo curl --retry 5 --retry-delay 10 -L \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ steps.check_backup.outputs.artifact_url }}" \
+            -o "backup.zip"
+            
+          echo "Extracting ZIP archive..."
+          sudo unzip -q backup.zip
           
           echo "📂 Restoring data on top of the fresh installation..."
-          # This overlays your saved data onto the new install
-          sudo tar -xzpf "/mnt/restore/${BACKUP_NAME}" -C /
+          sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C /
           
-          sudo rm -f "/mnt/restore/${BACKUP_NAME}"
+          sudo rm -rf /mnt/restore
           echo "✅ Data restoration complete."
 
       # ------------------------------------------------------------------
-      # Part 3: Configuration & Service Start (Runs Every Time)
+      # Part 3: Final Configuration & Service Start
       # ------------------------------------------------------------------
 
       - name: '⚙️ Final Configuration and Service Start'
         run: |
           set -euo pipefail
-          echo "🔄 Applying final configurations and starting services..."
+          echo "🔄 Applying final configurations and starting all services..."
           
-          # If it was a fresh install (no backup), secure MariaDB and set Aapanel creds
+          # This block only runs on a completely fresh install where no backup was found
           if [[ "${{ steps.check_backup.outputs.has_backup }}" == "false" ]]; then
-            echo "🔒 Performing first-time security setup..."
+            echo "🔒 Performing first-time security and credential setup..."
+            sudo systemctl enable mariadb
+            sudo systemctl start mariadb
             if [[ -z "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
-              echo "❌ ERROR: DB_ROOT_PASSWORD secret is not set!" >&2; exit 1
+              echo "❌ ERROR: DB_ROOT_PASSWORD secret is not set for fresh install!" >&2; exit 1
             fi
             sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${{ secrets.DB_ROOT_PASSWORD }}');"
             sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "FLUSH PRIVILEGES;"
@@ -134,20 +164,20 @@ jobs:
             echo "spidey" | sudo bt 5
           fi
 
-          # Always ensure correct ownership and restart services
+          # This runs every time to ensure services are healthy
           sudo chown -R mysql:mysql /var/lib/mysql
           sudo systemctl daemon-reload
           sudo systemctl restart mariadb
           sudo systemctl restart docker
           
-          echo "🎛️ Starting Aapanel panel and services..."
+          echo "🎛️ Starting Aapanel panel and all managed services..."
           sudo bt start
-          sleep 5 # Give services time to spin up
-          sudo bt 1 # Start all Aapanel-managed services (Apache, PHP, etc)
+          sleep 5 
+          sudo bt 1 
 
           echo "📊 Final Service Status Check:"
           sudo bt status
-          
+
       - name: '🔗 Configure Remote Access'
         run: |
           set -euo pipefail
@@ -183,7 +213,7 @@ jobs:
           done
 
       # ------------------------------------------------------------------
-      # Part 4: Targeted Data Backup
+      # Part 4: Targeted Backup Creation and Upload
       # ------------------------------------------------------------------
       
       - name: '📦 Create Targeted Data Backup'
@@ -197,7 +227,7 @@ jobs:
           sudo bt stop
           sudo systemctl stop mariadb docker tailscaled || true
           
-          # Define all critical paths to save
+          # Define all critical paths to save for a targeted restore
           BACKUP_PATHS="
           /www
           /home
@@ -216,15 +246,37 @@ jobs:
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
           echo "✅ Targeted backup created successfully. Size: $BACKUP_SIZE"
 
-      - name: '☁️ Upload Backup to Cloud'
+      - name: '⬆️ Upload Backup as Artifact'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: '🔗 Store Backup Link in MEGA'
         if: always()
         run: |
           set -euo pipefail
-          echo "🚀 Uploading backup to MEGA..."
-          
-          # Delete old backup and upload the new one
-          rclone delete "${MEGA_REMOTE}/${BACKUP_NAME}" || echo "No old backup to remove."
-          rclone copy "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" "${MEGA_REMOTE}/" --progress
-          
-          echo "✅ Upload complete."
+          echo "🔗 Storing backup artifact link in MEGA as a fallback..."
+          sleep 30
+          for attempt in {1..5}; do
+            ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+              | jq -r '.artifacts[] | select(.name == "${{ env.BACKUP_NAME }}") | .id')
+            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
+              break
+            fi
+            echo "⏳ Waiting for artifact API to update ($attempt/5)..."
+            sleep 30
+          done
+          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then
+            echo "❌ Could not get artifact ID!"
+            exit 1
+          fi
+          ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
+          rclone delete "${MEGA_REMOTE}/latest_backup_link.txt" 2>/dev/null || true
+          echo "$ARTIFACT_LINK" | rclone rcat "${MEGA_REMOTE}/latest_backup_link.txt"
+          echo "✅ New backup link stored in MEGA."
           sudo rm -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
