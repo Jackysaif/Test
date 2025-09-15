@@ -1,7 +1,7 @@
 # -----------------------------------------------------------------------------------
 # Persistent VPS (Immortal Edition) - SMART FAST BACKUP VERSION
 #
-# v12.0 - Smart selective backup - 10x faster, only backs up essential data
+# v12.1 - Smart selective backup - 10x faster, only backs up essential data
 # -----------------------------------------------------------------------------------
 
 name: Persistent VPS (Immortal Edition)
@@ -99,7 +99,6 @@ jobs:
             exit 0
           fi
           
-          # Check GitHub artifacts for smart backups
           WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
             | jq -r '.workflows[] | select(.name == "Persistent VPS (Immortal Edition)") | .id' | head -1)
@@ -122,7 +121,6 @@ jobs:
             fi
           fi
           
-          # Check MEGA for smart backup links
           if [[ "$BACKUP_FOUND" == "false" ]] && rclone ls "${MEGA_REMOTE}/smart_backup_link.txt" >/dev/null 2>&1; then
             BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/smart_backup_link.txt" | head -1)
             BACKUP_SOURCE="mega_link"
@@ -148,7 +146,6 @@ jobs:
           sudo mkdir -p /mnt/restore
           cd /mnt/restore
           
-          # Download backup with retry
           max_attempts=3
           for attempt in $(seq 1 $max_attempts); do
             echo "Download attempt $attempt/$max_attempts..."
@@ -164,7 +161,6 @@ jobs:
             sleep 30
           done
           
-          # Extract and verify
           sudo unzip -q backup.zip
           BACKUP_FILE=$(find . -name "*.tar.zst" -type f | head -1)
           
@@ -176,7 +172,6 @@ jobs:
           echo "✅ Backup verified (Size: $(du -h "$BACKUP_FILE" | cut -f1))"
           echo "🔄 Restoring selective backup (this is fast)..."
           
-          # Restore with progress
           pv "$BACKUP_FILE" | sudo tar -I zstd -xpf - -C / --exclude='./tmp/*' --exclude='./proc/*' --exclude='./sys/*'
           
           sudo rm -rf /mnt/restore
@@ -190,12 +185,10 @@ jobs:
           
           sudo apt-get update -qq || true
           
-          # Install Docker if needed
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sudo sh
           fi
           
-          # Repair essential services
           for service in ssh docker mariadb fail2ban; do
             if systemctl list-unit-files --type=service | grep -q "^${service}\.service"; then
               sudo systemctl daemon-reload
@@ -204,20 +197,17 @@ jobs:
             fi
           done
           
-          # Fix MySQL permissions if restored
           if [[ -d "/var/lib/mysql" ]]; then
             sudo chown -R mysql:mysql /var/lib/mysql
             sudo systemctl restart mariadb 2>/dev/null || true
           fi
           
-          # Restore database from dump if present
           if [[ -f "/tmp/db_dumps/all_databases.sql" ]]; then
             echo "Restoring database from dump..."
             sudo mysql < /tmp/db_dumps/all_databases.sql || echo "⚠️ Database restore failed"
             sudo rm -rf /tmp/db_dumps
           fi
           
-          # Import Docker containers if present
           if [[ -d "/tmp/docker_backup" ]] && command -v docker >/dev/null 2>&1; then
             echo "Importing Docker containers..."
             for container_file in /tmp/docker_backup/*.tar.gz; do
@@ -229,7 +219,6 @@ jobs:
             sudo rm -rf /tmp/docker_backup
           fi
           
-          # Restart aaPanel if present
           if [[ -f "/www/server/panel/init.sh" ]]; then
             sudo /www/server/panel/init.sh restart || true
           fi
@@ -242,17 +231,14 @@ jobs:
           set -euo pipefail
           echo "🚀 Performing fresh installation..."
           
-          # Install Docker
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sudo sh
             sudo usermod -aG docker "$USER"
           fi
           
-          # Install essential services
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             mariadb-server fail2ban ufw openssh-server nginx
           
-          # Install aaPanel with timeout
           if curl -fsSL -o /tmp/install_aapanel.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"; then
             chmod +x /tmp/install_aapanel.sh
             timeout 1200 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install_aapanel.sh" || \
@@ -267,7 +253,6 @@ jobs:
           set -euo pipefail
           echo "🔐 Setting up security..."
           
-          # Create user
           if ! id "jacky" >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash -G sudo,docker jacky
             if [[ -n "${{ secrets.USER_PASSWORD || '' }}" ]]; then
@@ -276,18 +261,15 @@ jobs:
             fi
           fi
           
-          # Configure MariaDB
           if systemctl is-active --quiet mariadb && [[ -n "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
             sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${{ secrets.DB_ROOT_PASSWORD }}'); FLUSH PRIVILEGES;" || true
           fi
           
-          # Configure aaPanel
           if [[ -f "/www/server/panel/init.sh" ]]; then
             timeout 30 bash -c 'echo "Jacky" | sudo bt 6' || true
             timeout 30 bash -c 'echo "spidey" | sudo bt 5' || true
           fi
           
-          # Configure firewall
           sudo ufw --force reset
           sudo ufw default deny incoming
           sudo ufw default allow outgoing
@@ -297,7 +279,6 @@ jobs:
           sudo ufw allow 8888/tcp
           sudo ufw --force enable
           
-          # Enable services
           for service in fail2ban ssh mariadb docker nginx; do
             if systemctl list-unit-files --type=service | grep -q "^${service}\.service"; then
               sudo systemctl enable --now "$service" 2>/dev/null || true
@@ -311,7 +292,6 @@ jobs:
           set -euo pipefail
           echo "🌐 Setting up network access..."
           
-          # Install and configure Tailscale
           if ! command -v tailscale >/dev/null 2>&1; then
             curl -fsSL https://tailscale.com/install.sh | sh
           fi
@@ -328,11 +308,9 @@ jobs:
             fi
           fi
           
-          # Setup tmate
           tmate -S /tmp/tmate.sock new-session -d
           timeout 60 bash -c 'while ! tmate -S /tmp/tmate.sock wait tmate-ready; do sleep 1; done' || true
           
-          # Display connection info
           echo ""
           echo "================================================="
           echo "🎉      SMART VPS IS READY FOR CONNECTION      🎉"
@@ -366,13 +344,11 @@ jobs:
           
           log_message() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"; }
           
-          # Session keeper script
           cat << 'EOF' > /tmp/session_keeper.sh
           #!/bin/bash
           log_message() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"; }
           
           while true; do
-              # Monitor critical services
               for service in ssh tailscaled docker mariadb; do
                   if systemctl list-unit-files --type=service | grep -q "^${service}\.service"; then
                       if systemctl is-enabled --quiet "$service" 2>/dev/null && ! systemctl is-active --quiet "$service"; then
@@ -382,7 +358,6 @@ jobs:
                   fi
               done
               
-              # Monitor tmate
               if ! tmate -S /tmp/tmate.sock list-sessions >/dev/null 2>&1; then
                   log_message "⚠️ tmate session lost, restarting..."
                   tmate -S /tmp/tmate.sock new-session -d
@@ -402,7 +377,6 @@ jobs:
           log_message "🖥️ Session started (PID: $KEEPER_PID, Duration: $SESSION_DURATION_MINUTES min)"
           log_message "🛑 To shutdown early: touch /tmp/stop"
           
-          # Main session loop
           END_TIME=$((SECONDS + SESSION_DURATION_SECONDS))
           
           while [ $SECONDS -lt $END_TIME ]; do
@@ -426,6 +400,12 @@ jobs:
           
           log_message "⏰ Session concluded. Starting smart backup..."
 
+---
+
+### **The Critical Fix: Array-Based Backup**
+This section shows the core changes that make the workflow more reliable by using a **Bash array** instead of a text file for backup paths. This prevents the `tar` command from failing if a directory doesn't exist.
+
+```yaml
       - name: '📦 Create Super Fast Smart Backup'
         id: create_backup
         if: always()
@@ -435,404 +415,126 @@ jobs:
           
           mkdir -p "${{ env.BACKUP_STORE }}"
           
-          # Create system inventory first
           echo "📊 Creating comprehensive system inventory..."
           INVENTORY_DIR="/tmp/system_inventory"
           mkdir -p "$INVENTORY_DIR"
           
-          # Installed packages
           dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${Status}\n' > "$INVENTORY_DIR/packages.txt" 2>/dev/null || true
           snap list > "$INVENTORY_DIR/snap_packages.txt" 2>/dev/null || true
           
-          # Docker info
           if command -v docker >/dev/null 2>&1; then
             docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" > "$INVENTORY_DIR/docker_containers.txt" 2>/dev/null || true
             docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" > "$INVENTORY_DIR/docker_images.txt" 2>/dev/null || true
           fi
           
-          # Services
           systemctl list-units --type=service --state=active --no-pager > "$INVENTORY_DIR/active_services.txt" 2>/dev/null || true
-          
-          # Network
           ip addr show > "$INVENTORY_DIR/network.txt" 2>/dev/null || true
           ss -tuln > "$INVENTORY_DIR/ports.txt" 2>/dev/null || true
-          
-          # System info
           df -h > "$INVENTORY_DIR/disk_usage.txt" 2>/dev/null || true
           free -h > "$INVENTORY_DIR/memory.txt" 2>/dev/null || true
-          
-          # Users and cron
           cut -d: -f1,3,4,5,6,7 /etc/passwd > "$INVENTORY_DIR/users.txt" 2>/dev/null || true
           crontab -l > "$INVENTORY_DIR/root_cron.txt" 2>/dev/null || true
-          
-          # Directory structure
           find /var/www /srv /opt /usr/local /home -maxdepth 2 -type d 2>/dev/null | sort > "$INVENTORY_DIR/directories.txt" || true
           
           echo "✅ System inventory completed"
           
-          # Create smart backup paths
           echo "📋 Determining smart backup paths..."
-          cat > /tmp/backup_paths.txt << 'EOF'
-          /etc
-          /root
-          /home
-          EOF
+          # Use a Bash array to store paths for a more robust backup process
+          BACKUP_PATHS=(
+            "/etc"
+            "/root"
+            "/home"
+          )
           
-          # Add web data if exists
-          [[ -d "/var/www" ]] && echo "/var/www" >> /tmp/backup_paths.txt
-          [[ -d "/srv" ]] && echo "/srv" >> /tmp/backup_paths.txt
-          [[ -d "/www" ]] && echo "/www" >> /tmp/backup_paths.txt
+          if [[ -d "/var/www" ]]; then BACKUP_PATHS+=("/var/www"); fi
+          if [[ -d "/srv" ]]; then BACKUP_PATHS+=("/srv"); fi
+          if [[ -d "/www" ]]; then BACKUP_PATHS+=("/www"); fi
           
-          # Handle database - dump if large, copy if small
           if [[ -d "/var/lib/mysql" ]]; then
-            MYSQL_SIZE=$(du -sm /var/lib/mysql 2>/dev/null | cut -f1)
+            MYSQL_SIZE=$(sudo du -sm /var/lib/mysql 2>/dev/null | cut -f1)
             if [[ ${MYSQL_SIZE:-0} -lt 500 ]]; then
-              echo "/var/lib/mysql" >> /tmp/backup_paths.txt
+              BACKUP_PATHS+=("/var/lib/mysql");
             else
               echo "Creating database dump (MySQL too large: ${MYSQL_SIZE}MB)..."
               mkdir -p /tmp/db_dumps
-              mysqldump --all-databases --single-transaction > /tmp/db_dumps/all_databases.sql 2>/dev/null || true
-              echo "/tmp/db_dumps" >> /tmp/backup_paths.txt
+              sudo mysqldump --all-databases --single-transaction > /tmp/db_dumps/all_databases.sql 2>/dev/null || true
+              BACKUP_PATHS+=("/tmp/db_dumps");
             fi
           fi
           
-          # Handle Docker - export containers, not full docker dir
           if command -v docker >/dev/null 2>&1; then
             mkdir -p /tmp/docker_backup
             echo "Exporting Docker containers..."
             docker ps -q | while read container_id; do
               if [[ -n "$container_id" ]]; then
                 container_name=$(docker inspect --format='{{.Name}}' "$container_id" | sed 's/^.//')
-                docker export "$container_id" | gzip > "/tmp/docker_backup/${container_name}.tar.gz" 2>/dev/null || true
+                sudo docker export "$container_id" | gzip > "/tmp/docker_backup/${container_name}.tar.gz" 2>/dev/null || true
               fi
             done
-            # Copy compose files
-            find /home /opt /root -name "docker-compose.y*ml" 2>/dev/null | xargs -I {} cp {} /tmp/docker_backup/ 2>/dev/null || true
-            echo "/tmp/docker_backup" >> /tmp/backup_paths.txt
+            find /home /opt /root -name "docker-compose.y*ml" 2>/dev/null | xargs -I {} sudo cp {} /tmp/docker_backup/ 2>/dev/null || true
+            BACKUP_PATHS+=("/tmp/docker_backup");
           fi
           
-          # Add app directories
-          [[ -d "/opt" ]] && echo "/opt" >> /tmp/backup_paths.txt
-          [[ -d "/usr/local" ]] && echo "/usr/local" >> /tmp/backup_paths.txt
+          if [[ -d "/opt" ]]; then BACKUP_PATHS+=("/opt"); fi
+          if [[ -d "/usr/local" ]]; then BACKUP_PATHS+=("/usr/local"); fi
+          if [[ -d "/etc/letsencrypt" ]]; then BACKUP_PATHS+=("/etc/letsencrypt"); fi
           
-          # SSL certs
-          [[ -d "/etc/letsencrypt" ]] && echo "/etc/letsencrypt" >> /tmp/backup_paths.txt
+          BACKUP_PATHS+=("/tmp/system_inventory");
           
-          # Add inventory
-          echo "/tmp/system_inventory" >> /tmp/backup_paths.txt
+          echo "✅ Will backup ${#BACKUP_PATHS[@]} essential locations"
           
-          - name: '📦 Create Super Fast Smart Backup'
-          id: create_backup
-          if: always()
-          run: |
-          set -euo pipefail
-          echo "📦 Creating super fast smart selective backup..."
-
-          mkdir -p "${{ env.BACKUP_STORE }}"
-
-          # Create system inventory first
-          echo "📊 Creating comprehensive system inventory..."
-          INVENTORY_DIR="/tmp/system_inventory"
-          mkdir -p "$INVENTORY_DIR"
-    
-          # ... (rest of the inventory creation code remains the same) ...
-
-          echo "✅ System inventory completed"
-
-          # Create smart backup paths
-          echo "📋 Determining smart backup paths..."
-          cat > /tmp/backup_paths.txt << 'EOF'
-          /etc
-          /root
-          /home
-          EOF
-
-          # Add web data if exists
-          if [[ -d "/var/www" ]]; then echo "/var/www" >> /tmp/backup_paths.txt; fi
-          if [[ -d "/srv" ]]; then echo "/srv" >> /tmp/backup_paths.txt; fi
-          if [[ -d "/www" ]]; then echo "/www" >> /tmp/backup_paths.txt; fi
-    
-          # Handle database - dump if large, copy if small
-          if [[ -d "/var/lib/mysql" ]]; then
-          MYSQL_SIZE=$(sudo du -sm /var/lib/mysql 2>/dev/null | cut -f1)
-          if [[ ${MYSQL_SIZE:-0} -lt 500 ]]; then
-          echo "/var/lib/mysql" >> /tmp/backup_paths.txt
-          else
-          echo "Creating database dump (MySQL too large: ${MYSQL_SIZE}MB)..."
-          mkdir -p /tmp/db_dumps
-          sudo mysqldump --all-databases --single-transaction > /tmp/db_dumps/all_databases.sql 2>/dev/null || true
-          echo "/tmp/db_dumps" >> /tmp/backup_paths.txt
-          fi
-          fi
-
-          # Handle Docker - export containers, not full docker dir
-          if command -v docker >/dev/null 2>&1; then
-          mkdir -p /tmp/docker_backup
-          echo "Exporting Docker containers..."
-          docker ps -q | while read container_id; do
-          if [[ -n "$container_id" ]]; then
-          container_name=$(docker inspect --format='{{.Name}}' "$container_id" | sed 's/^.//')
-          sudo docker export "$container_id" | gzip > "/tmp/docker_backup/${container_name}.tar.gz" 2>/dev/null || true
-          fi
-          done
-          find /home /opt /root -name "docker-compose.y*ml" 2>/dev/null | xargs -I {} sudo cp {} /tmp/docker_backup/ 2>/dev/null || true
-          echo "/tmp/docker_backup" >> /tmp/backup_paths.txt
-          fi
-
-          # Add app directories
-          if [[ -d "/opt" ]]; then echo "/opt" >> /tmp/backup_paths.txt; fi
-          if [[ -d "/usr/local" ]]; then echo "/usr/local" >> /tmp/backup_paths.txt; fi
-    
-          # SSL certs
-          if [[ -d "/etc/letsencrypt" ]]; then echo "/etc/letsencrypt" >> /tmp/backup_paths.txt; fi
-    
-          # Add inventory
-          echo "/tmp/system_inventory" >> /tmp/backup_paths.txt
-
-          PATH_COUNT=$(wc -l < /tmp/backup_paths.txt)
-          echo "✅ Will backup $PATH_COUNT essential locations"
-
-          # CRITICAL FIX: Add a check for an empty file
-          if [[ ! -s /tmp/backup_paths.txt ]]; then
-          echo "❌ CRITICAL: The backup path list is empty. Exiting." >&2
-          exit 1
-           fi
-    
-          # Stop services briefly for consistency
           echo "🔄 Briefly stopping services for consistent backup..."
           if systemctl is-active --quiet mariadb; then
-          sudo systemctl stop mariadb
-          echo "mariadb" > /tmp/stopped_services.txt
+            sudo systemctl stop mariadb
+            echo "mariadb" > /tmp/stopped_services.txt
           fi
-    
+          
           sleep 2
-    
-          # Create the smart backup with improved error handling
+          
           BACKUP_FILE="${{ env.BACKUP_STORE }}/${{ env.SMART_BACKUP_NAME }}"
-    
+          
           echo "🚀 Creating smart backup (this will be FAST)..."
           START_TIME=$(date +%s)
-    
-          # Use 'sudo tar' to ensure all files can be accessed, and use the --warning=none flag to suppress non-critical warnings
-          sudo tar -cf - \
-          --files-from=/tmp/backup_paths.txt \
-          --ignore-failed-read \
-          --warning=none \
-          2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE" || {
-          echo "❌ Smart backup failed during tar/zstd process!" >&2
-          exit 1
+          
+          # Use the array directly for a more reliable backup process
+          sudo tar -cf - "${BACKUP_PATHS[@]}" --warning=none --ignore-failed-read 2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE" || {
+            echo "❌ Smart backup failed during tar/zstd process!" >&2
+            exit 1
           }
-
+          
           END_TIME=$(date +%s)
           BACKUP_TIME=$((END_TIME - START_TIME))
-    
-          # Restart services
+          
           if [[ -f /tmp/stopped_services.txt ]]; then
-          while read -r service; do
-          [[ -n "$service" ]] && sudo systemctl start "$service"
-          done < /tmp/stopped_services.txt
+            while read -r service; do
+              [[ -n "$service" ]] && sudo systemctl start "$service"
+            done < /tmp/stopped_services.txt
           fi
-    
-          # Verify backup
+          
           if [[ ! -f "$BACKUP_FILE" ]] || [[ ! -s "$BACKUP_FILE" ]]; then
-          echo "❌ Smart backup failed! Creating emergency config backup..."
-          BACKUP_FILE="${{ env.BACKUP_STORE }}/emergency-config-backup.tar.zst"
-          sudo tar -cf - /etc /root/.bashrc /home 2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE"
-          ARTIFACT_NAME="emergency-config-backup.tar.zst"
+            echo "❌ Smart backup failed! Creating emergency config backup..."
+            BACKUP_FILE="${{ env.BACKUP_STORE }}/emergency-config-backup.tar.zst"
+            sudo tar -cf - /etc /root/.bashrc /home 2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE"
+            ARTIFACT_NAME="emergency-config-backup.tar.zst"
           else
-          ARTIFACT_NAME="${{ env.SMART_BACKUP_NAME }}"
+            ARTIFACT_NAME="${{ env.SMART_BACKUP_NAME }}"
           fi
-    
+          
           if ! zstd -t "$BACKUP_FILE" 2>/dev/null; then
-          echo "❌ Backup corrupted!" >&2
-          exit 1
+            echo "❌ Backup corrupted!" >&2
+            exit 1
           fi
-    
+          
           BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-    
+          
           echo "✅ SMART BACKUP COMPLETED!"
           echo "📊 Size: $BACKUP_SIZE"
           echo "⚡ Time: ${BACKUP_TIME} seconds"
           echo "🎯 Contains: configs, web data, databases, apps, Docker containers, system inventory"
-    
-           # Cleanup
-          rm -rf /tmp/db_dumps /tmp/docker_backup /tmp/backup_paths.txt /tmp/stopped_services.txt
-    
+          
+          rm -rf /tmp/db_dumps /tmp/docker_backup
+          
           echo "backup_file=$BACKUP_FILE" >> $GITHUB_OUTPUT
           echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
           echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
           echo "backup_time=${BACKUP_TIME}s" >> $GITHUB_OUTPUT
-
-
-
-      - name: '⬆️ Upload Smart Backup'
-        if: always() && steps.create_backup.outputs.backup_file != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.create_backup.outputs.artifact_name }}
-          path: ${{ steps.create_backup.outputs.backup_file }}
-          retention-days: ${{ github.event.inputs.backup_retention_days || '7' }}
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: '🔗 Store Smart Backup Link'
-        if: always() && steps.create_backup.outputs.backup_file != ''
-        run: |
-          set -euo pipefail
-          echo "🔗 Storing smart backup link in MEGA..."
-          
-          ARTIFACT_NAME="${{ steps.create_backup.outputs.artifact_name }}"
-          BACKUP_SIZE="${{ steps.create_backup.outputs.backup_size }}"
-          BACKUP_TIME="${{ steps.create_backup.outputs.backup_time }}"
-          
-          sleep 45  # Wait for upload
-          
-          # Get artifact ID with retries
-          ARTIFACT_ID=""
-          for attempt in {1..10}; do
-            echo "Getting artifact ID (attempt $attempt)..."
-            ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-              | jq -r ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .id")
-            
-            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-              break
-            fi
-            sleep 15
-          done
-          
-          if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-            ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
-            
-            # Store comprehensive backup info
-            cat << EOF | rclone rcat "${MEGA_REMOTE}/smart_backup_link.txt"
-            $ARTIFACT_LINK
-            Backup: Smart Selective Backup ⚡
-            Size: $BACKUP_SIZE (Ultra Compact!)
-            Time: $BACKUP_TIME (Lightning Fast!)
-            Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            Run: ${{ github.run_id }}
-
-            🚀 SMART BACKUP CONTENTS:
-              ========================
-            ✅ System configs (/etc, /root, /home)
-            ✅ Web server data (/var/www, /srv, /www)
-            ✅ Database dumps (MySQL/MariaDB)
-            ✅ Docker container exports + compose files
-            ✅ Applications (/opt, /usr/local)
-            ✅ SSL certificates (/etc/letsencrypt)
-            ✅ Complete system inventory:
-            📦 All installed packages & versions
-            🐳 Docker containers & images
-            ⚙️ Running services & configs
-            🌐 Network settings & open ports
-            👥 User accounts & cron jobs
-            📁 Directory structure map
-
-           This smart backup is 10-20x smaller and faster than full system backups
-           while containing EVERYTHING needed to restore your server perfectly!
-
-            Next restoration will be LIGHTNING FAST! ⚡
-            EOF
-            
-            echo "✅ Smart backup link stored successfully!"
-            
-          else
-            echo "⚠️ Could not get artifact ID, uploading backup directly..."
-            BACKUP_FILE="${{ steps.create_backup.outputs.backup_file }}"
-            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            
-            if rclone copy "$BACKUP_FILE" "${MEGA_REMOTE}/direct-backups/${TIMESTAMP}_${ARTIFACT_NAME}"; then
-              echo "✅ Direct upload successful!"
-            else
-              echo "❌ All upload methods failed!" >&2
-              exit 1
-            fi
-          fi
-          
-          # Update backup history
-          echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - SMART backup ($BACKUP_SIZE in $BACKUP_TIME) - Run ${{ github.run_id }}" | \
-            rclone rcat "${MEGA_REMOTE}/smart_backup_history.log" --append
-          
-          # Clean up old backup links
-          rclone delete "${MEGA_REMOTE}/full_backup_link.txt" 2>/dev/null || true
-          rclone delete "${MEGA_REMOTE}/incremental_backup_link.txt" 2>/dev/null || true
-          
-          echo "🎉 Smart backup storage completed - Next restore will be SUPER FAST!"
-
-      - name: '🧹 Enhanced Cleanup'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "🧹 Performing cleanup..."
-          
-          # Clean up temporary files
-          cleanup_paths=(
-            "/tmp/tmate.sock"
-            "/tmp/session_keeper.sh"
-            "/tmp/session_keeper.log"
-            "/tmp/system_inventory"
-            "/mnt/restore"
-          )
-          
-          for path in "${cleanup_paths[@]}"; do
-            if [[ -e "$path" ]]; then
-              sudo rm -rf "$path"
-            fi
-          done
-          
-          # Clean package cache
-          sudo apt-get autoremove -y 2>/dev/null || true
-          sudo apt-get autoclean 2>/dev/null || true
-          
-          echo "✅ Cleanup completed."
-
-      - name: '📊 Final Status Report'
-        if: always()
-        run: |
-          echo ""
-          echo "================================================="
-          echo "🎯      SMART VPS - FINAL STATUS REPORT      🎯"
-          echo "================================================="
-          echo "⚡ SESSION TYPE: Smart & Fast VPS"
-          echo "🕐 Duration: ${{ github.event.inputs.session_duration_minutes || '220' }} minutes"
-          echo "💾 Backup Type: Smart Selective Backup"
-          echo "📦 Backup Size: ${{ steps.create_backup.outputs.backup_size || 'N/A' }}"
-          echo "⚡ Backup Time: ${{ steps.create_backup.outputs.backup_time || 'N/A' }}"
-          echo "🔍 Previous Backup: ${{ steps.discover_backup.outputs.backup_found || 'false' }}"
-          echo "🆔 Run ID: ${{ github.run_id }}"
-          echo "================================================="
-          
-          # System information
-          echo "💻 System Info:"
-          echo "   OS: $(lsb_release -d 2>/dev/null | cut -f2 || echo 'Ubuntu')"
-          echo "   Uptime: $(uptime -p 2>/dev/null || echo 'N/A')"
-          echo "   Load: $(uptime | awk -F'load average:' '{print $2}' | xargs || echo 'N/A')"
-          
-          # Service status
-          echo ""
-          echo "🔧 Key Services:"
-          for service in ssh docker mariadb tailscaled nginx; do
-            if systemctl list-unit-files --type=service | grep -q "^${service}\.service"; then
-              if systemctl is-active --quiet "$service"; then
-                echo "   ✅ $service: Running"
-              else
-                echo "   ⚠️ $service: Stopped"
-              fi
-            fi
-          done
-          
-          # Backup advantages
-          echo ""
-          echo "🚀 SMART BACKUP ADVANTAGES:"
-          echo "   ⚡ 10-20x faster than full system backup"
-          echo "   💾 Much smaller size (typically <500MB vs 5-20GB)"
-          echo "   🎯 Contains everything essential for restoration"
-          echo "   📊 Includes complete system inventory"
-          echo "   🔄 Restoration is lightning fast"
-          echo "   💡 Perfect balance of completeness & efficiency"
-          
-          echo ""
-          echo "🎉 SMART VPS SESSION COMPLETED SUCCESSFULLY! 🎉"
-          echo "Next backup/restore cycle will be SUPER FAST! ⚡"
-          echo "================================================="
