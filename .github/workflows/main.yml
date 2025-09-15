@@ -473,10 +473,10 @@ jobs:
           # Create smart backup paths
           echo "📋 Determining smart backup paths..."
           cat > /tmp/backup_paths.txt << 'EOF'
-/etc
-/root
-/home
-EOF
+          /etc
+          /root
+          /home
+          EOF
           
           # Add web data if exists
           [[ -d "/var/www" ]] && echo "/var/www" >> /tmp/backup_paths.txt
@@ -626,34 +626,34 @@ EOF
             
             # Store comprehensive backup info
             cat << EOF | rclone rcat "${MEGA_REMOTE}/smart_backup_link.txt"
-$ARTIFACT_LINK
-Backup: Smart Selective Backup ⚡
-Size: $BACKUP_SIZE (Ultra Compact!)
-Time: $BACKUP_TIME (Lightning Fast!)
-Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-Run: ${{ github.run_id }}
+            $ARTIFACT_LINK
+            Backup: Smart Selective Backup ⚡
+            Size: $BACKUP_SIZE (Ultra Compact!)
+            Time: $BACKUP_TIME (Lightning Fast!)
+            Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            Run: ${{ github.run_id }}
 
-🚀 SMART BACKUP CONTENTS:
-========================
-✅ System configs (/etc, /root, /home)
-✅ Web server data (/var/www, /srv, /www)
-✅ Database dumps (MySQL/MariaDB)
-✅ Docker container exports + compose files
-✅ Applications (/opt, /usr/local)
-✅ SSL certificates (/etc/letsencrypt)
-✅ Complete system inventory:
-   📦 All installed packages & versions
-   🐳 Docker containers & images
-   ⚙️ Running services & configs
-   🌐 Network settings & open ports
-   👥 User accounts & cron jobs
-   📁 Directory structure map
+            🚀 SMART BACKUP CONTENTS:
+              ========================
+            ✅ System configs (/etc, /root, /home)
+            ✅ Web server data (/var/www, /srv, /www)
+            ✅ Database dumps (MySQL/MariaDB)
+            ✅ Docker container exports + compose files
+            ✅ Applications (/opt, /usr/local)
+            ✅ SSL certificates (/etc/letsencrypt)
+            ✅ Complete system inventory:
+            📦 All installed packages & versions
+            🐳 Docker containers & images
+            ⚙️ Running services & configs
+            🌐 Network settings & open ports
+            👥 User accounts & cron jobs
+            📁 Directory structure map
 
-This smart backup is 10-20x smaller and faster than full system backups
-while containing EVERYTHING needed to restore your server perfectly!
+           This smart backup is 10-20x smaller and faster than full system backups
+           while containing EVERYTHING needed to restore your server perfectly!
 
-Next restoration will be LIGHTNING FAST! ⚡
-EOF
+            Next restoration will be LIGHTNING FAST! ⚡
+            EOF
             
             echo "✅ Smart backup link stored successfully!"
             
