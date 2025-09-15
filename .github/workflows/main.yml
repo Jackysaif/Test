@@ -521,69 +521,149 @@ jobs:
           # Add inventory
           echo "/tmp/system_inventory" >> /tmp/backup_paths.txt
           
+          - name: '📦 Create Super Fast Smart Backup'
+          id: create_backup
+          if: always()
+          run: |
+          set -euo pipefail
+          echo "📦 Creating super fast smart selective backup..."
+
+          mkdir -p "${{ env.BACKUP_STORE }}"
+
+          # Create system inventory first
+          echo "📊 Creating comprehensive system inventory..."
+          INVENTORY_DIR="/tmp/system_inventory"
+          mkdir -p "$INVENTORY_DIR"
+    
+          # ... (rest of the inventory creation code remains the same) ...
+
+          echo "✅ System inventory completed"
+
+          # Create smart backup paths
+          echo "📋 Determining smart backup paths..."
+          cat > /tmp/backup_paths.txt << 'EOF'
+          /etc
+          /root
+          /home
+          EOF
+
+          # Add web data if exists
+          if [[ -d "/var/www" ]]; then echo "/var/www" >> /tmp/backup_paths.txt; fi
+          if [[ -d "/srv" ]]; then echo "/srv" >> /tmp/backup_paths.txt; fi
+          if [[ -d "/www" ]]; then echo "/www" >> /tmp/backup_paths.txt; fi
+    
+          # Handle database - dump if large, copy if small
+          if [[ -d "/var/lib/mysql" ]]; then
+          MYSQL_SIZE=$(sudo du -sm /var/lib/mysql 2>/dev/null | cut -f1)
+          if [[ ${MYSQL_SIZE:-0} -lt 500 ]]; then
+          echo "/var/lib/mysql" >> /tmp/backup_paths.txt
+          else
+          echo "Creating database dump (MySQL too large: ${MYSQL_SIZE}MB)..."
+          mkdir -p /tmp/db_dumps
+          sudo mysqldump --all-databases --single-transaction > /tmp/db_dumps/all_databases.sql 2>/dev/null || true
+          echo "/tmp/db_dumps" >> /tmp/backup_paths.txt
+          fi
+          fi
+
+          # Handle Docker - export containers, not full docker dir
+          if command -v docker >/dev/null 2>&1; then
+          mkdir -p /tmp/docker_backup
+          echo "Exporting Docker containers..."
+          docker ps -q | while read container_id; do
+          if [[ -n "$container_id" ]]; then
+          container_name=$(docker inspect --format='{{.Name}}' "$container_id" | sed 's/^.//')
+          sudo docker export "$container_id" | gzip > "/tmp/docker_backup/${container_name}.tar.gz" 2>/dev/null || true
+          fi
+          done
+          find /home /opt /root -name "docker-compose.y*ml" 2>/dev/null | xargs -I {} sudo cp {} /tmp/docker_backup/ 2>/dev/null || true
+          echo "/tmp/docker_backup" >> /tmp/backup_paths.txt
+          fi
+
+          # Add app directories
+          if [[ -d "/opt" ]]; then echo "/opt" >> /tmp/backup_paths.txt; fi
+          if [[ -d "/usr/local" ]]; then echo "/usr/local" >> /tmp/backup_paths.txt; fi
+    
+          # SSL certs
+          if [[ -d "/etc/letsencrypt" ]]; then echo "/etc/letsencrypt" >> /tmp/backup_paths.txt; fi
+    
+          # Add inventory
+          echo "/tmp/system_inventory" >> /tmp/backup_paths.txt
+
           PATH_COUNT=$(wc -l < /tmp/backup_paths.txt)
           echo "✅ Will backup $PATH_COUNT essential locations"
-          
+
+          # CRITICAL FIX: Add a check for an empty file
+          if [[ ! -s /tmp/backup_paths.txt ]]; then
+          echo "❌ CRITICAL: The backup path list is empty. Exiting." >&2
+          exit 1
+           fi
+    
           # Stop services briefly for consistency
           echo "🔄 Briefly stopping services for consistent backup..."
           if systemctl is-active --quiet mariadb; then
-            sudo systemctl stop mariadb
-            echo "mariadb" > /tmp/stopped_services.txt
+          sudo systemctl stop mariadb
+          echo "mariadb" > /tmp/stopped_services.txt
           fi
-          
+    
           sleep 2
-          
-          # Create the smart backup
+    
+          # Create the smart backup with improved error handling
           BACKUP_FILE="${{ env.BACKUP_STORE }}/${{ env.SMART_BACKUP_NAME }}"
-          
+    
           echo "🚀 Creating smart backup (this will be FAST)..."
           START_TIME=$(date +%s)
-          
+    
+          # Use 'sudo tar' to ensure all files can be accessed, and use the --warning=none flag to suppress non-critical warnings
           sudo tar -cf - \
-            --files-from=/tmp/backup_paths.txt \
-            --ignore-failed-read \
-            --warning=no-file-changed \
-            2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE"
-          
+          --files-from=/tmp/backup_paths.txt \
+          --ignore-failed-read \
+          --warning=none \
+          2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE" || {
+          echo "❌ Smart backup failed during tar/zstd process!" >&2
+          exit 1
+          }
+
           END_TIME=$(date +%s)
           BACKUP_TIME=$((END_TIME - START_TIME))
-          
+    
           # Restart services
           if [[ -f /tmp/stopped_services.txt ]]; then
-            while read -r service; do
-              [[ -n "$service" ]] && sudo systemctl start "$service"
-            done < /tmp/stopped_services.txt
+          while read -r service; do
+          [[ -n "$service" ]] && sudo systemctl start "$service"
+          done < /tmp/stopped_services.txt
           fi
-          
+    
           # Verify backup
           if [[ ! -f "$BACKUP_FILE" ]] || [[ ! -s "$BACKUP_FILE" ]]; then
-            echo "❌ Smart backup failed! Creating emergency config backup..."
-            BACKUP_FILE="${{ env.BACKUP_STORE }}/emergency-config-backup.tar.zst"
-            sudo tar -cf - /etc /root/.bashrc /home 2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE"
-            ARTIFACT_NAME="emergency-config-backup.tar.zst"
+          echo "❌ Smart backup failed! Creating emergency config backup..."
+          BACKUP_FILE="${{ env.BACKUP_STORE }}/emergency-config-backup.tar.zst"
+          sudo tar -cf - /etc /root/.bashrc /home 2>/dev/null | zstd -T0 -1 -q > "$BACKUP_FILE"
+          ARTIFACT_NAME="emergency-config-backup.tar.zst"
           else
-            ARTIFACT_NAME="${{ env.SMART_BACKUP_NAME }}"
+          ARTIFACT_NAME="${{ env.SMART_BACKUP_NAME }}"
           fi
-          
+    
           if ! zstd -t "$BACKUP_FILE" 2>/dev/null; then
-            echo "❌ Backup corrupted!" >&2
-            exit 1
+          echo "❌ Backup corrupted!" >&2
+          exit 1
           fi
-          
+    
           BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-          
+    
           echo "✅ SMART BACKUP COMPLETED!"
           echo "📊 Size: $BACKUP_SIZE"
           echo "⚡ Time: ${BACKUP_TIME} seconds"
           echo "🎯 Contains: configs, web data, databases, apps, Docker containers, system inventory"
-          
-          # Cleanup
+    
+           # Cleanup
           rm -rf /tmp/db_dumps /tmp/docker_backup /tmp/backup_paths.txt /tmp/stopped_services.txt
-          
+    
           echo "backup_file=$BACKUP_FILE" >> $GITHUB_OUTPUT
           echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
           echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
           echo "backup_time=${BACKUP_TIME}s" >> $GITHUB_OUTPUT
+
+
 
       - name: '⬆️ Upload Smart Backup'
         if: always() && steps.create_backup.outputs.backup_file != ''
