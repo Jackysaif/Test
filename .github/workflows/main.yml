@@ -400,12 +400,7 @@ jobs:
           
           log_message "⏰ Session concluded. Starting smart backup..."
 
----
 
-### **The Critical Fix: Array-Based Backup**
-This section shows the core changes that make the workflow more reliable by using a **Bash array** instead of a text file for backup paths. This prevents the `tar` command from failing if a directory doesn't exist.
-
-```yaml
       - name: '📦 Create Super Fast Smart Backup'
         id: create_backup
         if: always()
