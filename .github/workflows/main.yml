@@ -238,18 +238,71 @@ jobs:
           echo "📥 Restoring system from backup..."
           echo "Source: ${{ steps.detect_backups.outputs.backup_source }}"
           
-          # Create restoration workspace
+          # Check available disk space
+          echo "💾 Checking available disk space..."
+          df -h /
+          AVAILABLE_GB=$(df / | tail -1 | awk '{print $4}' | sed 's/G//')
+          echo "Available space: ${AVAILABLE_GB}G"
+          
+          # Create restoration workspace with proper permissions
+          echo "📁 Creating restoration workspace..."
           sudo mkdir -p /mnt/restore
+          sudo chown $(whoami):$(whoami) /mnt/restore
           cd /mnt/restore
           
+          # Clean any existing files
+          rm -f backup_download.zip* backup_*.tar.gz* 2>/dev/null || true
+          
           echo "🌐 Downloading backup archive..."
-          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          # Download with better error handling and progress
+          if ! curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "${{ steps.detect_backups.outputs.backup_url }}" \
             -o "backup_download.zip" \
-            --fail --silent --show-error
+            --fail \
+            --max-time 600 \
+            --retry 3 \
+            --retry-delay 10 \
+            --progress-bar; then
+            
+            echo "❌ Download failed. Checking disk space and retrying..."
+            df -h /
+            
+            # Try alternative download location
+            cd /tmp
+            echo "🔄 Retrying download in /tmp..."
+            curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "${{ steps.detect_backups.outputs.backup_url }}" \
+              -o "backup_download.zip" \
+              --fail \
+              --max-time 300 \
+              --retry 2 \
+              --progress-bar
+            
+            mv backup_download.zip /mnt/restore/
+            cd /mnt/restore
+          fi
           
-          echo "📦 Extracting backup archive..."
-          unzip -q backup_download.zip
+          # Verify download
+          if [[ ! -f "backup_download.zip" ]] || [[ ! -s "backup_download.zip" ]]; then
+            echo "❌ Download failed or file is empty!"
+            ls -la
+            exit 1
+          fi
+          
+          DOWNLOAD_SIZE=$(du -h backup_download.zip | cut -f1)
+          echo "📦 Downloaded: $DOWNLOAD_SIZE"
+          
+          echo "📂 Extracting backup archive..."
+          if ! unzip -q backup_download.zip; then
+            echo "❌ Failed to extract backup!"
+            echo "File info:"
+            file backup_download.zip
+            head -c 100 backup_download.zip | hexdump -C
+            exit 1
+          fi
+          
+          # Clean up zip file to save space
+          rm -f backup_download.zip
           
           # Verify backup file exists
           if [[ ! -f "${{ env.BACKUP_NAME }}" ]]; then
@@ -263,31 +316,50 @@ jobs:
           echo "🧪 Validating backup integrity..."
           if ! tar -tzf "${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
             echo "❌ Backup file is corrupted!"
+            file "${{ env.BACKUP_NAME }}"
             exit 1
           fi
           
           # Display backup information
           BACKUP_SIZE=$(du -h "${{ env.BACKUP_NAME }}" | cut -f1)
+          FILE_COUNT=$(tar -tzf "${{ env.BACKUP_NAME }}" | wc -l)
           echo "📋 Backup Details:"
           echo "  Size: $BACKUP_SIZE"
-          echo "  Files: $(tar -tzf "${{ env.BACKUP_NAME }}" | wc -l)"
+          echo "  Files: $FILE_COUNT"
           
-          # Restore system state
-          echo "🔄 Restoring full system state..."
-          sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C / \
-            --numeric-owner \
-            --same-permissions \
-            --warning=no-timestamp \
-            --exclude='dev/*' \
-            --exclude='proc/*' \
-            --exclude='sys/*' \
-            --exclude='tmp/*' \
-            --exclude='run/*' \
-            --exclude='mnt/*' \
-            --exclude='media/*' \
-            || {
-              echo "⚠️  Some files couldn't be restored (expected for system files)"
-            }
+          # Check if we have enough space for extraction
+          BACKUP_SIZE_KB=$(du -k "${{ env.BACKUP_NAME }}" | cut -f1)
+          AVAILABLE_KB=$(df /mnt | tail -1 | awk '{print $4}')
+          if [[ $BACKUP_SIZE_KB -gt $((AVAILABLE_KB / 3)) ]]; then
+            echo "⚠️  Limited disk space. Using minimal extraction..."
+            # Extract only essential directories
+            sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C / \
+              --numeric-owner \
+              --same-permissions \
+              --warning=no-timestamp \
+              home/ etc/ var/lib/mysql/ opt/ usr/local/ \
+              2>/dev/null || true
+          else
+            # Restore full system state
+            echo "🔄 Restoring full system state..."
+            sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C / \
+              --numeric-owner \
+              --same-permissions \
+              --warning=no-timestamp \
+              --exclude='dev/*' \
+              --exclude='proc/*' \
+              --exclude='sys/*' \
+              --exclude='tmp/*' \
+              --exclude='run/*' \
+              --exclude='mnt/*' \
+              --exclude='media/*' \
+              || {
+                echo "⚠️  Some files couldn't be restored (expected for system files)"
+              }
+          fi
+          
+          # Clean up extracted backup to save space
+          rm -f "${{ env.BACKUP_NAME }}"
           
           echo "✅ System restoration completed successfully"
 
