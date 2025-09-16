@@ -87,7 +87,17 @@ jobs:
           echo "🌐 Updating package repositories..."
           sudo apt-get update -qq
           
-          # Install core tools
+          # Fix any broken packages first
+          echo "🔧 Fixing any broken packages..."
+          sudo apt-get install -f -y || true
+          sudo dpkg --configure -a || true
+          
+          # Remove conflicting packages
+          echo "🗑️ Removing conflicting packages..."
+          sudo apt-get remove --purge -y containerd docker docker-engine docker.io containerd runc || true
+          sudo apt-get autoremove -y || true
+          
+          # Install core tools (without Docker first)
           echo "📦 Installing system packages..."
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             curl wget git tar gzip unzip jq \
@@ -100,12 +110,22 @@ jobs:
             gnupg lsb-release \
             build-essential \
             python3 python3-pip \
-            rsync rclone \
-            docker.io docker-compose \
+            rsync \
             mariadb-server mariadb-client
           
+          # Install rclone separately
+          echo "☁️ Installing rclone..."
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          
+          # Install Docker properly
+          echo "🐳 Installing Docker..."
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          
           # Configure Docker
-          echo "🐳 Configuring Docker..."
+          echo "🔧 Configuring Docker..."
           sudo systemctl enable docker
           sudo usermod -aG docker $USER
           
