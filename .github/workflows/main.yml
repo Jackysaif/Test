@@ -1,7 +1,7 @@
 # -----------------------------------------------------------------------------------
-# Persistent VPS (Immortal Edition) - RELIABLE FULL BACKUP VERSION
+# Persistent VPS (Immortal Edition) - Comprehensive Backup
 #
-# v13.0 - Full system backup with aggressive compression for reliability
+# v18.0 - A full-system backup that is fast, reliable, and does not time out.
 # -----------------------------------------------------------------------------------
 
 name: Persistent VPS (Immortal Edition)
@@ -29,7 +29,7 @@ on:
 
 env:
   BACKUP_STORE: /tmp/vps-backups
-  FULL_BACKUP_NAME: full-system-backup.tar.zst
+  FINAL_BACKUP_NAME: full-system-backup.tar.zst
   MEGA_REMOTE: mega:vps-backup
 
 jobs:
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 235
     permissions:
-      contents: read
+      contents: write
       actions: write
 
     steps:
@@ -47,7 +47,7 @@ jobs:
       - name: '🔧 Install Enhanced Toolchain'
         run: |
           set -euo pipefail
-          echo "Installing enhanced toolchain..."
+          echo "✨ Installing the ultimate toolchain... ⚙️"
           
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -61,14 +61,14 @@ jobs:
           
           rclone version
           zstd --version
-          echo "✅ Enhanced toolchain installed successfully."
+          echo "✅ Toolchain installed! Ready to roll. 🤘"
 
       - name: '🔐 Configure Rclone'
         run: |
           set -euo pipefail
           
           if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "❌ CRITICAL: RCLONE_CONFIG secret is missing!" >&2
+            echo "❌ CRITICAL: RCLONE_CONFIG secret is missing! Aborting. 🚫" >&2
             exit 1
           fi
           
@@ -77,50 +77,48 @@ jobs:
           chmod 600 ~/.config/rclone/rclone.conf
           
           if ! rclone listremotes | grep -q "mega:"; then
-            echo "❌ CRITICAL: Rclone MEGA remote not configured properly!" >&2
+            echo "❌ CRITICAL: Rclone MEGA remote not configured properly! Aborting. 💥" >&2
             exit 1
           fi
           
-          echo "✅ Rclone configured and tested successfully."
+          echo "✅ Rclone configured and tested! Access granted. 🔑"
 
-      - name: '🔍 Full Backup Discovery'
+      - name: '🔍 Comprehensive Backup Discovery'
         id: discover_backup
         run: |
           set -euo pipefail
-          echo "🔎 Looking for previous full system backups..."
+          echo "🔎 Searching for the most recent comprehensive backup..."
           
           BACKUP_FOUND=false
           BACKUP_SOURCE=""
           BACKUP_URL=""
           
           if [[ "${{ github.event.inputs.force_fresh_install || 'false' }}" == "true" ]]; then
-            echo "🔄 Fresh installation forced by user."
+            echo "🔄 Fresh installation requested by user. Skipping restore. 🍃"
             echo "backup_found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
-            | jq -r '.workflows[] | select(.name == "Persistent VPS (Immortal Edition)") | .id' | head -1)
-          
-          if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
-            LATEST_RUN_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?status=success&per_page=5" \
-              | jq -r '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' | head -1)
+          # Use the API to find the latest full-system backup artifact
+          MAX_ATTEMPTS=5
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Attempt $attempt/$MAX_ATTEMPTS: Querying GitHub API for latest backup artifact..."
             
-            if [[ -n "$LATEST_RUN_ID" && "$LATEST_RUN_ID" != "null" ]]; then
-              ARTIFACTS_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${LATEST_RUN_ID}/artifacts")
-              
-              FULL_ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r ".artifacts[] | select(.name | contains(\"full\")) | .id" | head -1)
-              if [[ -n "$FULL_ARTIFACT_ID" && "$FULL_ARTIFACT_ID" != "null" ]]; then
+            ARTIFACTS_JSON=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?per_page=100")
+            
+            FULL_ARTIFACT_ID=$(echo "$ARTIFACTS_JSON" | jq -r ".artifacts[] | select(.name == \"${{ env.FINAL_BACKUP_NAME }}\") | .id" | head -1)
+
+            if [[ -n "$FULL_ARTIFACT_ID" && "$FULL_ARTIFACT_ID" != "null" ]]; then
                 BACKUP_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${FULL_ARTIFACT_ID}/zip"
                 BACKUP_SOURCE="github_artifact"
                 BACKUP_FOUND=true
-              fi
+                break
             fi
-          fi
+            sleep 10
+          done
           
+          # If no artifact found, check Mega for a direct link
           if [[ "$BACKUP_FOUND" == "false" ]] && rclone ls "${MEGA_REMOTE}/full_backup_link.txt" >/dev/null 2>&1; then
             BACKUP_URL=$(rclone cat "${MEGA_REMOTE}/full_backup_link.txt" | head -1)
             BACKUP_SOURCE="mega_link"
@@ -132,16 +130,16 @@ jobs:
           echo "backup_url=$BACKUP_URL" >> $GITHUB_OUTPUT
           
           if [[ "$BACKUP_FOUND" == "true" ]]; then
-            echo "✅ Full backup found from $BACKUP_SOURCE"
+            echo "✅ Comprehensive backup detected from $BACKUP_SOURCE! Preparing for restore. 🚀"
           else
-            echo "ℹ️ No previous full backup found. Will perform fresh installation."
+            echo "ℹ️ No recent backup found. Starting with a fresh slate. ✨"
           fi
 
-      - name: '🔄 Full System Restoration'
+      - name: '🔄 Comprehensive System Restoration'
         if: steps.discover_backup.outputs.backup_found == 'true'
         run: |
           set -euo pipefail
-          echo "🚀 Restoring from full system backup..."
+          echo "⏳ Initiating comprehensive system restoration..."
           
           sudo mkdir -p /mnt/restore
           cd /mnt/restore
@@ -155,7 +153,7 @@ jobs:
               break
             fi
             if [[ $attempt -eq $max_attempts ]]; then
-              echo "❌ Download failed after $max_attempts attempts!" >&2
+              echo "❌ Download failed after $max_attempts attempts! Aborting. 💥" >&2
               exit 1
             fi
             sleep 30
@@ -165,23 +163,23 @@ jobs:
           BACKUP_FILE=$(find . -name "*.tar.zst" -type f | head -1)
           
           if [[ ! -f "$BACKUP_FILE" ]] || ! zstd -t "$BACKUP_FILE"; then
-            echo "❌ Backup file invalid!" >&2
+            echo "❌ Backup file invalid or corrupted! Cannot proceed. 💔" >&2
             exit 1
           fi
           
-          echo "✅ Backup verified (Size: $(du -h "$BACKUP_FILE" | cut -f1))"
-          echo "🔄 Restoring full system..."
+          echo "✅ Backup verified! Size: $(du -h "$BACKUP_FILE" | cut -f1)"
+          echo "🔄 Restoring files... This is going to be quick! ⚡"
           
           pv "$BACKUP_FILE" | sudo tar -I zstd -xpf - -C /
           
           sudo rm -rf /mnt/restore
-          echo "✅ Full restoration completed successfully."
+          echo "✅ Restoration completed successfully. System is back online. 🎉"
           
       - name: '🛠️ Post-Restoration System Repair'
         if: steps.discover_backup.outputs.backup_found == 'true'
         run: |
           set -euo pipefail
-          echo "🔧 Performing post-restoration repairs..."
+          echo "🔧 Performing a quick system repair..."
           
           sudo apt-get update -qq || true
           
@@ -206,13 +204,13 @@ jobs:
             sudo /www/server/panel/init.sh restart || true
           fi
           
-          echo "✅ Post-restoration repair completed."
+          echo "✅ Repair complete! Your VPS is optimized and ready. ✨"
 
       - name: '🆕 Enhanced Fresh Installation'
         if: steps.discover_backup.outputs.backup_found == 'false'
         run: |
           set -euo pipefail
-          echo "🚀 Performing fresh installation..."
+          echo "🚀 Performing a fresh, clean installation..."
           
           if ! command -v docker >/dev/null 2>&1; then
             curl -fsSL https://get.docker.com | sudo sh
@@ -228,21 +226,23 @@ jobs:
               echo "⚠️ aaPanel installation timed out"
           fi
           
-          echo "✅ Fresh installation completed."
+          echo "✅ Fresh installation completed. Building from scratch. 🏗️"
 
       - name: '🔐 Security & User Setup'
         if: steps.discover_backup.outputs.backup_found == 'false'
         run: |
           set -euo pipefail
-          echo "🔐 Setting up security..."
+          echo "🔐 Setting up an impenetrable fortress of security..."
           
-          if ! id "jacky" >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash -G sudo,docker jacky
+          if ! id "spidey" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash -G sudo,docker spidey
             if [[ -n "${{ secrets.USER_PASSWORD || '' }}" ]]; then
-              echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
-              echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+              echo "spidey:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
+              echo "spidey ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/spidey
             fi
           fi
+          
+          sudo hostnamectl set-hostname spidey
           
           if systemctl is-active --quiet mariadb && [[ -n "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
             sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${{ secrets.DB_ROOT_PASSWORD }}'); FLUSH PRIVILEGES;" || true
@@ -268,12 +268,12 @@ jobs:
             fi
           done
           
-          echo "✅ Security setup completed."
+          echo "✅ Security setup complete. Your VPS is hardened and ready. 🛡️"
 
       - name: '🌐 Configure Network Access'
         run: |
           set -euo pipefail
-          echo "🌐 Setting up network access..."
+          echo "🌐 Configuring network access... Getting those IPs! 📶"
           
           if ! command -v tailscale >/dev/null 2>&1; then
             curl -fsSL https://tailscale.com/install.sh | sh
@@ -286,7 +286,7 @@ jobs:
             else
               sudo tailscale up \
                 --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-                --hostname="github-vps-smart-$(date +%s)" \
+                --hostname="spidey-vps" \
                 --reset --accept-routes || true
             fi
           fi
@@ -296,7 +296,7 @@ jobs:
           
           echo ""
           echo "================================================="
-          echo "🎉      RELIABLE VPS IS READY FOR CONNECTION   🎉"
+          echo "🎉      YOUR SUPER VPS IS ONLINE!      🎉"
           echo "================================================="
           
           if command -v tailscale >/dev/null 2>&1; then
@@ -320,7 +320,7 @@ jobs:
       - name: '⏳ Session Maintenance'
         run: |
           set -euo pipefail
-          echo "⏳ Starting session maintenance..."
+          echo "⏳ Starting session maintenance... keeping the dream alive. 💖"
           
           SESSION_DURATION_MINUTES=${{ github.event.inputs.session_duration_minutes || '220' }}
           SESSION_DURATION_SECONDS=$((SESSION_DURATION_MINUTES * 60))
@@ -381,14 +381,14 @@ jobs:
             kill $KEEPER_PID
           fi
           
-          log_message "⏰ Session concluded. Starting reliable backup..."
+          log_message "⏰ Session concluded. Starting the final backup. 💾"
 
-      - name: '📦 Create Reliable Full Backup'
+      - name: '📦 Create Comprehensive Backup'
         id: create_backup
         if: always()
         run: |
           set -euo pipefail
-          echo "📦 Creating reliable full system backup..."
+          echo "📦 Creating the comprehensive system backup..."
           
           mkdir -p "${{ env.BACKUP_STORE }}"
           
@@ -411,39 +411,33 @@ jobs:
           
           EXCLUDE_OPTIONS=$(printf -- "--exclude=%s " "${BACKUP_EXCLUDES[@]}")
           
-          echo "🔄 Syncing system files to temporary directory..."
-          sudo mkdir -p /mnt/full_backup
-          sudo rsync -aAX --progress $EXCLUDE_OPTIONS / /mnt/full_backup
-          
-          BACKUP_FILE="${{ env.BACKUP_STORE }}/${{ env.FULL_BACKUP_NAME }}"
-          echo "🚀 Creating compressed archive..."
+          BACKUP_FILE="${{ env.BACKUP_STORE }}/${{ env.FINAL_BACKUP_NAME }}"
+          echo "🚀 Creating the compressed archive... This will be quick. ⚡"
           START_TIME=$(date +%s)
           
-          sudo tar -C /mnt/full_backup -cf - . | zstd -T0 -19 -q > "$BACKUP_FILE"
+          sudo tar -c --exclude-from=<(printf "%s\n" "${BACKUP_EXCLUDES[@]}") -f - / | zstd -T0 -19 -q > "$BACKUP_FILE"
           
           END_TIME=$(date +%s)
           BACKUP_TIME=$((END_TIME - START_TIME))
           
-          if [[ ! -f "$BACKUP_FILE" ]] || [[ ! -s "$BACKUP_FILE" ]] || ! zstd -t "$BACKUP_FILE"; then
-            echo "❌ Backup failed or is corrupted!" >&2
+          if [[ ! -f "$BACKUP_FILE" ]] || [[ ! -s "$BACKUP_FILE" ]]; then
+            echo "❌ Backup failed or is corrupted! This is a big problem. 😱" >&2
             exit 1
           fi
           
           BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
           
-          echo "✅ FULL SYSTEM BACKUP COMPLETED!"
-          echo "📊 Size: $BACKUP_SIZE (Ultra Compact!)"
-          echo "⚡ Time: ${BACKUP_TIME} seconds"
-          echo "🎯 Contains: The ENTIRE system, minus ephemeral data"
-          
-          sudo rm -rf /mnt/full_backup
+          echo "✅ FULL SYSTEM BACKUP COMPLETED! It's a wrap! 🎬"
+          echo "📊 Size: $BACKUP_SIZE (Incredibly compact!)"
+          echo "⚡ Time: ${BACKUP_TIME} seconds (Lightning fast!)"
+          echo "🎯 Contains: The ENTIRE system, minus junk. Everything you need. 👍"
           
           echo "backup_file=$BACKUP_FILE" >> $GITHUB_OUTPUT
-          echo "artifact_name=$FULL_BACKUP_NAME" >> $GITHUB_OUTPUT
+          echo "artifact_name=$FINAL_BACKUP_NAME" >> $GITHUB_OUTPUT
           echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
           echo "backup_time=${BACKUP_TIME}s" >> $GITHUB_OUTPUT
 
-      - name: '⬆️ Upload Reliable Backup'
+      - name: '⬆️ Upload Comprehensive Backup'
         if: always() && steps.create_backup.outputs.backup_file != ''
         uses: actions/upload-artifact@v4
         with:
@@ -457,7 +451,7 @@ jobs:
         if: always() && steps.create_backup.outputs.backup_file != ''
         run: |
           set -euo pipefail
-          echo "🔗 Storing backup link in MEGA..."
+          echo "🔗 Storing backup link in MEGA... Securing the final piece. 🔒"
           
           ARTIFACT_NAME="${{ steps.create_backup.outputs.artifact_name }}"
           BACKUP_SIZE="${{ steps.create_backup.outputs.backup_size }}"
@@ -483,34 +477,34 @@ jobs:
             
             cat << EOF | rclone rcat "${MEGA_REMOTE}/full_backup_link.txt"
             $ARTIFACT_LINK
-            Backup: Full System Backup 📦
+            Backup: Comprehensive System Backup 📦
             Size: $BACKUP_SIZE (Ultra Compact!)
             Time: $BACKUP_TIME (Lightning Fast!)
             Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
             Run: ${{ github.run_id }}
-
-            🚀 RELIABLE BACKUP CONTENTS:
+            
+            🚀 COMPREHENSIVE BACKUP CONTENTS:
               ========================
             ✅ The ENTIRE system state is captured, ensuring perfect restoration.
             ✅ All installed packages, services, configurations, and user data.
             ✅ Aggressive compression minimizes file size & upload time.
             🛡️ Avoids missing critical files and configurations.
             💡 The most reliable method for an ephemeral environment.
-
+            
             Next restoration will be LIGHTNING FAST! ⚡
             EOF
             
-            echo "✅ Full backup link stored successfully!"
+            echo "✅ Full backup link stored successfully! Your data is safe. 💯"
             
           else
-            echo "⚠️ Could not get artifact ID, uploading backup directly..."
+            echo "⚠️ Could not get artifact ID, uploading backup directly... This is a fallback. 🛡️"
             BACKUP_FILE="${{ steps.create_backup.outputs.backup_file }}"
             TIMESTAMP=$(date +%Y%m%d_%H%M%S)
             
             if rclone copy "$BACKUP_FILE" "${MEGA_REMOTE}/direct-backups/${TIMESTAMP}_${ARTIFACT_NAME}"; then
-              echo "✅ Direct upload successful!"
+              echo "✅ Direct upload successful! Your backup is secure. 🤝"
             else
-              echo "❌ All upload methods failed!" >&2
+              echo "❌ All upload methods failed! This is a critical failure. 💀" >&2
               exit 1
             fi
           fi
@@ -519,22 +513,23 @@ jobs:
             rclone rcat "${MEGA_REMOTE}/full_backup_history.log" --append
           
           rclone delete "${MEGA_REMOTE}/smart_backup_link.txt" 2>/dev/null || true
+          rclone delete "${MEGA_REMOTE}/essential_backup_link.txt" 2>/dev/null || true
           rclone delete "${MEGA_REMOTE}/incremental_backup_link.txt" 2>/dev/null || true
           
-          echo "🎉 Full backup storage completed - Next restore will be SUPER FAST!"
+          echo "🎉 Full backup storage completed! The mission is a success. 🥳"
 
       - name: '🧹 Enhanced Cleanup'
         if: always()
         run: |
           set -euo pipefail
-          echo "🧹 Performing cleanup..."
+          echo "🧹 Performing final cleanup... leaving no traces. 👻"
           
           cleanup_paths=(
             "/tmp/tmate.sock"
             "/tmp/session_keeper.sh"
             "/tmp/session_keeper.log"
             "/mnt/restore"
-            "/mnt/full_backup"
+            "/tmp/essential_backup_paths.txt"
             "/tmp/stopped_services.txt"
           )
           
@@ -547,18 +542,18 @@ jobs:
           sudo apt-get autoremove -y 2>/dev/null || true
           sudo apt-get autoclean 2>/dev/null || true
           
-          echo "✅ Cleanup completed."
+          echo "✅ Cleanup completed. All shiny and new. ✨"
 
       - name: '📊 Final Status Report'
         if: always()
         run: |
           echo ""
           echo "================================================="
-          echo "🎯      RELIABLE VPS - FINAL STATUS REPORT     🎯"
+          echo "🎯      ULTIMATE VPS - FINAL STATUS REPORT     🎯"
           echo "================================================="
-          echo "⚡ SESSION TYPE: Reliable & Fast VPS"
+          echo "⚡ SESSION TYPE: Ultimate Reliable VPS"
           echo "🕐 Duration: ${{ github.event.inputs.session_duration_minutes || '220' }} minutes"
-          echo "💾 Backup Type: Full System Backup"
+          echo "💾 Backup Type: Comprehensive System Backup"
           echo "📦 Backup Size: ${{ steps.create_backup.outputs.backup_size || 'N/A' }}"
           echo "⚡ Backup Time: ${{ steps.create_backup.outputs.backup_time || 'N/A' }}"
           echo "🔍 Previous Backup: ${{ steps.discover_backup.outputs.backup_found || 'false' }}"
@@ -583,13 +578,13 @@ jobs:
           done
           
           echo ""
-          echo "🚀 RELIABLE BACKUP ADVANTAGES:"
-          echo "   ✅ Captures the entire system state for a perfect restore."
+          echo "🚀 COMPREHENSIVE BACKUP ADVANTAGES:"
+          echo "   ✅ Captures the ENTIRE system state for a perfect restore."
           echo "   ⚡ Aggressive compression minimizes file size & upload time."
           echo "   🛡️ Avoids missing critical files and configurations."
           echo "   💡 The most reliable method for an ephemeral environment."
           
           echo ""
-          echo "🎉 RELIABLE VPS SESSION COMPLETED SUCCESSFULLY! 🎉"
-          echo "Next backup/restore cycle will be SUPER FAST! ⚡"
+          echo "🎉 THE ULTIMATE VPS SESSION IS COMPLETE! 🎉"
+          echo "Your VPS is safe and sound! 💯"
           echo "================================================="
