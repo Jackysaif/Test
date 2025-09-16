@@ -875,7 +875,7 @@ jobs:
 
       - name: '📊 Generate Session Report'
         if: always()
-        id: session_report
+        id: Session_report
         run: |
           set -euo pipefail
           echo "📊 Generating comprehensive session report..."
