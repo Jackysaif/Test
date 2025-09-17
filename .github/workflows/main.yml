@@ -46,7 +46,7 @@ jobs:
           chmod 600 ~/.config/rclone/rclone.conf
           echo "🕸️ MEGA credentials decoded and secured in Spidey's web!"
 
-      - name: 🔍 Spider-Sense: Searching for Previous Backups
+      - name: 🔍 Spider-Sense:Searching for Previous Backups
         id: backup_search
         run: |
           echo "🕷️ Spider-sense activated! Searching for previous web backups..."
