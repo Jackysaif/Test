@@ -1,4 +1,3 @@
-
 # GitHub Actions Workflow for Persistent VPS Session - Ben 10 Edition! 🛸👽
 # Required Secrets:
 # - TAILSCALE_AUTHKEY: Tailscale authentication key (string)
