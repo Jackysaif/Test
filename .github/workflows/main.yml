@@ -65,3 +65,90 @@ jobs:
                 sudo tar -xzf vps-backup.tar.gz -C / 2>/dev/null || echo "⚠️ Some files couldn't be restored (probably normal)"
                 RESTORE_SUCCESS=true
                 echo "✅ Backup restored! The web is back! 🕸️"
+              fi
+            else
+              echo "🤷 No MEGA backup found. Time for a fresh start! 🕷️"
+            fi
+          fi
+          
+          echo "restore_success=$RESTORE_SUCCESS" >> $GITHUB_OUTPUT
+
+      - name: 🏠 Setting up Spidey's new home
+        if: steps.backup_check.outputs.restore_success != 'true'
+        run: |
+          echo "🏗️ Building Spidey's new web-base from scratch! 🕸️"
+          
+          # Set hostname
+          echo "🏷️ Setting hostname to Spidey..."
+          sudo hostnamectl set-hostname Spidey
+          echo "✅ Hostname set! This machine is now officially Spidey! 🕷️"
+
+      - name: 👤 Creating Spidey's alter ego (jacky user)
+        run: |
+          echo "🕷️ Creating secret identity: jacky 🥷"
+          if ! id jacky > /dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash jacky
+            echo "jacky:spidey" | sudo chpasswd
+            sudo usermod -aG sudo jacky
+            echo "✅ Secret identity created! jacky is ready with spider powers! 🕸️"
+          else
+            echo "👤 Secret identity already exists! jacky is still in the game! 🕷️"
+          fi
+
+      - name: 🕸️ Installing Tailscale (Spidey's private web)
+        run: |
+          echo "🕸️ Setting up Spidey's private web network... 🕷️"
+          
+          # Restore Tailscale state if available
+          if [ -d "/var/lib/tailscale" ] && [ -f "/var/lib/tailscale/tailscaled.state" ]; then
+            echo "🔄 Found existing Tailscale web! Preserving identity... 🕸️"
+            sudo systemctl enable --now tailscaled
+            sudo systemctl start tailscaled
+          else
+            echo "🆕 Fresh Tailscale installation! 🕸️"
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo systemctl enable --now tailscaled
+            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --accept-routes
+            echo "✅ Spidey's private web is now active! 🕸️"
+          fi
+
+      - name: 🗄️ Setting up MariaDB (Spidey's data vault)
+        run: |
+          echo "🗄️ Setting up Spidey's secure data vault! 🕷️"
+          
+          sudo apt-get update
+          sudo apt-get install -y mariadb-server
+          
+          if [ ! -d "/var/lib/mysql/mysql" ]; then
+            echo "🔧 Initializing fresh database..."
+            sudo mysql_secure_installation << EOF
+          
+
+          y
+          ${{ secrets.DB_ROOT_PASSWORD }}
+          ${{ secrets.DB_ROOT_PASSWORD }}
+          y
+          y
+          y
+          y
+          EOF
+          else
+            echo "📊 Database already initialized! Data vault is secure! 🕸️"
+          fi
+          
+          sudo systemctl enable --now mariadb
+          echo "✅ Data vault is operational! 🕸️"
+
+      - name: 🎛️ Installing aaPanel (Spidey's control center)
+        run: |
+          echo "🎛️ Installing Spidey's web control center! 🕷️"
+          
+          # Check if aaPanel is already installed
+          if command -v bt > /dev/null 2>&1; then
+            echo "✅ aaPanel already installed! Control center is ready! 🕸️"
+          else
+            echo "📥 Downloading latest aaPanel installer..."
+            wget -O install.sh http://www.aapanel.com/script/install_7.0_en.sh
+            chmod +x install.sh
+            
+            echo "🤖 Starting automated installation with spider precision..."
