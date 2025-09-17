@@ -128,13 +128,13 @@ jobs:
 
           # Configure aaPanel
           bt << EOF
-5
-6
-$AAPANEL_USER
-$AAPANEL_PASSWORD
-$AAPANEL_PASSWORD
-y
-EOF
+          5
+          6
+          $AAPANEL_USER
+          $AAPANEL_PASSWORD
+          $AAPANEL_PASSWORD
+          y
+          EOF
 
           # Restore previous session data
           restore_data || echo "Starting new session without restore"
