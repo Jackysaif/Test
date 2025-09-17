@@ -276,23 +276,23 @@ jobs:
         cd /tmp
         wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh
         
-        # Create expect script for automated installation
-        cat > install_aapanel.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 300
-spawn bash install.sh
-expect {
-    "*to install panel*" {
+          # Create expect script for automated installation
+          cat > install_aapanel.exp << 'EOF'
+          #!/usr/bin/expect -f
+          set timeout 300
+        spawn bash install.sh
+         expect {
+         "*to install panel*" {
         send "y\r"
         exp_continue
-    }
-    "*force install*" {
+        }
+        "*force install*" {
         send "yes\r"
         exp_continue
-    }
-    eof
-}
-EOF
+        }
+        eof
+        }
+        EOF
         
         chmod +x install_aapanel.exp
         sudo ./install_aapanel.exp
@@ -461,22 +461,22 @@ EOF
         
         # Create manifest
         cat > "$BACKUP_DIR/backup-manifest.txt" << EOF
-🕷️ Spidey VPS Backup - Shin-chan Edition
-Created: $(date)
-Session ID: ${{ github.run_id }}
-Hostname: $(hostname)
+        🕷️ Spidey VPS Backup - Shin-chan Edition
+         Created: $(date)
+         Session ID: ${{ github.run_id }}
+         Hostname: $(hostname)
 
-Backup Contents:
-- /home (user directories)
-- /root (root home)  
-- /var/lib/tailscale (VPN state)
-- /var/lib/mysql (database)
-- /var/www (web files)
-- /opt (optional software)
-- /etc (selected configs)
+         Backup Contents:
+        - /home (user directories)
+        - /root (root home)  
+        - /var/lib/tailscale (VPN state)
+        - /var/lib/mysql (database)
+        - /var/www (web files)
+        - /opt (optional software)
+        - /etc (selected configs)
 
-Buriburi! All important data safely backed up! 🎒
-EOF
+        Buriburi! All important data safely backed up! 🎒
+        EOF
         
         # Create final backup archive
         cd /tmp
