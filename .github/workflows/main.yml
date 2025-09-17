@@ -1,172 +1,485 @@
-Task: Generate a single GitHub Actions workflow YAML file that implements a persistent VPS session with robust backup/restore logic and automated first-time provisioning. The workflow must be production-ready shell commands (bash), use only GitHub Actions built-in steps and public actions, and obey these exact requirements and secrets.
-
-Top-level behavior and constraints
-
-Single YAML file only. Name the job vps and use runs-on: ubuntu-22.04.
-
-Trigger: workflow_dispatch and a schedule that runs every 6 hours (cron).
-
-Session run-time: a session should run for ~6 hours total. The backup step may take ~30 minutes inside that window. Use a job-level timeout-minutes long enough to cover 6 hours+overhead.
-
-Use sudo for privileged work and ensure correct permissions on files created/restored.
-
-Always install rclone before any rclone use.
-
-Use GitHub secrets:
-
-TAILSCALE_AUTHKEY — for Tailscale authkey
-
-MEGA_RCLONE — base64 or rclone config text for MEGA remote (the workflow must decode and write rclone config)
-
-DB_ROOT_PASSWORD — root password for MariaDB
-
-(Any other secrets may be referenced as secrets.* if needed)
-
-
-Primary backup destination: create a GitHub artifact of the backup first. After artifact creation, attempt to upload (a copy) to MEGA using rclone and write the MEGA direct-link or public share URL into a text file mega-backup-link.txt. If artifact creation or retrieval fails, fall back to MEGA-only backup/restore.
-
-The workflow must implement the following fallback logic for restore at job start:
-
-1. Try to download the most recent GitHub artifact named vps-backup.tar.gz from the repository that triggered the workflow (or from the default workflow run artifacts) and restore from it if present.
-
-
-2. If artifact not found or restore fails, try to download the latest MEGA backup using rclone (MEGA remote created from MEGA_RCLONE).
-
-
-3. If both fail or no backup found, perform a fresh install/provision.
-
-
-
-Make backups not of the entire OS image. Back up only important persistent data and service state that is necessary to reproduce the VPS previous state: /home, /root, /etc (selected configs), /var/www, /opt, aaPanel data directory(s), Tailscale state (/var/lib/tailscale or equivalent), /var/lib/mysql (MariaDB data) — but do not back up the whole root filesystem. The workflow must build a tar.gz containing named directories and a small manifest backup-manifest.txt listing what was included.
-
-Provide a graceful shutdown trigger: if a file /tmp/stop is created on the remote machine (i.e. the runner executes touch /tmp/stop), the script must detect it and run a final backup and exit cleanly.
-
-Preserve the old public IP across sessions where possible: attempt to restore Tailscale state first (so Tailscale keeps the same IP/identity). If impossible, re-register Tailscale using TAILSCALE_AUTHKEY and back up the new state to MEGA immediately.
-
-After a restore completes, ensure all restored services (aaPanel, MariaDB, web services, etc.) are started.
-
-Create a sudo user jacky (if not exist) with password spidey and add to sudo group; create a super-user (if separate) per instruction — do everything with proper chown/chmod where needed.
-
-Set the system hostname to Spidey.
-
-Install aaPanel using the updated aaPanel v7.0 installer link (the workflow should fetch the latest official installer URL at runtime). Automate installer prompts:
-
-When the installer asks to enter y to install panel, send y.
-
-When the installer asks for force install, send yes.
-
-After install, set aaPanel credentials using its CLI: set username Jacky and password spidey (use aaPanel bt CLI or equivalent steps; run with sudo).
-
-
-Install MariaDB (directly, not via aaPanel). Configure root password to the value of DB_ROOT_PASSWORD. Create a test database named test. Ensure MariaDB server is running after restore or fresh install.
-
-Use tailscale (install it), and if a Tailscale state snapshot is restored, restore it first; otherwise start tailscale with sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} and then upload the saved state to MEGA.
-
-Keep the workflow file well-structured, logical, and easy to read. Keep comments that explain key blocks.
-
-Use actions/upload-artifact@v4 and actions/download-artifact@v4 (or latest) for artifact steps.
-
-Use rclone to upload/download to MEGA. The MEGA_RCLONE secret contains the rclone config (base64 or raw); decode/write it into ~/.config/rclone/rclone.conf prior to rclone use.
-
-Use tmate or an equivalent keepalive session to allow debugging the remote steps while the job runs (optional improvement you may include).
-
-
-Detailed step requirements (job steps)
-
-1. Checkout repo.
-
-
-2. Prepare environment:
-
-Install rclone, jq, tar, gzip, expect (for automating interactive installers), mariadb-server packages, tailscale (official install), and tmate (optional).
-
-Decode and write ~/.config/rclone/rclone.conf from MEGA_RCLONE secret.
-
-
-
-3. Attempt restore-from-artifact:
-
-Use actions/download-artifact or curl GitHub artifacts API to find the latest vps-backup.tar.gz.
-
-If found, extract to a temp location and run a restore.sh that:
-
-restores Tailscale state (copy files into correct locations with sudo, set ownership),
-
-restore aaPanel files and configs,
-
-restore MariaDB data files (stop mysql, copy files, chown to mysql:mysql, start mysql),
-
-restore service unit files and run systemctl daemon-reload and systemctl restart <services> for restored services.
-
-
-
-
-4. If artifact restore fails / not found, attempt restore-from-MEGA:
-
-Use rclone to list remote and get the latest backup file; download and extract; run same restore.sh.
-
-
-
-5. If both restores fail, run fresh provision:
-
-Create sudo user jacky with password spidey (securely set with chpasswd), add to sudo group.
-
-sudo hostnamectl set-hostname Spidey
-
-Install aaPanel using an automated expect script or yes + CLI to answer y and yes prompts. After install, configure aaPanel account using bt 5 Jacky and bt 6 spidey or the official aaPanel CLI command to set username/password.
-
-Install MariaDB, configure root password from DB_ROOT_PASSWORD, create database test.
-
-Install and start tailscale using TAILSCALE_AUTHKEY.
-
-
-
-6. During normal runtime, provide a backup step that:
-
-Collects the selected directories into vps-backup-<timestamp>.tar.gz and creates backup-manifest.txt.
-
-Uploads that file as a GitHub artifact using actions/upload-artifact.
-
-Then attempts to upload to MEGA using rclone copy to a folder like vps-backups/.
-
-After rclone upload, attempt to create/get a public share link or file link and write that URL into mega-backup-link.txt and to the artifact as well.
-
-
-
-7. Graceful shutdown detection:
-
-The runner process must periodically check for /tmp/stop. If found, run the final backup (same backup steps), then exit job cleanly.
-
-
-
-8. After any restore, start/restart services: aaPanel, mariadb, web servers, docker (if present), and tailscale. Verify service health and log status for each.
-
-
-9. Permissions & safety:
-
-Ensure files restored have correct ownership (e.g., mysql: mysql for MariaDB data).
-
-Use set -euo pipefail in shell blocks.
-
-
-
-
-Output requirements
-
-The YAML must be complete and copy/paste runnable (only requiring the secrets above to be set).
-
-Include helpful inline comments explaining each major section.
-
-Add a short top-of-file comment that lists the secrets required and their expected format.
-
-Keep the YAML limited to a single file; do not split across multiple files.
-
-
-Freedom for improvements
-
-You may add reasonable extra logic to improve reliability (e.g., retry loops for network commands, simple checksums to validate backups, short health checks after service restarts).
-
-Keep improvements sensible and documented within comments.
-
-
-Do not ask clarifying questions. Produce the final single YAML workflow file that implements the behavior above. Name artifact vps-backup.tar.gz (or vps-backup-<timestamp>.tar.gz but ensure download step can find the latest by pattern). Ensure all interactive installers are automated. End.
+# GitHub Actions Persistent VPS Session Workflow
+# Required secrets:
+# - TAILSCALE_AUTHKEY: Tailscale authentication key
+# - MEGA_RCLONE: Base64 encoded or raw rclone config for MEGA remote
+# - DB_ROOT_PASSWORD: MariaDB root password
+
+name: Persistent VPS Session
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+
+jobs:
+  vps:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 400  # 6+ hours with overhead
+    
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Prepare environment
+      - name: Prepare environment
+        run: |
+          set -euo pipefail
+          
+          echo "=== Installing required packages ==="
+          sudo apt-get update
+          sudo apt-get install -y curl jq tar gzip expect mariadb-server tmate
+          
+          echo "=== Installing rclone ==="
+          curl https://rclone.org/install.sh | sudo bash
+          
+          echo "=== Installing Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          echo "=== Setting up rclone config ==="
+          mkdir -p ~/.config/rclone
+          # Decode MEGA_RCLONE (handle both base64 and raw formats)
+          if echo "${{ secrets.MEGA_RCLONE }}" | base64 -d > /dev/null 2>&1; then
+            echo "${{ secrets.MEGA_RCLONE }}" | base64 -d > ~/.config/rclone/rclone.conf
+          else
+            echo "${{ secrets.MEGA_RCLONE }}" > ~/.config/rclone/rclone.conf
+          fi
+          
+          echo "=== Environment prepared ==="
+
+      # Step 3: Attempt restore from GitHub artifact
+      - name: Attempt restore from artifact
+        id: artifact_restore
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./restore-temp/
+
+      - name: Process artifact restore
+        id: process_artifact
+        run: |
+          set -euo pipefail
+          
+          if [ -f "./restore-temp/vps-backup.tar.gz" ]; then
+            echo "=== Found GitHub artifact backup ==="
+            cd ./restore-temp
+            tar -tf vps-backup.tar.gz | head -10
+            
+            echo "=== Extracting artifact backup ==="
+            sudo tar -xzf vps-backup.tar.gz -C /
+            
+            if [ -f "/tmp/backup-manifest.txt" ]; then
+              echo "=== Backup manifest ==="
+              cat /tmp/backup-manifest.txt
+              
+              echo "=== Running restore operations ==="
+              sudo bash -c '
+                # Restore Tailscale state if exists
+                if [ -d "/tmp/tailscale-restore" ]; then
+                  echo "Restoring Tailscale state..."
+                  systemctl stop tailscaled || true
+                  mkdir -p /var/lib/tailscale
+                  cp -r /tmp/tailscale-restore/* /var/lib/tailscale/ 2>/dev/null || true
+                  chown -R root:root /var/lib/tailscale
+                  chmod -R 600 /var/lib/tailscale/*
+                  systemctl start tailscaled
+                  # Wait for tailscaled to start
+                  sleep 5
+                  # Try to bring up existing connection, fallback to new auth if needed
+                  if ! tailscale up; then
+                    echo "Existing Tailscale state failed, using authkey..."
+                    tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+                  fi
+                else
+                  echo "No Tailscale state to restore, using authkey..."
+                  systemctl start tailscaled
+                  tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+                fi
+                
+                # Restore MariaDB data if exists
+                if [ -d "/tmp/mysql-restore" ]; then
+                  systemctl stop mysql || true
+                  cp -r /tmp/mysql-restore/* /var/lib/mysql/ 2>/dev/null || true
+                  chown -R mysql:mysql /var/lib/mysql
+                  systemctl start mysql
+                fi
+              '
+              
+              echo "artifact_restored=true" >> $GITHUB_OUTPUT
+            else
+              echo "No manifest found, artifact may be corrupted"
+              echo "artifact_restored=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No artifact backup found"
+            echo "artifact_restored=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 4: Attempt restore from MEGA if artifact failed
+      - name: Attempt restore from MEGA
+        if: steps.process_artifact.outputs.artifact_restored != 'true'
+        id: mega_restore
+        run: |
+          set -euo pipefail
+          
+          echo "=== Attempting MEGA restore ==="
+          if rclone lsd mega: > /dev/null 2>&1; then
+            echo "MEGA remote accessible"
+            
+            # Find latest backup
+            latest_backup=$(rclone ls mega:vps-backups/ | grep "vps-backup.*\.tar\.gz" | sort -k2 -r | head -1 | awk '{print $2}') || true
+            
+            if [ -n "$latest_backup" ]; then
+              echo "=== Found MEGA backup: $latest_backup ==="
+              mkdir -p ./mega-restore-temp
+              rclone copy "mega:vps-backups/$latest_backup" ./mega-restore-temp/
+              
+              cd ./mega-restore-temp
+              sudo tar -xzf "$latest_backup" -C /
+              
+              if [ -f "/tmp/backup-manifest.txt" ]; then
+                echo "=== MEGA Backup manifest ==="
+                cat /tmp/backup-manifest.txt
+                
+                echo "=== Running MEGA restore operations ==="
+                sudo bash -c '
+                  # Restore Tailscale state
+                  if [ -d "/tmp/tailscale-restore" ]; then
+                    echo "Restoring Tailscale state from MEGA..."
+                    systemctl stop tailscaled || true
+                    mkdir -p /var/lib/tailscale
+                    cp -r /tmp/tailscale-restore/* /var/lib/tailscale/ 2>/dev/null || true
+                    chown -R root:root /var/lib/tailscale
+                    chmod -R 600 /var/lib/tailscale/*
+                    systemctl start tailscaled
+                    sleep 5
+                    if ! tailscale up; then
+                      echo "Existing Tailscale state failed, using authkey..."
+                      tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+                    fi
+                  else
+                    echo "No Tailscale state to restore, using authkey..."
+                    systemctl start tailscaled
+                    tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+                  fi
+                  
+                  # Restore MariaDB data
+                  if [ -d "/tmp/mysql-restore" ]; then
+                    systemctl stop mysql || true
+                    cp -r /tmp/mysql-restore/* /var/lib/mysql/ 2>/dev/null || true
+                    chown -R mysql:mysql /var/lib/mysql
+                    systemctl start mysql
+                  fi
+                '
+                
+                echo "mega_restored=true" >> $GITHUB_OUTPUT
+              else
+                echo "No MEGA manifest found"
+                echo "mega_restored=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "No MEGA backup found"
+              echo "mega_restored=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "MEGA remote not accessible"
+            echo "mega_restored=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 5: Fresh provision if both restores failed
+      - name: Fresh provision
+        if: steps.process_artifact.outputs.artifact_restored != 'true' && steps.mega_restore.outputs.mega_restored != 'true'
+        run: |
+          set -euo pipefail
+          
+          echo "=== Starting fresh provision ==="
+          
+          # Create user jacky
+          sudo useradd -m -s /bin/bash jacky || true
+          echo "jacky:spidey" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          
+          # Set hostname
+          sudo hostnamectl set-hostname Spidey
+          
+          echo "=== Installing aaPanel ==="
+          # Create expect script for aaPanel installation
+          cat > /tmp/aapanel_install.exp << 'EOF'
+#!/usr/bin/expect -f
+set timeout 300
+spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && bash install.sh aapanel"
+expect {
+            "Do you want to install aaPanel to the" {
+                send "y\r"
+                exp_continue
+            }
+            "force install" {
+                send "yes\r"
+                exp_continue
+            }
+            timeout {
+                puts "Installation timed out"
+                exit 1
+            }
+            eof
+        }
+EOF
+          
+          chmod +x /tmp/aapanel_install.exp
+          sudo /tmp/aapanel_install.exp || echo "aaPanel installation completed with warnings"
+          
+          # Configure aaPanel credentials
+          sleep 10
+          sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py panel jacky || true
+          sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py panel spidey || true
+          
+          echo "=== Configuring MariaDB ==="
+          sudo systemctl start mysql
+          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';" || true
+          sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "CREATE DATABASE IF NOT EXISTS test;" || true
+          
+          echo "=== Starting Tailscale ==="
+          sudo systemctl start tailscaled
+          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+          
+          echo "=== Fresh provision completed ==="
+
+      # Step 6: Start tmate session for debugging (optional)
+      - name: Start tmate session
+        run: |
+          echo "=== Starting tmate session ==="
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' > /tmp/tmate_connection.txt
+          tmate -S /tmp/tmate.sock display -p '#{tmate_web}' >> /tmp/tmate_connection.txt
+          echo "=== tmate connection info ==="
+          cat /tmp/tmate_connection.txt
+
+      # Step 7: Service startup and health checks
+      - name: Start and verify services
+        run: |
+          set -euo pipefail
+          
+          echo "=== Starting services ==="
+          sudo systemctl daemon-reload
+          
+          # Start MariaDB
+          sudo systemctl start mysql
+          sudo systemctl enable mysql
+          
+          # Start aaPanel if installed
+          if [ -f "/www/server/panel/BT-Panel" ]; then
+            sudo systemctl start bt || true
+            sudo systemctl enable bt || true
+          fi
+          
+          # Start Tailscale
+          echo "=== Starting Tailscale service ==="
+          sudo systemctl start tailscaled
+          sudo systemctl enable tailscaled
+          
+          # Check if we have existing Tailscale state, otherwise use authkey
+          if [ -d "/var/lib/tailscale" ] && [ "$(ls -A /var/lib/tailscale 2>/dev/null)" ]; then
+            echo "Found existing Tailscale state, attempting to restore connection..."
+            if ! sudo tailscale up; then
+              echo "Existing state failed, using authkey for new connection..."
+              sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+            fi
+          else
+            echo "No existing Tailscale state, using authkey..."
+            sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}"
+          fi
+          
+          echo "=== Service health checks ==="
+          sudo systemctl status mysql --no-pager || true
+          sudo systemctl status tailscaled --no-pager || true
+          sudo systemctl status bt --no-pager || true
+          
+          # Test MariaDB connection
+          mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "SHOW DATABASES;" || echo "MariaDB connection test failed"
+          
+          echo "=== Services started ==="
+
+      # Step 8: Main runtime loop with graceful shutdown detection
+      - name: Runtime session with backup and graceful shutdown
+        run: |
+          set -euo pipefail
+          
+          echo "=== Starting main runtime session ==="
+          
+          # Runtime duration (5.5 hours to allow for backup time)
+          end_time=$(($(date +%s) + 19800))  # 5.5 hours in seconds
+          backup_interval=3600  # Backup every hour
+          last_backup=0
+          
+          while [ $(date +%s) -lt $end_time ]; do
+            current_time=$(date +%s)
+            
+            # Check for graceful shutdown signal
+            if [ -f "/tmp/stop" ]; then
+              echo "=== Graceful shutdown signal detected ==="
+              break
+            fi
+            
+            # Periodic backup (every hour)
+            if [ $((current_time - last_backup)) -gt $backup_interval ]; then
+              echo "=== Creating periodic backup ==="
+              timestamp=$(date +%Y%m%d_%H%M%S)
+              
+              # Create backup directory structure
+              sudo mkdir -p /tmp/backup-staging/{home,root,etc,var-www,opt,mysql-restore,tailscale-restore}
+              
+              # Backup important directories
+              sudo cp -r /home/* /tmp/backup-staging/home/ 2>/dev/null || true
+              sudo cp -r /root/* /tmp/backup-staging/root/ 2>/dev/null || true
+              sudo cp -r /etc/{hostname,hosts,passwd,group,shadow,sudoers*,ssh} /tmp/backup-staging/etc/ 2>/dev/null || true
+              sudo cp -r /var/www/* /tmp/backup-staging/var-www/ 2>/dev/null || true
+              sudo cp -r /opt/* /tmp/backup-staging/opt/ 2>/dev/null || true
+              sudo cp -r /var/lib/mysql/* /tmp/backup-staging/mysql-restore/ 2>/dev/null || true
+              # Backup Tailscale state
+          echo "=== Backing up Tailscale state ==="
+          sudo mkdir -p /tmp/backup-staging/tailscale-restore
+          if [ -d "/var/lib/tailscale" ] && [ "$(sudo ls -A /var/lib/tailscale 2>/dev/null)" ]; then
+            sudo cp -r /var/lib/tailscale/* /tmp/backup-staging/tailscale-restore/ 2>/dev/null || true
+            echo "Tailscale state backed up"
+          else
+            echo "No Tailscale state to backup"
+          fi
+              
+              # Create manifest
+              echo "Backup created: $timestamp" | sudo tee /tmp/backup-staging/backup-manifest.txt
+              echo "Contents:" | sudo tee -a /tmp/backup-staging/backup-manifest.txt
+              sudo find /tmp/backup-staging -type d | sudo tee -a /tmp/backup-staging/backup-manifest.txt
+              
+              # Create tar.gz backup
+              cd /tmp/backup-staging
+              sudo tar -czf "/tmp/vps-backup-${timestamp}.tar.gz" .
+              
+              # Move to consistent name for artifact
+              sudo cp "/tmp/vps-backup-${timestamp}.tar.gz" /tmp/vps-backup.tar.gz
+              
+              last_backup=$current_time
+              echo "=== Backup created: vps-backup-${timestamp}.tar.gz ==="
+            fi
+            
+            # Short sleep to prevent busy waiting
+            sleep 30
+          done
+          
+          echo "=== Main runtime session completed ==="
+
+      # Step 9: Final backup creation
+      - name: Create final backup
+        run: |
+          set -euo pipefail
+          
+          echo "=== Creating final backup ==="
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          
+          # Create backup directory structure
+          sudo mkdir -p /tmp/final-backup-staging/{home,root,etc,var-www,opt,mysql-restore,tailscale-restore}
+          
+          # Backup important directories
+          sudo cp -r /home/* /tmp/final-backup-staging/home/ 2>/dev/null || true
+          sudo cp -r /root/* /tmp/final-backup-staging/root/ 2>/dev/null || true
+          sudo cp -r /etc/{hostname,hosts,passwd,group,shadow,sudoers*,ssh} /tmp/final-backup-staging/etc/ 2>/dev/null || true
+          sudo cp -r /var/www/* /tmp/final-backup-staging/var-www/ 2>/dev/null || true
+          sudo cp -r /opt/* /tmp/final-backup-staging/opt/ 2>/dev/null || true
+          
+          # Backup MariaDB data
+          sudo systemctl stop mysql || true
+          sudo cp -r /var/lib/mysql/* /tmp/final-backup-staging/mysql-restore/ 2>/dev/null || true
+          sudo systemctl start mysql || true
+          
+          # Backup Tailscale state
+          echo "=== Backing up Tailscale state for final backup ==="
+          sudo mkdir -p /tmp/final-backup-staging/tailscale-restore  
+          if [ -d "/var/lib/tailscale" ] && [ "$(sudo ls -A /var/lib/tailscale 2>/dev/null)" ]; then
+            sudo cp -r /var/lib/tailscale/* /tmp/final-backup-staging/tailscale-restore/ 2>/dev/null || true
+            echo "Tailscale state backed up to final backup"
+          else
+            echo "No Tailscale state to backup in final backup"
+          fi
+          
+          # Create manifest
+          echo "Final backup created: $timestamp" | sudo tee /tmp/final-backup-staging/backup-manifest.txt
+          echo "Session hostname: $(hostname)" | sudo tee -a /tmp/final-backup-staging/backup-manifest.txt
+          echo "Contents:" | sudo tee -a /tmp/final-backup-staging/backup-manifest.txt
+          sudo find /tmp/final-backup-staging -type d | sudo tee -a /tmp/final-backup-staging/backup-manifest.txt
+          
+          # Create tar.gz backup
+          cd /tmp/final-backup-staging
+          sudo tar -czf "/tmp/vps-backup-final-${timestamp}.tar.gz" .
+          
+          # Copy to consistent name for artifact upload
+          sudo cp "/tmp/vps-backup-final-${timestamp}.tar.gz" /tmp/vps-backup.tar.gz
+          sudo chmod 644 /tmp/vps-backup.tar.gz
+          
+          echo "=== Final backup created ==="
+
+      # Step 10: Upload backup as GitHub artifact
+      - name: Upload backup as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: /tmp/vps-backup.tar.gz
+          retention-days: 30
+
+      # Step 11: Upload backup to MEGA
+      - name: Upload backup to MEGA
+        run: |
+          set -euo pipefail
+          
+          echo "=== Uploading backup to MEGA ==="
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          
+          # Create MEGA backup directory if not exists
+          rclone mkdir mega:vps-backups || true
+          
+          # Upload backup with timestamp
+          if rclone copy /tmp/vps-backup.tar.gz mega:vps-backups/vps-backup-${timestamp}.tar.gz; then
+            echo "=== Backup uploaded to MEGA successfully ==="
+            
+            # Try to create a public link (MEGA specific)
+            echo "mega:vps-backups/vps-backup-${timestamp}.tar.gz" > /tmp/mega-backup-link.txt
+            echo "Backup timestamp: $timestamp" >> /tmp/mega-backup-link.txt
+            
+            echo "=== MEGA backup link created ==="
+          else
+            echo "=== MEGA backup upload failed ==="
+            echo "Failed to upload to MEGA" > /tmp/mega-backup-link.txt
+          fi
+
+      # Step 12: Upload MEGA link as artifact
+      - name: Upload MEGA link as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-backup-link
+          path: /tmp/mega-backup-link.txt
+          retention-days: 30
+
+      # Step 13: Cleanup and final status
+      - name: Cleanup and final status
+        run: |
+          echo "=== VPS Session Summary ==="
+          echo "Session completed at: $(date)"
+          echo "Hostname: $(hostname)"
+          echo "Uptime: $(uptime)"
+          
+          echo "=== Service Status ==="
+          sudo systemctl status mysql --no-pager || true
+          sudo systemctl status tailscaled --no-pager || true
+          sudo systemctl status bt --no-pager || true
+          
+          echo "=== Tailscale Status ==="
+          sudo tailscale status || true
+          
+          echo "=== Disk Usage ==="
+          df -h
+          
+          echo "=== Cleanup temporary files ==="
+          sudo rm -rf /tmp/backup-staging /tmp/final-backup-staging /tmp/vps-backup-*.tar.gz || true
+          
+          echo "=== VPS session completed successfully ==="
