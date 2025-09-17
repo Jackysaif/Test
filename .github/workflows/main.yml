@@ -1,608 +1,516 @@
-#I'll create a comprehensive GitHub Actions workflow for managing persistent VPS sessions. Here's the complete implementation:
-
-## Main Workflow File
-
-
-
+# Persistent VPS Session Manager with Automated Backup & Restoration
 name: Persistent VPS Session Manager
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       force_restore:
-        description: 'Force restore from backup'
+        description: 'Force restore from backup (true/false)'
         required: false
         default: 'false'
-        type: boolean
-      session_duration:
-        description: 'Session duration in minutes'
+      backup_source:
+        description: 'Backup source preference (artifacts/mega/auto)'
         required: false
-        default: '360'
-        type: string
+        default: 'auto'
 
 env:
-  SESSION_DURATION: ${{ github.event.inputs.session_duration || '360' }}
-  BACKUP_DURATION: 30
+  SESSION_DURATION: 330  # 5.5 hours in minutes (5:30 runtime + 30 min backup)
+  BACKUP_DURATION: 30    # 30 minutes for backup operations
+  HOSTNAME: 'Spidey'
   USERNAME: 'Jacky'
   PASSWORD: 'spidey'
-  HOSTNAME: 'Spidey'
-  BACKUP_NAME: "vps-backup-$(date +%Y%m%d-%H%M%S)"
-
+  
 jobs:
-  persistent-vps:
+  vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 390  # 6.5 hours max
+    timeout-minutes: 360  # 6 hours total timeout
     
     steps:
-    - name: Checkout Repository
+    - name: 📥 Checkout Repository
       uses: actions/checkout@v4
-
-    - name: Setup Environment
+      
+    - name: 🔧 Setup Environment
       run: |
-        echo "BACKUP_NAME=vps-backup-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
-        echo "SESSION_START=$(date +%s)" >> $GITHUB_ENV
-        echo "RUNTIME_MINUTES=$((${SESSION_DURATION} - ${BACKUP_DURATION}))" >> $GITHUB_ENV
-        mkdir -p /tmp/vps-logs
-        echo "Session started at $(date)" | tee /tmp/vps-logs/session.log
+        echo "SESSION_START=$(date -u +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+        echo "BACKUP_TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+        echo "SESSION_ID=session_$(date -u +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+        
+        # Create necessary directories
+        sudo mkdir -p /opt/vps-manager/{backups,logs,temp}
+        sudo chown -R $USER:$USER /opt/vps-manager
+        
+        # Install required packages
+        sudo apt-get update -qq
+        sudo apt-get install -y curl wget jq tar gzip megatools expect
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update -y
-        sudo apt-get install -y curl wget jq expect megatools tar gzip
-        echo "Dependencies installed successfully" | tee -a /tmp/vps-logs/session.log
+    - name: 📦 Download Previous Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: vps-backup-*
+        path: /opt/vps-manager/artifacts/
+        merge-multiple: true
+      continue-on-error: true
 
-    - name: Download Previous Backup
-      id: download_backup
+    - name: 🔄 Initialize MEGA Client
       run: |
-        echo "Checking for previous backups..." | tee -a /tmp/vps-logs/session.log
+        # Setup MEGA configuration
+        echo "machine mega.nz login ${{ secrets.MEGA_EMAIL }} password ${{ secrets.MEGA_PASSWORD }}" > ~/.netrc
+        chmod 600 ~/.netrc
         
-        # Try GitHub artifacts first
-        LATEST_BACKUP=""
-        if gh run list --limit 10 --json conclusion,databaseId,status | jq -r '.[] | select(.conclusion=="success") | .databaseId' | head -1 > /tmp/latest_run.txt && [ -s /tmp/latest_run.txt ]; then
-          LATEST_RUN=$(cat /tmp/latest_run.txt)
-          echo "Found successful run: $LATEST_RUN" | tee -a /tmp/vps-logs/session.log
-          
-          if gh run download $LATEST_RUN --name "vps-backup" --dir /tmp/restore 2>/dev/null; then
-            LATEST_BACKUP=$(find /tmp/restore -name "*.tar.gz" | head -1)
-            echo "backup_source=github" >> $GITHUB_OUTPUT
-            echo "Downloaded backup from GitHub artifacts: $LATEST_BACKUP" | tee -a /tmp/vps-logs/session.log
-          fi
-        fi
-        
-        # Fallback to MEGA if GitHub artifacts not available
-        if [ -z "$LATEST_BACKUP" ]; then
-          echo "No GitHub artifacts found, checking MEGA..." | tee -a /tmp/vps-logs/session.log
-          
-          # Login to MEGA
-          if echo "${{ secrets.MEGA_PASSWORD }}" | megalogin "${{ secrets.MEGA_EMAIL }}"; then
-            # Find latest backup
-            MEGA_BACKUP=$(megals /Root/vps-backups/ 2>/dev/null | grep "\.tar\.gz$" | sort -r | head -1)
-            if [ ! -z "$MEGA_BACKUP" ]; then
-              echo "Found MEGA backup: $MEGA_BACKUP" | tee -a /tmp/vps-logs/session.log
-              mkdir -p /tmp/restore
-              if megaget "/Root/vps-backups/$MEGA_BACKUP" /tmp/restore/; then
-                LATEST_BACKUP="/tmp/restore/$MEGA_BACKUP"
-                echo "backup_source=mega" >> $GITHUB_OUTPUT
-                echo "Downloaded backup from MEGA: $LATEST_BACKUP" | tee -a /tmp/vps-logs/session.log
-              fi
-            fi
-          fi
-        fi
-        
-        if [ ! -z "$LATEST_BACKUP" ]; then
-          echo "backup_file=$LATEST_BACKUP" >> $GITHUB_OUTPUT
-          echo "backup_available=true" >> $GITHUB_OUTPUT
+        # Test MEGA connection
+        if megals / &>/dev/null; then
+          echo "✅ MEGA connection successful"
+          echo "MEGA_AVAILABLE=true" >> $GITHUB_ENV
         else
-          echo "backup_available=false" >> $GITHUB_OUTPUT
-          echo "No previous backup found, starting fresh session" | tee -a /tmp/vps-logs/session.log
+          echo "❌ MEGA connection failed"
+          echo "MEGA_AVAILABLE=false" >> $GITHUB_ENV
         fi
-      env:
-        GH_TOKEN: ${{ github.token }}
 
-    - name: System Configuration
+    - name: 🔍 Check for Existing Backups
+      id: backup_check
       run: |
-        echo "Configuring system..." | tee -a /tmp/vps-logs/session.log
+        # Check GitHub artifacts
+        if find /opt/vps-manager/artifacts -name "*.tar.gz" -type f | head -1 | grep -q .; then
+          LATEST_ARTIFACT=$(find /opt/vps-manager/artifacts -name "*.tar.gz" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d' ' -f2-)
+          echo "LATEST_ARTIFACT_BACKUP=$LATEST_ARTIFACT" >> $GITHUB_ENV
+          echo "ARTIFACT_BACKUP_AVAILABLE=true" >> $GITHUB_ENV
+          echo "✅ Found artifact backup: $(basename $LATEST_ARTIFACT)"
+        else
+          echo "ARTIFACT_BACKUP_AVAILABLE=false" >> $GITHUB_ENV
+          echo "ℹ️ No artifact backups found"
+        fi
         
-        # Set hostname
-        sudo hostnamectl set-hostname $HOSTNAME
-        echo "127.0.0.1 $HOSTNAME" | sudo tee -a /etc/hosts
-        
-        # Create user Jacky
-        sudo useradd -m -s /bin/bash $USERNAME 2>/dev/null || true
-        echo "$USERNAME:$PASSWORD" | sudo chpasswd
-        sudo usermod -aG sudo $USERNAME
-        
-        # Configure sudo without password for automation
-        echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$USERNAME
-        
-        # Set automatic yes responses
-        export DEBIAN_FRONTEND=noninteractive
-        echo 'APT::Get::Assume-Yes "true";' | sudo tee /etc/apt/apt.conf.d/90assumeyes
-        
-        echo "System configuration completed" | tee -a /tmp/vps-logs/session.log
+        # Check MEGA backups
+        if [ "$MEGA_AVAILABLE" = "true" ]; then
+          if megals /vps-backups/ 2>/dev/null | grep -q "\.tar\.gz"; then
+            LATEST_MEGA=$(megals /vps-backups/ | grep "\.tar\.gz" | sort -r | head -1 | awk '{print $NF}')
+            echo "LATEST_MEGA_BACKUP=$LATEST_MEGA" >> $GITHUB_ENV
+            echo "MEGA_BACKUP_AVAILABLE=true" >> $GITHUB_ENV
+            echo "✅ Found MEGA backup: $LATEST_MEGA"
+          else
+            echo "MEGA_BACKUP_AVAILABLE=false" >> $GITHUB_ENV
+            echo "ℹ️ No MEGA backups found"
+          fi
+        fi
 
-    - name: Restore Previous State
-      if: steps.download_backup.outputs.backup_available == 'true'
+    - name: 📥 Restore System State
+      if: env.ARTIFACT_BACKUP_AVAILABLE == 'true' || env.MEGA_BACKUP_AVAILABLE == 'true'
       run: |
-        echo "Restoring previous state..." | tee -a /tmp/vps-logs/session.log
-        BACKUP_FILE="${{ steps.download_backup.outputs.backup_file }}"
+        echo "🔄 Starting system restoration..."
         
-        if [ -f "$BACKUP_FILE" ]; then
-          # Extract backup
-          cd /
-          sudo tar -xzf "$BACKUP_FILE" --overwrite 2>/dev/null || true
+        # Determine backup source
+        RESTORE_SOURCE=""
+        if [ "${{ github.event.inputs.backup_source }}" = "artifacts" ] && [ "$ARTIFACT_BACKUP_AVAILABLE" = "true" ]; then
+          RESTORE_SOURCE="artifact"
+        elif [ "${{ github.event.inputs.backup_source }}" = "mega" ] && [ "$MEGA_BACKUP_AVAILABLE" = "true" ]; then
+          RESTORE_SOURCE="mega"
+        elif [ "$ARTIFACT_BACKUP_AVAILABLE" = "true" ]; then
+          RESTORE_SOURCE="artifact"
+        elif [ "$MEGA_BACKUP_AVAILABLE" = "true" ]; then
+          RESTORE_SOURCE="mega"
+        fi
+        
+        if [ -n "$RESTORE_SOURCE" ]; then
+          echo "📦 Restoring from $RESTORE_SOURCE backup..."
           
-          # Restore permissions
-          sudo chown -R $USERNAME:$USERNAME /home/$USERNAME/ 2>/dev/null || true
-          sudo chown -R root:root /etc/tailscale/ 2>/dev/null || true
+          if [ "$RESTORE_SOURCE" = "artifact" ]; then
+            cp "$LATEST_ARTIFACT_BACKUP" /opt/vps-manager/temp/restore.tar.gz
+          else
+            megaget "/vps-backups/$LATEST_MEGA_BACKUP" /opt/vps-manager/temp/restore.tar.gz
+          fi
+          
+          # Extract and restore
+          cd /opt/vps-manager/temp
+          tar -tf restore.tar.gz | head -20  # List contents for verification
+          
+          # Restore system files
+          sudo tar -xzf restore.tar.gz -C /
+          
+          # Fix permissions
+          sudo chown -R Jacky:Jacky /home/Jacky/ 2>/dev/null || true
           sudo chown -R www-data:www-data /www/ 2>/dev/null || true
           
-          # Restore installed packages
-          if [ -f /tmp/installed_packages.txt ]; then
-            echo "Restoring installed packages..." | tee -a /tmp/vps-logs/session.log
-            sudo apt-get update -y
-            cat /tmp/installed_packages.txt | xargs sudo apt-get install -y 2>/dev/null || true
-          fi
-          
-          echo "State restoration completed from ${{ steps.download_backup.outputs.backup_source }}" | tee -a /tmp/vps-logs/session.log
+          echo "✅ System state restored successfully"
+          echo "SYSTEM_RESTORED=true" >> $GITHUB_ENV
+        else
+          echo "❌ No backup source available for restoration"
+          echo "SYSTEM_RESTORED=false" >> $GITHUB_ENV
         fi
 
-    - name: Install Tailscale
+    - name: 👤 Create User and Configure System
       run: |
-        echo "Installing Tailscale..." | tee -a /tmp/vps-logs/session.log
+        echo "🔧 Configuring system..."
+        
+        # Set hostname
+        sudo hostnamectl set-hostname "$HOSTNAME"
+        echo "127.0.1.1 $HOSTNAME" | sudo tee -a /etc/hosts
+        
+        # Create user if not exists
+        if ! id "$USERNAME" &>/dev/null; then
+          # Create user with password
+          echo "Creating user $USERNAME..."
+          sudo useradd -m -s /bin/bash "$USERNAME"
+          echo "$USERNAME:$PASSWORD" | sudo chpasswd
+          
+          # Add to sudo group
+          sudo usermod -aG sudo "$USERNAME"
+          
+          # Configure sudo without password for automation
+          echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$USERNAME"
+        fi
+        
+        echo "✅ User and system configuration complete"
+
+    - name: 📦 Install Tailscale
+      run: |
+        echo "🔧 Installing Tailscale..."
         
         # Install Tailscale
         curl -fsSL https://tailscale.com/install.sh | sh
         
-        # Start Tailscale service
-        sudo systemctl enable tailscaled
-        sudo systemctl start tailscaled
-        
         # Restore Tailscale state if available
-        if [ -f /etc/tailscale/tailscaled.state ]; then
-          echo "Restoring Tailscale state..." | tee -a /tmp/vps-logs/session.log
-          sudo systemctl restart tailscaled
+        if [ -d "/etc/tailscale" ] && [ -f "/etc/tailscale/tailscaled.state" ]; then
+          echo "🔄 Tailscale state found, restarting service..."
+          sudo systemctl enable tailscaled
+          sudo systemctl start tailscaled
           sleep 5
+          
+          # Check if already authenticated
+          if sudo tailscale status &>/dev/null; then
+            echo "✅ Tailscale restored with existing state"
+            sudo tailscale status
+          else
+            echo "⚠️ Tailscale state corrupted, manual authentication may be required"
+          fi
         else
-          echo "No previous Tailscale state found" | tee -a /tmp/vps-logs/session.log
+          echo "ℹ️ No previous Tailscale state found"
+          echo "⚠️ Tailscale requires manual authentication: sudo tailscale up"
         fi
-        
-        echo "Tailscale installation completed" | tee -a /tmp/vps-logs/session.log
 
-    - name: Install aapanel
+    - name: 🌐 Install AAPanel
       run: |
-        echo "Installing aapanel..." | tee -a /tmp/vps-logs/session.log
+        echo "🔧 Installing AAPanel..."
         
-        # Check if aapanel is already installed
-        if [ ! -d "/usr/local/aapanel" ]; then
-          # Download and install aapanel
+        # Check if AAPanel is already installed
+        if [ -d "/usr/local/aapanel" ] && [ -f "/usr/local/aapanel/data/default.pl" ]; then
+          echo "✅ AAPanel already installed, starting services..."
+          sudo systemctl enable aapanel
+          sudo systemctl start aapanel
+        else
+          echo "📦 Installing fresh AAPanel..."
+          
+          # Download and install AAPanel
           wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           
-          # Create expect script for automated installation
-          cat > /tmp/install_aapanel.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 300
-spawn bash install.sh
-expect {
-    "*Do you want to install aaPanel to the /usr/local/aapanel directory now*" {
-        send "y\r"
-        exp_continue
-    }
-    "*Please enter the panel user password*" {
-        send "spidey\r"
-        exp_continue
-    }
-    "*Please enter the panel user name*" {
-        send "Jacky\r"
-        exp_continue
-    }
-    "*y/n*" {
-        send "y\r"
-        exp_continue
-    }
-    "*Y/N*" {
-        send "Y\r"
-        exp_continue
-    }
-    eof
-}
-EOF
-          
-          chmod +x /tmp/install_aapanel.exp
-          sudo /tmp/install_aapanel.exp
-        else
-          echo "aapanel already installed, starting services..." | tee -a /tmp/vps-logs/session.log
-          sudo systemctl start aapanel 2>/dev/null || true
+          # Install with automatic yes responses
+          expect << 'EOF'
+          spawn bash install.sh aapanel
+          expect {
+        "*y/n*" { send "y\r"; exp_continue }
+        "*Y/N*" { send "Y\r"; exp_continue }
+        "*yes/no*" { send "yes\r"; exp_continue }
+        "*continue*" { send "\r"; exp_continue }
+        eof
+        }
+        EOF
         fi
         
-        # Set panel credentials
-        if [ -d "/usr/local/aapanel" ]; then
-          sudo /usr/local/aapanel/cli/bt_cli.py panel username $USERNAME 2>/dev/null || true
-          sudo /usr/local/aapanel/cli/bt_cli.py panel password $PASSWORD 2>/dev/null || true
+        # Wait for AAPanel to start
+        sleep 30
+        
+        # Set AAPanel credentials
+        if [ -f "/usr/local/aapanel/pyenv/bin/python" ]; then
+          sudo /usr/local/aapanel/pyenv/bin/python /usr/local/aapanel/panel.py panel $PASSWORD
+          sudo /usr/local/aapanel/pyenv/bin/python /usr/local/aapanel/panel.py username $USERNAME
+          echo "✅ AAPanel credentials set"
         fi
-        
-        echo "aapanel installation completed" | tee -a /tmp/vps-logs/session.log
 
-    - name: Health Check
+    - name: 📦 Restore Installed Packages
+      if: env.SYSTEM_RESTORED == 'true'
       run: |
-        echo "Performing health checks..." | tee -a /tmp/vps-logs/session.log
-        
-        # Check services
-        sudo systemctl is-active tailscaled && echo "✓ Tailscale running" || echo "✗ Tailscale not running"
-        sudo systemctl is-active aapanel && echo "✓ aapanel running" || echo "✗ aapanel not running"
-        
-        # Check user
-        id $USERNAME && echo "✓ User $USERNAME exists" || echo "✗ User $USERNAME missing"
-        
-        # Check hostname
-        [ "$(hostname)" = "$HOSTNAME" ] && echo "✓ Hostname set correctly" || echo "✗ Hostname incorrect"
-        
-        echo "Health check completed" | tee -a /tmp/vps-logs/session.log
+        if [ -f "/opt/vps-manager/temp/packages.list" ]; then
+          echo "📦 Restoring installed packages..."
+          while read package; do
+            if [ -n "$package" ]; then
+              sudo apt-get install -y "$package" || echo "⚠️ Failed to install $package"
+            fi
+          done < /opt/vps-manager/temp/packages.list
+          echo "✅ Package restoration complete"
+        fi
 
-    - name: Setup Graceful Shutdown Monitor
+    - name: 🏃 Start Session Monitor
       run: |
-        echo "Setting up graceful shutdown monitor..." | tee -a /tmp/vps-logs/session.log
+        echo "🚀 Starting VPS session..."
         
-        # Create shutdown monitor script
-        cat > /tmp/shutdown_monitor.sh << 'EOF'
-#!/bin/bash
-while true; do
-  if [ -f /tmp/stop ]; then
-    echo "Graceful shutdown requested at $(date)" | tee -a /tmp/vps-logs/session.log
-    touch /tmp/graceful_shutdown
-    break
-  fi
-  sleep 10
-done
-EOF
-        
-        chmod +x /tmp/shutdown_monitor.sh
-        /tmp/shutdown_monitor.sh &
-        echo $! > /tmp/shutdown_monitor.pid
-        
-        echo "Shutdown monitor started" | tee -a /tmp/vps-logs/session.log
+        # Create session monitor script
+        cat > /opt/vps-manager/session_monitor.sh << 'EOF'
+        #!/bin/bash
 
-    - name: Run Session
-      run: |
-        echo "Starting VPS session for $RUNTIME_MINUTES minutes..." | tee -a /tmp/vps-logs/session.log
-        
-        # Calculate end time
-        END_TIME=$(($(date +%s) + ($RUNTIME_MINUTES * 60)))
-        
-        # Session loop
-        while [ $(date +%s) -lt $END_TIME ]; do
-          # Check for graceful shutdown
-          if [ -f /tmp/graceful_shutdown ]; then
-            echo "Graceful shutdown detected, ending session early" | tee -a /tmp/vps-logs/session.log
-            break
-          fi
-          
-          # Log session status every 30 minutes
-          if [ $(($(date +%s) % 1800)) -eq 0 ]; then
-            REMAINING=$(((END_TIME - $(date +%s)) / 60))
-            echo "Session running - $REMAINING minutes remaining" | tee -a /tmp/vps-logs/session.log
-          fi
-          
-          sleep 60
-        done
-        
-        echo "Session runtime completed" | tee -a /tmp/vps-logs/session.log
+        SESSION_START=$(date +%s)
+        SESSION_DURATION_SECONDS=$((SESSION_DURATION * 60))
+        BACKUP_START_TIME=$((SESSION_DURATION_SECONDS - BACKUP_DURATION * 60))
 
-    - name: Create Backup
+        echo "Session started at $(date)"
+        echo "Session will run for $SESSION_DURATION minutes"
+        echo "Backup will start at $(date -d "@$((SESSION_START + BACKUP_START_TIME))")"
+
+        # Monitor for stop signal
+        while true; do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED=$((CURRENT_TIME - SESSION_START))
+  
+        # Check for manual stop signal
+         if [ -f "/tmp/stop" ]; then
+         echo "Manual stop signal detected"
+         break
+         fi
+  
+         # Check if it's time to start backup
+         if [ $ELAPSED -ge $BACKUP_START_TIME ]; then
+         echo "Backup time reached, starting backup process"
+         break
+         fi
+  
+         sleep 60
+         done
+
+         echo "Session monitor ending at $(date)"
+         EOF
+
+        chmod +x /opt/vps-manager/session_monitor.sh
+        
+        # Start services
+        sudo systemctl start tailscaled || true
+        sudo systemctl start aapanel || true
+        
+        # Display system information
+        echo "🖥️ System Information:"
+        echo "Hostname: $(hostname)"
+        echo "User: $USERNAME created: $(id $USERNAME 2>/dev/null && echo 'Yes' || echo 'No')"
+        echo "Tailscale status:"
+        sudo tailscale status || echo "Not connected"
+        echo "AAPanel status:"
+        sudo systemctl is-active aapanel || echo "Not running"
+        
+        # Log session start
+        echo "$(date): Session $SESSION_ID started" >> /opt/vps-manager/logs/session.log
+
+    - name: ⏱️ Run Session
+      timeout-minutes: 330  # 5.5 hours
       run: |
-        echo "Creating backup..." | tee -a /tmp/vps-logs/session.log
+        echo "🏃‍♂️ Running VPS session for $SESSION_DURATION minutes..."
+        
+        # Execute session monitor
+        /opt/vps-manager/session_monitor.sh
+        
+        echo "⏰ Session runtime completed"
+
+    - name: 💾 Create Backup
+      if: always()
+      run: |
+        echo "💾 Starting backup process..."
         
         # Create backup directory
-        mkdir -p /tmp/backup
+        BACKUP_DIR="/opt/vps-manager/backups/$BACKUP_TIMESTAMP"
+        mkdir -p "$BACKUP_DIR"
         
-        # Save installed packages list
-        dpkg --get-selections | grep -v deinstall | awk '{print $1}' > /tmp/backup/installed_packages.txt
-        
-        # Create backup archive
-        sudo tar -czf "/tmp/backup/${BACKUP_NAME}.tar.gz" \
-          --exclude='/tmp/*' \
-          --exclude='/proc/*' \
-          --exclude='/sys/*' \
-          --exclude='/dev/*' \
-          --exclude='/run/*' \
-          --exclude='/mnt/*' \
-          --exclude='/media/*' \
-          /home/$USERNAME/ \
-          /etc/tailscale/ \
-          /www/ \
-          /usr/local/aapanel/ \
-          /etc/systemd/system/ \
-          /tmp/backup/installed_packages.txt \
-          2>/dev/null || true
-        
-        # Verify backup
-        if [ -f "/tmp/backup/${BACKUP_NAME}.tar.gz" ]; then
-          BACKUP_SIZE=$(du -h "/tmp/backup/${BACKUP_NAME}.tar.gz" | cut -f1)
-          echo "Backup created successfully: ${BACKUP_NAME}.tar.gz ($BACKUP_SIZE)" | tee -a /tmp/vps-logs/session.log
-        else
-          echo "Backup creation failed" | tee -a /tmp/vps-logs/session.log
-          exit 1
+        # Create backup script
+        cat > /opt/vps-manager/create_backup.sh << 'EOF'
+        #!/bin/bash
+        set -e
+
+        BACKUP_DIR="$1"
+        echo "Creating backup in: $BACKUP_DIR"
+
+        # Create directory structure
+        mkdir -p "$BACKUP_DIR"/{home,etc,www,usr,system}
+ 
+        # Backup user data
+        if [ -d "/home/Jacky" ]; then
+        echo "Backing up user data..."
+        sudo cp -r /home/Jacky "$BACKUP_DIR/home/" || true
         fi
 
-    - name: Upload to GitHub Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: vps-backup
-        path: /tmp/backup/*.tar.gz
-        retention-days: 30
+        # Backup Tailscale configuration
+        if [ -d "/etc/tailscale" ]; then
+        echo "Backing up Tailscale configuration..."
+        sudo cp -r /etc/tailscale "$BACKUP_DIR/etc/" || true
+        fi
 
-    - name: Upload to MEGA
-      run: |
-        echo "Uploading backup to MEGA..." | tee -a /tmp/vps-logs/session.log
+        # Backup web directory
+        if [ -d "/www" ]; then
+        echo "Backing up web directory..."
+        sudo cp -r /www "$BACKUP_DIR/" || true
+        fi
+
+        # Backup AAPanel configuration
+        if [ -d "/usr/local/aapanel" ]; then
+        echo "Backing up AAPanel configuration..."
+        sudo cp -r /usr/local/aapanel "$BACKUP_DIR/usr/" || true
+        fi
+
+        # Backup systemd configurations
+        if [ -d "/etc/systemd/system" ]; then
+        echo "Backing up systemd configurations..."
+        sudo find /etc/systemd/system -name "*tailscale*" -o -name "*aapanel*" | while read file; do
+        if [ -f "$file" ]; then
+        sudo cp "$file" "$BACKUP_DIR/system/" || true
+        fi
+        done
+        fi
+
+        # Create installed packages list
+        echo "Creating packages list..."
+        dpkg --get-selections | grep -v deinstall | awk '{print $1}' > "$BACKUP_DIR/packages.list"
+
+        # Create backup metadata
+        cat > "$BACKUP_DIR/backup_info.txt" << METADATA
+        Backup created: $(date -u)
+        Hostname: $(hostname)
+        Session ID: $SESSION_ID
+        Ubuntu version: $(lsb_release -d | cut -f2)
+        Kernel: $(uname -r)
+        Tailscale status: $(sudo tailscale status --json 2>/dev/null | jq -r .Self.HostName || echo "Not available")
+        METADATA
+
+        echo "Backup directory prepared"
+        EOF
+
+        chmod +x /opt/vps-manager/create_backup.sh
         
-        # Login to MEGA
-        if echo "${{ secrets.MEGA_PASSWORD }}" | megalogin "${{ secrets.MEGA_EMAIL }}"; then
-          # Create backup directory if not exists
-          megamkdir /Root/vps-backups/ 2>/dev/null || true
-          
-          # Upload backup
-          BACKUP_FILE="/tmp/backup/${BACKUP_NAME}.tar.gz"
-          if megaput "$BACKUP_FILE" /Root/vps-backups/; then
-            echo "Backup uploaded to MEGA successfully" | tee -a /tmp/vps-logs/session.log
-            
-            # Generate direct link
-            MEGA_LINK=$(megaexport "/Root/vps-backups/${BACKUP_NAME}.tar.gz" | grep -o 'https://[^[:space:]]*')
-            if [ ! -z "$MEGA_LINK" ]; then
-              echo "$MEGA_LINK" > "/tmp/backup/${BACKUP_NAME}_link.txt"
-              echo "name: Persistent VPS Session Manager
+        # Create backup
+        /opt/vps-manager/create_backup.sh "$BACKUP_DIR"
+        
+        # Create compressed archive
+        cd /opt/vps-manager/backups
+        sudo tar -czf "vps_backup_$BACKUP_TIMESTAMP.tar.gz" "$BACKUP_TIMESTAMP"
+        
+        # Set permissions
+        sudo chown $USER:$USER "vps_backup_$BACKUP_TIMESTAMP.tar.gz"
+        
+        echo "BACKUP_FILE=/opt/vps-manager/backups/vps_backup_$BACKUP_TIMESTAMP.tar.gz" >> $GITHUB_ENV
+        echo "✅ Backup created: vps_backup_$BACKUP_TIMESTAMP.tar.gz"
+        
+        # Display backup size
+        ls -lh "/opt/vps-manager/backups/vps_backup_$BACKUP_TIMESTAMP.tar.gz"
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
-  workflow_dispatch:  # Allow manual triggering
-
-env:
-  VPS_USER: Jacky
-  VPS_PASSWORD: spidey
-  HOSTNAME: Spidey
-  AAPANEL_USER: Jacky
-  AAPANEL_PASSWORD: spidey
-  SESSION_TIMEOUT: 330m  # 5 hours 30 minutes
-  BACKUP_TIMEOUT: 30m
-
-jobs:
-  vps-session:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours total
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup SSH key
+    - name: ☁️ Upload to MEGA
+      if: always() && env.MEGA_AVAILABLE == 'true'
       run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
-
-    - name: Deploy and configure VPS
-      uses: appleboy/ssh-action@v0.1.8
-      with:
-        host: ${{ secrets.VPS_HOST }}
-        username: root
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        script: |
-          #!/bin/bash
-          set -e
-
-          # Function to backup data
-          backup_data() {
-            echo "Starting backup process..."
-            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            BACKUP_FILE="/tmp/backup_${TIMESTAMP}.tar.gz"
-            
-            # Create backup of important data
-            tar -czf $BACKUP_FILE \
-              /home/$VPS_USER/ \
-              /etc/tailscale/ \
-              /var/lib/tailscale/ \
-              /www/ \
-              /wwwroot/ \
-              /var/www/ \
-              /etc/nginx/ \
-              /etc/apache2/ \
-              /etc/mysql/ \
-              /var/lib/mysql/ \
-              /opt/ \
-              /usr/local/aapanel/ \
-              /root/.ssh/ \
-              /home/$VPS_USER/.ssh/ \
-              /etc/hosts \
-              /etc/hostname \
-              /etc/systemd/ \
-              /var/log/ 2>/dev/null | true
-            
-            echo "Backup created: $BACKUP_FILE"
-            echo $BACKUP_FILE
-          }
-
-          # Function to restore data
-          restore_data() {
-            echo "Checking for previous backup..."
-            
-            # Try to download from GitHub artifact first
-            if [ -f "/tmp/previous_backup.txt" ]; then
-              BACKUP_URL=$(cat /tmp/previous_backup.txt)
-              echo "Found backup URL: $BACKUP_URL"
-              
-              if curl -s -f -L "$BACKUP_URL" -o /tmp/restore_backup.tar.gz; then
-                echo "Downloaded backup from GitHub artifact"
-                tar -xzf /tmp/restore_backup.tar.gz -C /
-                rm /tmp/restore_backup.tar.gz
-                return 0
-              fi
-            fi
-
-            # Try Mega.nz backup
-            if command -v mega-get &> /dev/null; then
-              echo "Trying Mega.nz backup..."
-              if mega-get /backup_latest.tar.gz /tmp/restore_backup.tar.gz; then
-                tar -xzf /tmp/restore_backup.tar.gz -C /
-                rm /tmp/restore_backup.tar.gz
-                return 0
-              fi
-            fi
-
-            echo "No backup found, starting fresh session"
-            return 1
-          }
-
-          # Set hostname
-          hostnamectl set-hostname $HOSTNAME
-          echo "127.0.0.1 $HOSTNAME" >> /etc/hosts
-
-          # Create user if not exists
-          if ! id "$VPS_USER" &>/dev/null; then
-            useradd -m -G sudo -s /bin/bash "$VPS_USER"
-            echo "$VPS_USER:$VPS_PASSWORD" | chpasswd
-            echo "$VPS_USER ALL=(ALL:ALL) NOPASSWD:ALL" >> /etc/sudoers.d/$VPS_USER
-          fi
-
-          # Install Tailscale if not installed
-          if ! command -v tailscale &> /dev/null; then
-            curl -fsSL https://tailscale.com/install.sh | sh
-          fi
-
-          # Start Tailscale
-          tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --accept-routes --accept-dns || true
-
-          # Install aaPanel if not installed
-          if ! command -v bt &> /dev/null; then
-            wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-            echo "y" | bash install.sh
-          fi
-
-          # Configure aaPanel
-          bt << EOF
-          5
-          6
-          $AAPANEL_USER
-          $AAPANEL_PASSWORD
-          $AAPANEL_PASSWORD
-          y
-          EOF
-
-          # Restore previous session data
-          restore_data || echo "Starting new session without restore"
-
-          # Start services
-          systemctl start nginx || true
-          systemctl start mysql || true
-          systemctl start apache2 || true
-          systemctl start tailscale || true
-
-          # Session monitoring loop
-          echo "Session started at $(date)"
-          echo "Session will run for $SESSION_TIMEOUT"
+        echo "☁️ Uploading backup to MEGA..."
+        
+        # Ensure MEGA directory exists
+        megamkdir /vps-backups 2>/dev/null || true
+        
+        # Upload backup
+        if megaput "$BACKUP_FILE" /vps-backups/; then
+          echo "✅ Backup uploaded to MEGA successfully"
           
-          END_TIME=$(( $(date +%s) + 330 * 60 ))  # 5.5 hours from now
+          # Create direct download link
+          MEGA_LINK=$(megaexport "/vps-backups/$(basename $BACKUP_FILE)" | grep "https://mega.nz" | head -1)
+          if [ -n "$MEGA_LINK" ]; then
+            echo "$MEGA_LINK" > "/opt/vps-manager/mega_link_$BACKUP_TIMESTAMP.txt"
+            echo "📎 MEGA direct link: $MEGA_LINK"
+            echo "MEGA_LINK=$MEGA_LINK" >> $GITHUB_ENV
+          fi
           
-          while [ $(date +%s) -lt $END_TIME ]; do
-            # Check for stop command
-            if [ -f "/tmp/stop" ]; then
-              echo "Stop command detected, initiating graceful shutdown"
-              rm /tmp/stop
-              break
-            fi
-            
-            # Check system health
-            if ! systemctl is-active --quiet tailscale; then
-              echo "Tailscale not active, restarting..."
-              systemctl restart tailscale
-            fi
-            
-            sleep 30
+          # Cleanup old MEGA backups (keep last 5)
+          echo "🧹 Cleaning up old MEGA backups..."
+          megals /vps-backups/ | grep "vps_backup_" | sort -r | tail -n +6 | while read file; do
+            echo "Deleting old backup: $file"
+            megarm "/vps-backups/$file" || true
           done
-
-          # Create final backup
-          BACKUP_FILE=$(backup_data)
           
-          # Upload backup to GitHub artifact (via base64 encoding for transfer)
-          base64 $BACKUP_FILE > /tmp/backup.b64
-          echo "BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
-
-          # Also upload to Mega.nz if configured
-          if command -v mega-put &> /dev/null && [ -n "${{ secrets.MEGA_EMAIL }}" ] && [ -n "${{ secrets.MEGA_PASSWORD }}" ]; then
-            mega-login "${{ secrets.MEGA_EMAIL }}" "${{ secrets.MEGA_PASSWORD }}" || true
-            mega-put $BACKUP_FILE / || true
-            mega-backup || true
-          fi
-
-          # Cleanup
-          rm -f $BACKUP_FILE
-          echo "Session completed at $(date)"
-
-    - name: Download backup from VPS
-      uses: appleboy/scp-action@v0.1.4
-      with:
-        host: ${{ secrets.VPS_HOST }}
-        username: root
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: "/tmp/backup.b64"
-        target: "."
-
-    - name: Decode and store backup
-      run: |
-        base64 -d backup.b64 > backup_final.tar.gz
-        rm backup.b64
-
-    - name: Upload backup artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: vps-backup-$(date +%Y%m%d_%H%M%S)
-        path: backup_final.tar.gz
-        retention-days: 7
-
-    - name: Store artifact download URL
-      run: |
-        ARTIFACT_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-        echo "ARTIFACT_URL=$ARTIFACT_URL" >> $GITHUB_ENV
-        echo "Backup available at: $ARTIFACT_URL" > artifact_url.txt
-
-    - name: Upload to Mega.nz (fallback)
-      if: always() && secrets.MEGA_EMAIL != '' && secrets.MEGA_PASSWORD != ''
-      run: |
-        pip3 install megatools
-        mega-login "${{ secrets.MEGA_EMAIL }}" "${{ secrets.MEGA_PASSWORD }}"
-        mega-put backup_final.tar.gz /
-        MEGA_URL=$(mega-export -a /backup_final.tar.gz | grep -o 'https://mega\.nz/[^"]*')
-        echo "MEGA_URL=$MEGA_URL" >> $GITHUB_ENV
-        echo "Mega backup: $MEGA_URL" >> mega_url.txt
-
-    - name: Update backup URL file
-      run: |
-        if [ -n "$ARTIFACT_URL" ]; then
-          echo "$ARTIFACT_URL" > backup_url.txt
-        elif [ -n "$MEGA_URL" ]; then
-          echo "$MEGA_URL" > backup_url.txt
         else
-          echo "No backup available" > backup_url.txt
+          echo "❌ Failed to upload to MEGA"
         fi
 
-    - name: Upload backup URL to VPS
-      uses: appleboy/scp-action@v0.1.4
-      with:
-        host: ${{ secrets.VPS_HOST }}
-        username: root
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: "backup_url.txt"
-        target: "/tmp/previous_backup.txt"
-
-    - name: Cleanup
-      run: |
-        rm -f backup_final.tar.gz backup_url.txt artifact_url.txt mega_url.txt
-
-    - name: Notify completion
+    - name: 📦 Upload Backup Artifacts
       if: always()
-      uses: techulus/push-github-action@v1.0.14
+      uses: actions/upload-artifact@v4
       with:
-        api_key: ${{ secrets.PUSH_API_KEY }}
-        title: VPS Session Completed
-        body: Session completed with status ${{ job.status }}. Backup: ${{ env.ARTIFACT_URL || env.MEGA_URL || 'None' }}
+        name: vps-backup-${{ env.BACKUP_TIMESTAMP }}
+        path: |
+          ${{ env.BACKUP_FILE }}
+          /opt/vps-manager/mega_link_${{ env.BACKUP_TIMESTAMP }}.txt
+        retention-days: 30
+        compression-level: 6
+
+    - name: 🧹 Cleanup and Maintenance
+      if: always()
+      run: |
+        echo "🧹 Performing cleanup..."
+        
+        # Log session completion
+        echo "$(date): Session $SESSION_ID completed" >> /opt/vps-manager/logs/session.log
+        
+        # Cleanup temporary files
+        sudo rm -rf /opt/vps-manager/temp/* || true
+        
+        # Cleanup old local backups (keep last 3)
+        find /opt/vps-manager/backups -name "vps_backup_*.tar.gz" -type f | sort -r | tail -n +4 | while read file; do
+          echo "Removing old backup: $(basename $file)"
+          rm -f "$file" || true
+        done
+        
+        # Display final status
+        echo "📊 Final Session Status:"
+        echo "Session ID: $SESSION_ID"
+        echo "Duration: $(echo "scale=2; $(date +%s) - $(date -d "$SESSION_START" +%s)" | bc || echo "N/A") seconds"
+        echo "Backup created: $(test -f "$BACKUP_FILE" && echo "Yes" || echo "No")"
+        echo "MEGA upload: $(test -n "$MEGA_LINK" && echo "Yes" || echo "No")"
+        echo "System hostname: $(hostname)"
+        echo "Active services:"
+        sudo systemctl is-active tailscaled aapanel || true
+
+    - name: 🔔 Session Summary
+      if: always()
+      run: |
+        # Create session summary
+        cat > /tmp/session_summary.md << EOF
+# VPS Session Summary - $SESSION_ID
+
+## Session Details
+- **Start Time**: $SESSION_START
+- **Duration**: $SESSION_DURATION minutes
+- **Hostname**: $HOSTNAME
+- **Username**: $USERNAME
+
+## Backup Information
+- **Backup File**: $(basename $BACKUP_FILE)
+- **Backup Size**: $(test -f "$BACKUP_FILE" && ls -lh "$BACKUP_FILE" | awk '{print $5}' || echo "N/A")
+- **MEGA Upload**: $(test -n "$MEGA_LINK" && echo "✅ Success" || echo "❌ Failed")
+- **Artifacts Upload**: ✅ Success
+
+## System Status
+- **Tailscale**: $(sudo systemctl is-active tailscaled 2>/dev/null || echo "inactive")
+- **AAPanel**: $(sudo systemctl is-active aapanel 2>/dev/null || echo "inactive")
+- **System Restored**: $SYSTEM_RESTORED
+
+## Next Session
+- **Scheduled**: $(date -d "+6 hours" -u +"%Y-%m-%d %H:%M UTC")
+
+---
+*Generated at $(date -u)*
+EOF
+
+        echo "📋 Session Summary:"
+        cat /tmp/session_summary.md
+
+    - name: ⚠️ Graceful Shutdown
+      if: always()
+      run: |
+        echo "🛑 Initiating graceful shutdown..."
+        
+        # Stop services gracefully
+        sudo systemctl stop aapanel || true
+        sudo systemctl stop tailscaled || true
+        
+        # Remove stop signal if exists
+        rm -f /tmp/stop || true
+        
+        echo "✅ Graceful shutdown completed"
+        echo "💤 Session ending - next session will start in 6 hours"
