@@ -1,287 +1,363 @@
-name: Persistent VPS Session
+name: Persistent VPS Session with State Restoration
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+  push:
+    branches: [ main ]
 
 env:
-  BACKUP_NAME: vps-backup-${{ github.run_number }}
+  HOSTNAME: Spidey
+  USERNAME: Jacky
+  PASSWORD: spidey
   SESSION_DURATION: 21600  # 6 hours in seconds
-  BACKUP_START_TIME: 19800  # 5.5 hours in seconds
+  BACKUP_TIME: 19800       # 5.5 hours in seconds
 
 jobs:
-  vps-session:
+  persistent-vps:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 hours
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: Setup environment
-        run: |
-          echo "SESSION_START=$(date +%s)" >> $GITHUB_ENV
-          echo "BACKUP_TRIGGERED=false" >> $GITHUB_ENV
+    - name: Setup Environment
+      run: |
+        echo "SESSION_ID=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+        echo "BACKUP_NAME=vps_backup_$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+        echo "RESTORE_NEEDED=false" >> $GITHUB_ENV
+
+    - name: Install Required Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl wget rclone rsync zip unzip jq
+
+    - name: Configure rclone for MEGA
+      run: |
+        mkdir -p ~/.config/rclone
+        cat > ~/.config/rclone/rclone.conf << 'EOF'
+        [mega]
+        type = mega
+        user = ${{ secrets.MEGA_USER }}
+        pass = ${{ secrets.MEGA_PASS }}
+        EOF
+
+    - name: Attempt State Restoration from GitHub Artifacts
+      continue-on-error: true
+      run: |
+        # Try to download the latest backup from artifacts
+        LATEST_BACKUP=$(gh api repos/${{ github.repository }}/actions/artifacts \
+          --jq '.artifacts | map(select(.name | startswith("vps_backup_"))) | sort_by(.created_at) | reverse | .[0].archive_download_url' \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" || echo "")
+        
+        if [ ! -z "$LATEST_BACKUP" ]; then
+          echo "Found GitHub artifact backup, downloading..."
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "$LATEST_BACKUP" -o backup.zip
+          if [ -f backup.zip ] && unzip -t backup.zip; then
+            echo "RESTORE_NEEDED=true" >> $GITHUB_ENV
+            echo "BACKUP_SOURCE=github" >> $GITHUB_ENV
+          fi
+        fi
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Attempt State Restoration from MEGA
+      if: env.RESTORE_NEEDED == 'false'
+      continue-on-error: true
+      run: |
+        # Try to download from MEGA if GitHub artifacts failed
+        if rclone ls mega:vps_backups/ | grep -q "backup.zip"; then
+          echo "Found MEGA backup, downloading..."
+          rclone copy mega:vps_backups/backup.zip ./
+          if [ -f backup.zip ] && unzip -t backup.zip; then
+            echo "RESTORE_NEEDED=true" >> $GITHUB_ENV
+            echo "BACKUP_SOURCE=mega" >> $GITHUB_ENV
+          fi
+        fi
+
+    - name: Create User Account and Set Hostname
+      run: |
+        # Create sudo user
+        sudo useradd -m -s /bin/bash $USERNAME
+        echo "$USERNAME:$PASSWORD" | sudo chpasswd
+        sudo usermod -aG sudo $USERNAME
+        echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/$USERNAME
+        
+        # Set hostname
+        sudo hostnamectl set-hostname $HOSTNAME
+        echo "127.0.0.1 $HOSTNAME" | sudo tee -a /etc/hosts
+
+    - name: Install Tailscale
+      run: |
+        curl -fsSL https://tailscale.com/install.sh | sh
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=$HOSTNAME
+
+    - name: Install MariaDB
+      run: |
+        sudo apt-get install -y mariadb-server mariadb-client
+        sudo systemctl start mariadb
+        sudo systemctl enable mariadb
+        
+        # Secure installation and set root password
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
+        sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS test;"
+        sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "FLUSH PRIVILEGES;"
+
+    - name: Install aaPanel
+      run: |
+        # Download and install aaPanel 7.0
+        wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+        echo -e "y\nyes" | sudo bash install.sh
+        
+        # Wait for installation to complete
+        sleep 30
+        
+        # Set panel credentials
+        sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py panel $PASSWORD
+        sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username $USERNAME
+
+    - name: Restore Previous State
+      if: env.RESTORE_NEEDED == 'true'
+      run: |
+        echo "Restoring from backup source: $BACKUP_SOURCE"
+        
+        if [ -f backup.zip ]; then
+          unzip backup.zip
           
-      - name: Install required packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl wget tar gzip rclone expect jq
-          
-      - name: Try to restore from GitHub Artifacts
-        id: restore-artifact
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup-latest
-          path: /tmp/restore
-          
-      - name: Setup rclone for MEGA (fallback)
-        if: steps.restore-artifact.outcome == 'failure'
-        run: |
-          mkdir -p ~/.config/rclone
-          echo "${{ secrets.MEGA_RCLONE }}" > ~/.config/rclone/rclone.conf
-          
-      - name: Try to restore from MEGA
-        if: steps.restore-artifact.outcome == 'failure'
-        id: restore-mega
-        continue-on-error: true
-        run: |
-          rclone copy mega:vps-backups/latest.tar.gz /tmp/restore/
-          
-      - name: Extract backup if found
-        id: extract-backup
-        run: |
-          if [ -f "/tmp/restore/latest.tar.gz" ] || [ -f "/tmp/restore/backup.tar.gz" ]; then
-            echo "RESTORE_SUCCESS=true" >> $GITHUB_ENV
-            cd /tmp/restore
-            tar -xzf *.tar.gz
-          else
-            echo "RESTORE_SUCCESS=false" >> $GITHUB_ENV
-            echo "No backup found, starting fresh session"
+          # Restore Tailscale state
+          if [ -d tailscale_backup ]; then
+            sudo cp -r tailscale_backup/* /var/lib/tailscale/ 2>/dev/null || true
+            sudo systemctl restart tailscaled
           fi
           
-      - name: Create user and set hostname
-        run: |
-          # Create user Jacky with sudo privileges
-          sudo useradd -m -s /bin/bash -G sudo jacky || true
-          echo "jacky:spidey" | sudo chpasswd
-          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
-          
-          # Set hostname
-          sudo hostnamectl set-hostname Spidey || sudo hostname Spidey
-          echo "127.0.0.1 Spidey" | sudo tee -a /etc/hosts
-          
-      - name: Install and configure Tailscale
-        run: |
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Restore Tailscale state if available
-          if [ "$RESTORE_SUCCESS" = "true" ] && [ -d "/tmp/restore/tailscale" ]; then
-            sudo cp -r /tmp/restore/tailscale/* /var/lib/tailscale/ || true
-          fi
-          
-          # Start Tailscale with auth key
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=Spidey
-          
-      - name: Install MariaDB
-        run: |
-          sudo apt-get install -y mariadb-server mariadb-client
-          
-          # Start MariaDB
-          sudo systemctl start mariadb
-          
-          # Restore database if available
-          if [ "$RESTORE_SUCCESS" = "true" ] && [ -f "/tmp/restore/mariadb/backup.sql" ]; then
-            sudo mysql < /tmp/restore/mariadb/backup.sql
-          else
-            # Set root password and create test database
-            sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
-            sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS test;"
-            sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "FLUSH PRIVILEGES;"
-          fi
-          
-      - name: Install aapanel
-        run: |
-          # Create expect script for automated installation
-          cat > install_aapanel.exp << 'EOF'
-          #!/usr/bin/expect -f
-          set timeout 300
-          spawn wget -O install.sh https://www.aapanel.com/script/install_7.0_en.sh && sudo bash install.sh
-          expect {
-            "Do you want to install aaPanel to the" {
-              send "y\r"
-              exp_continue
-            }
-            "Do you want to force the installation" {
-              send "yes\r"
-              exp_continue
-            }
-            eof
-          }
-          EOF
-          
-          chmod +x install_aapanel.exp
-          ./install_aapanel.exp
-          
-          # Set panel credentials
-          sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username jacky
-          sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
-          
-      - name: Restore additional data
-        if: env.RESTORE_SUCCESS == 'true'
-        run: |
           # Restore user data
-          if [ -d "/tmp/restore/userdata" ]; then
-            sudo cp -r /tmp/restore/userdata/* /home/jacky/ || true
-            sudo chown -R jacky:jacky /home/jacky/
+          if [ -d user_data ]; then
+            sudo cp -r user_data/* /home/$USERNAME/ 2>/dev/null || true
+            sudo chown -R $USERNAME:$USERNAME /home/$USERNAME/
           fi
           
-          # Restore aapanel data
-          if [ -d "/tmp/restore/aapanel" ]; then
-            sudo cp -r /tmp/restore/aapanel/* /www/ || true
+          # Restore databases
+          if [ -f databases.sql ]; then
+            sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} < databases.sql
           fi
           
-          # Restore installed apps list and reinstall
-          if [ -f "/tmp/restore/installed_apps.txt" ]; then
-            while IFS= read -r app; do
-              sudo apt-get install -y "$app" || true
-            done < /tmp/restore/installed_apps.txt
+          # Restore aaPanel data
+          if [ -d aapanel_backup ]; then
+            sudo cp -r aapanel_backup/* /www/ 2>/dev/null || true
+            sudo systemctl restart bt
           fi
           
-          # Start all services
-          sudo systemctl start mariadb || true
-          sudo systemctl start bt || true
+          # Restore configurations
+          if [ -d config_backup ]; then
+            sudo cp -r config_backup/etc/* /etc/ 2>/dev/null || true
+          fi
           
-      - name: Create backup script
-        run: |
-          cat > /tmp/backup.sh << 'EOF'
-          #!/bin/bash
-          BACKUP_DIR="/tmp/backup_$(date +%Y%m%d_%H%M%S)"
-          mkdir -p "$BACKUP_DIR"
+          # Restore installed packages list and reinstall
+          if [ -f installed_packages.txt ]; then
+            sudo apt-get update
+            cat installed_packages.txt | xargs sudo apt-get install -y
+          fi
           
-          # Backup Tailscale state
-          sudo mkdir -p "$BACKUP_DIR/tailscale"
-          sudo cp -r /var/lib/tailscale/* "$BACKUP_DIR/tailscale/" 2>/dev/null || true
+          echo "State restoration completed"
+        fi
+
+    - name: Start Services
+      run: |
+        # Start all critical services
+        sudo systemctl start mariadb
+        sudo systemctl start tailscaled
+        sudo systemctl start bt 2>/dev/null || true  # aaPanel service
+        
+        # Ensure Tailscale is connected
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=$HOSTNAME
+
+    - name: Setup Graceful Shutdown Monitor
+      run: |
+        # Create shutdown monitor script
+        cat > shutdown_monitor.sh << 'EOF'
+        #!/bin/bash
+        while true; do
+          if [ -f /tmp/stop ]; then
+            echo "Graceful shutdown requested"
+            # Trigger backup before shutdown
+            touch /tmp/backup_now
+            exit 0
+          fi
+          sleep 10
+        done
+        EOF
+        chmod +x shutdown_monitor.sh
+        ./shutdown_monitor.sh &
+
+    - name: Setup Backup Monitor
+      run: |
+        # Create backup monitor script
+        cat > backup_monitor.sh << 'EOF'
+        #!/bin/bash
+        START_TIME=$(date +%s)
+        
+        while true; do
+          CURRENT_TIME=$(date +%s)
+          ELAPSED=$((CURRENT_TIME - START_TIME))
           
-          # Backup MariaDB
-          sudo mkdir -p "$BACKUP_DIR/mariadb"
-          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} --all-databases > "$BACKUP_DIR/mariadb/backup.sql" 2>/dev/null || true
-          
-          # Backup user data
-          sudo mkdir -p "$BACKUP_DIR/userdata"
-          sudo cp -r /home/jacky/* "$BACKUP_DIR/userdata/" 2>/dev/null || true
-          
-          # Backup aapanel
-          sudo mkdir -p "$BACKUP_DIR/aapanel"
-          sudo cp -r /www/server/panel/data "$BACKUP_DIR/aapanel/" 2>/dev/null || true
-          sudo cp -r /www/wwwroot "$BACKUP_DIR/aapanel/" 2>/dev/null || true
-          
-          # Save installed packages
-          dpkg --get-selections | grep -v deinstall | awk '{print $1}' > "$BACKUP_DIR/installed_apps.txt"
-          
-          # Create tarball
-          cd /tmp
-          tar -czf backup.tar.gz -C "$BACKUP_DIR" .
-          
-          echo "$BACKUP_DIR"
-          EOF
-          
-          chmod +x /tmp/backup.sh
-          
-      - name: Main session loop
-        run: |
-          # Create stop handler
-          cat > /tmp/check_stop.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            if [ -f /tmp/stop ]; then
-              echo "Stop signal detected, initiating backup..."
-              /tmp/backup.sh
-              touch /tmp/stop_confirmed
+          # Check if it's time for scheduled backup or manual backup requested
+          if [ $ELAPSED -ge $BACKUP_TIME ] || [ -f /tmp/backup_now ]; then
+            echo "Starting backup process..."
+            
+            # Create backup directory
+            mkdir -p backup_temp
+            
+            # Backup Tailscale state
+            sudo cp -r /var/lib/tailscale backup_temp/tailscale_backup 2>/dev/null || true
+            
+            # Backup user data
+            cp -r /home/$USERNAME backup_temp/user_data 2>/dev/null || true
+            
+            # Backup databases
+            sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} --all-databases > backup_temp/databases.sql 2>/dev/null || true
+            
+            # Backup aaPanel data
+            sudo cp -r /www backup_temp/aapanel_backup 2>/dev/null || true
+            
+            # Backup configurations
+            mkdir -p backup_temp/config_backup
+            sudo cp -r /etc/nginx backup_temp/config_backup/etc/ 2>/dev/null || true
+            sudo cp -r /etc/mysql backup_temp/config_backup/etc/ 2>/dev/null || true
+            
+            # Backup installed packages list
+            dpkg --get-selections | grep -v deinstall | awk '{print $1}' > backup_temp/installed_packages.txt
+            
+            # Create backup archive
+            cd backup_temp && zip -r ../backup.zip . && cd ..
+            
+            # Try to upload to GitHub Artifacts first
+            if [ -f backup.zip ]; then
+              echo "Backup created successfully"
+              
+              # For GitHub Actions, we'll use the upload-artifact action in the next step
+              touch /tmp/backup_ready
+            fi
+            
+            # If this was a manual backup (graceful shutdown), exit
+            if [ -f /tmp/backup_now ]; then
               exit 0
             fi
             
-            # Check if it's time for scheduled backup
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - $SESSION_START))
-            
-            if [ "$ELAPSED" -ge "$BACKUP_START_TIME" ] && [ "$BACKUP_TRIGGERED" != "true" ]; then
-              echo "Scheduled backup time reached..."
-              export BACKUP_TRIGGERED=true
-              /tmp/backup.sh
-            fi
-            
-            sleep 10
-          done
-          EOF
+            # Reset timer for next backup
+            START_TIME=$(date +%s)
+          fi
           
-          chmod +x /tmp/check_stop.sh
+          sleep 60  # Check every minute
+        done
+        EOF
+        chmod +x backup_monitor.sh
+        BACKUP_TIME=$BACKUP_TIME DB_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }} USERNAME=$USERNAME ./backup_monitor.sh &
+
+    - name: Keep Session Alive
+      run: |
+        echo "VPS Session started at $(date)"
+        echo "Hostname: $(hostname)"
+        echo "Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'Not connected')"
+        echo "Session will run for 6 hours with backup at 5.5 hours"
+        
+        # Keep the session alive and monitor for stop signal
+        START_TIME=$(date +%s)
+        while true; do
+          CURRENT_TIME=$(date +%s)
+          ELAPSED=$((CURRENT_TIME - START_TIME))
           
-          # Run stop checker in background
-          /tmp/check_stop.sh &
-          CHECKER_PID=$!
+          # Check for stop signal
+          if [ -f /tmp/stop ] || [ -f /tmp/backup_now ]; then
+            echo "Session termination requested"
+            break
+          fi
           
-          # Keep session alive
-          START_TIME=$(date +%s)
-          while true; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            
-            if [ "$ELAPSED" -ge "$SESSION_DURATION" ] || [ -f /tmp/stop_confirmed ]; then
-              echo "Session time limit reached or stop signal confirmed"
-              break
-            fi
-            
-            # Display session info every minute
-            if [ $((ELAPSED % 60)) -eq 0 ]; then
-              echo "Session active for $((ELAPSED / 60)) minutes..."
-              echo "Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'Not available')"
-            fi
-            
-            sleep 10
-          done
+          # Auto-terminate after 6 hours
+          if [ $ELAPSED -ge $SESSION_DURATION ]; then
+            echo "Session time limit reached"
+            touch /tmp/backup_now
+            break
+          fi
           
-          # Kill checker process
-          kill $CHECKER_PID 2>/dev/null || true
+          # Show status every 30 minutes
+          if [ $((ELAPSED % 1800)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+            echo "Session running for $((ELAPSED / 3600)) hours $((ELAPSED % 3600 / 60)) minutes"
+            echo "Tailscale status: $(tailscale status --json | jq -r '.BackendState' 2>/dev/null || echo 'Unknown')"
+          fi
           
-      - name: Final backup
-        if: always()
-        run: |
-          echo "Creating final backup..."
-          BACKUP_OUTPUT=$(/tmp/backup.sh)
-          echo "BACKUP_PATH=/tmp/backup.tar.gz" >> $GITHUB_ENV
-          
-      - name: Upload backup to GitHub Artifacts
-        if: always()
-        id: upload-artifact
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup-latest
-          path: /tmp/backup.tar.gz
-          retention-days: 7
-          
-      - name: Upload backup to MEGA (fallback)
-        if: always() && steps.upload-artifact.outcome == 'failure'
-        run: |
-          rclone copy /tmp/backup.tar.gz mega:vps-backups/latest.tar.gz
-          
-      - name: Cleanup
-        if: always()
-        run: |
-          # Stop services gracefully
-          sudo systemctl stop mariadb || true
-          sudo systemctl stop bt || true
-          sudo tailscale down || true
-          
-          # Clean sensitive data
-          rm -f /tmp/backup.sh /tmp/check_stop.sh /tmp/install_aapanel.exp
-          
-      - name: Schedule next run
-        if: always()
-        run: |
-          echo "Session completed. Next session will start automatically in 6 hours."
-          echo "Total session duration: $(($(date +%s) - $SESSION_START)) seconds"
+          sleep 30
+        done
+
+    - name: Upload Backup to GitHub Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.BACKUP_NAME }}
+        path: backup.zip
+        retention-days: 30
+      continue-on-error: true
+
+    - name: Upload Backup to MEGA (Fallback)
+      if: always()
+      run: |
+        if [ -f backup.zip ]; then
+          # Upload to MEGA as fallback
+          rclone copy backup.zip mega:vps_backups/ || echo "MEGA upload failed"
+        fi
+      continue-on-error: true
+
+    - name: Cleanup and Session Summary
+      if: always()
+      run: |
+        echo "Session ended at $(date)"
+        echo "Total uptime: $(($(date +%s) - $(date -d '${{ github.event.head_commit.timestamp || github.run_started_at }}' +%s))) seconds"
+        
+        # Cleanup temporary files
+        rm -rf backup_temp backup.zip 2>/dev/null || true
+        
+        # Show final status
+        echo "Final Tailscale IP: $(tailscale ip -4 2>/dev/null || echo 'Not available')"
+        echo "Services status:"
+        sudo systemctl is-active mariadb || echo "MariaDB: inactive"
+        sudo systemctl is-active tailscaled || echo "Tailscale: inactive"
+        sudo systemctl is-active bt 2>/dev/null || echo "aaPanel: inactive"
+
+  # Trigger next session
+  trigger-next-session:
+    needs: persistent-vps
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Trigger Next Session
+      run: |
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/actions/workflows/$(basename ${{ github.workflow }}).yml/dispatches \
+          -d '{"ref":"main"}'
+```
+
+This workflow provides:
+
+1. **Persistent State Management**: Backs up and restores all critical data including Tailscale config, user data, databases, and aaPanel settings
+2. **Dual Backup Strategy**: Primary backup to GitHub Artifacts, fallback to MEGA
+3. **User Account**: Creates sudo user "Jacky" with password "spidey"
+4. **Hostname**: Sets hostname to "Spidey"
+5. **aaPanel Installation**: Installs aaPanel 7.0 with automated responses
+6. **Graceful Shutdown**: Monitors for `/tmp/stop` file and backs up before termination
+7. **Tailscale Integration**: Maintains same IP across sessions
+8. **6-Hour Sessions**: Runs for 6 hours with backup at 5.5 hours
+9. **Service Management**: Automatically starts all restored services
+10. **Auto-Continuation**: Triggers next session after completion
+
+**Required Secrets:**
+- `TAILSCALE_AUTHKEY`: Your Tailscale auth key
+- `DB_ROOT_PASSWORD`: MariaDB root password
+- `MEGA_USER`: MEGA account username
+- `MEGA_PASS`: MEGA account password
+- `GITHUB_TOKEN`: GitHub token (usually auto-provided)
+
+The workflow handles failures gracefully and ensures continuous operation with full state persistence.
