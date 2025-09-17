@@ -1,181 +1,538 @@
+# Persistent VPS Session with Backup/Restore Logic
+# Required secrets:
+# - TAILSCALE_AUTHKEY: Tailscale authkey for VPN connection
+# - RCLONE_CONFIG: base64-encoded or raw rclone config text for MEGA remote
+# - DB_ROOT_PASSWORD: root password for MariaDB installation
 
-name: 🕷️ Spidey's VPS Adventure
+name: Persistent VPS Session
 
 on:
   workflow_dispatch:
   schedule:
+    # Run every 6 hours
     - cron: '0 */6 * * *'
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 400
+    timeout-minutes: 400  # 6+ hours with overhead
     
     steps:
-      - name: 🕸️ Spidey's Web Setup
-        run: |
-          echo "🕷️ Spidey is swinging into action!"
-          echo "🌐 Setting up the web of connections..."
-          
-      - name: 🐍 Python Power-Up
-        run: |
-          echo "🐍 Giving Spidey some Python powers!"
-          sudo apt-get update -qq
-          sudo apt-get install -y python3-pip python3-psutil
-          pip3 install psutil requests
-          
-      - name: 🏗️ Installing Essential Tools
-        run: |
-          echo "🛠️ Spidey's tool belt is getting loaded!"
-          sudo apt-get install -y curl wget unzip jq
-          
-      - name: 🗄️ MariaDB Setup (Spidey's Data Vault)
-        run: |
-          echo "🗄️ Setting up Spidey's secret data vault..."
-          sudo apt-get install -y mariadb-server mariadb-client
-          sudo systemctl start mariadb
-          sudo systemctl enable mariadb
-          echo "🔐 Securing the vault with Spidey's password..."
-          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
-          echo "✅ Data vault is secure!"
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: 🕸️ Tailscale Web Connection
-        run: |
-          echo "🕸️ Connecting to Spidey's web network..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --ssh
-          echo "🌐 Spidey is now connected to the web!"
-
-      - name: ☁️ RClone Setup (Spidey's Cloud Powers)
-        run: |
-          echo "☁️ Giving Spidey cloud-swinging abilities..."
-          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-current-linux-amd64.zip
-          sudo cp rclone-*/rclone /usr/local/bin/
-          sudo chmod +x /usr/local/bin/rclone
-          
-          echo "📝 Setting up Spidey's cloud config..."
-          mkdir -p ~/.config/rclone
+    - name: Prepare environment and install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        # Update package list
+        sudo apt-get update
+        
+        # Install required packages
+        sudo apt-get install -y curl jq tar gzip expect mariadb-server tmate
+        
+        # Install rclone
+        curl https://rclone.org/install.sh | sudo bash
+        
+        # Install Tailscale
+        curl -fsSL https://tailscale.com/install.sh | sh
+        
+        # Create rclone config directory
+        mkdir -p ~/.config/rclone
+        
+        # Decode and write rclone config from secret
+        if [[ "${{ secrets.RCLONE_CONFIG }}" =~ ^[A-Za-z0-9+/]*={0,2}$ ]]; then
+          # Looks like base64, decode it
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+        else
+          # Assume it's raw config text
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-          echo "☁️ Cloud powers activated!"
+        fi
+        
+        echo "Environment preparation completed"
 
-      - name: 🔄 Restore Spidey's Previous Work
-        run: |
-          echo "🔄 Checking if Spidey has previous work to restore..."
-          if rclone lsf mega:spidey-backup/ | grep -q "spidey-web-backup.tar.gz"; then
-            echo "📥 Found Spidey's previous work! Restoring..."
-            rclone copy mega:spidey-backup/spidey-web-backup.tar.gz ./
-            sudo tar -xzf spidey-web-backup.tar.gz -C /
-            echo "✅ Spidey's previous work restored!"
-          else
-            echo "🆕 No previous work found. This must be Spidey's first mission!"
+    - name: Attempt restore from GitHub artifact
+      id: artifact-restore
+      shell: bash
+      continue-on-error: true
+      run: |
+        set -euo pipefail
+        
+        echo "Attempting to restore from GitHub artifact..."
+        
+        # Try to download the most recent artifact
+        REPO_OWNER="${{ github.repository_owner }}"
+        REPO_NAME="${{ github.event.repository.name }}"
+        
+        # Get the latest workflow run with artifacts
+        LATEST_RUN=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?status=completed&per_page=10" | \
+          jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' | head -1)
+        
+        if [ -n "$LATEST_RUN" ]; then
+          # Get artifacts from the latest run
+          ARTIFACT_URL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${LATEST_RUN}/artifacts" | \
+            jq -r '.artifacts[] | select(.name | startswith("vps-backup")) | .archive_download_url' | head -1)
+          
+          if [ "$ARTIFACT_URL" != "null" ] && [ -n "$ARTIFACT_URL" ]; then
+            echo "Found artifact, downloading..."
+            curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "$ARTIFACT_URL" -o artifact.zip
+            unzip artifact.zip
+            
+            if [ -f vps-backup*.tar.gz ]; then
+              echo "Extracting backup..."
+              sudo mkdir -p /tmp/restore
+              sudo tar -xzf vps-backup*.tar.gz -C /tmp/restore
+              
+              # Run restore process
+              sudo bash -c "$(cat << 'EOF'
+        set -euo pipefail
+        
+        echo "Starting restore from artifact..."
+        
+        # Restore Tailscale state if present
+        if [ -d "/tmp/restore/tailscale-state" ]; then
+          echo "Restoring Tailscale state..."
+          sudo mkdir -p /var/lib/tailscale
+          sudo cp -r /tmp/restore/tailscale-state/* /var/lib/tailscale/ 2>/dev/null || true
+          sudo chown -R root:root /var/lib/tailscale
+        fi
+        
+        # Restore home directories
+        if [ -d "/tmp/restore/home" ]; then
+          echo "Restoring home directories..."
+          sudo cp -r /tmp/restore/home/* /home/ 2>/dev/null || true
+        fi
+        
+        # Restore root directory
+        if [ -d "/tmp/restore/root" ]; then
+          echo "Restoring root directory..."
+          sudo cp -r /tmp/restore/root/. /root/ 2>/dev/null || true
+        fi
+        
+        # Restore selected etc configs
+        if [ -d "/tmp/restore/etc" ]; then
+          echo "Restoring etc configs..."
+          sudo cp -r /tmp/restore/etc/* /etc/ 2>/dev/null || true
+        fi
+        
+        # Restore web content
+        if [ -d "/tmp/restore/var-www" ]; then
+          echo "Restoring web content..."
+          sudo mkdir -p /var/www
+          sudo cp -r /tmp/restore/var-www/* /var/www/ 2>/dev/null || true
+          sudo chown -R www-data:www-data /var/www 2>/dev/null || true
+        fi
+        
+        # Restore opt directory
+        if [ -d "/tmp/restore/opt" ]; then
+          echo "Restoring opt directory..."
+          sudo cp -r /tmp/restore/opt/* /opt/ 2>/dev/null || true
+        fi
+        
+        # Restore aaPanel data
+        if [ -d "/tmp/restore/aapanel-data" ]; then
+          echo "Restoring aaPanel data..."
+          sudo mkdir -p /www
+          sudo cp -r /tmp/restore/aapanel-data/* /www/ 2>/dev/null || true
+        fi
+        
+        # Restore MariaDB data
+        if [ -d "/tmp/restore/mysql" ]; then
+          echo "Restoring MariaDB data..."
+          sudo systemctl stop mariadb 2>/dev/null || true
+          sudo mkdir -p /var/lib/mysql
+          sudo cp -r /tmp/restore/mysql/* /var/lib/mysql/ 2>/dev/null || true
+          sudo chown -R mysql:mysql /var/lib/mysql
+          sudo systemctl start mariadb 2>/dev/null || true
+        fi
+        
+        echo "Restore from artifact completed"
+        EOF
+        )"
+              
+              echo "RESTORE_SUCCESS=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
+        fi
+        
+        echo "No suitable artifact found"
+        echo "RESTORE_SUCCESS=false" >> $GITHUB_OUTPUT
+        exit 1
 
-      - name: 🎛️ Installing aaPanel (Spidey's Control Center)
-        run: |
-          echo "🎛️ Installing Spidey's web control center!"
-          echo "🕷️ Downloading the latest aaPanel installer..."
+    - name: Attempt restore from MEGA
+      id: mega-restore
+      if: steps.artifact-restore.outputs.RESTORE_SUCCESS != 'true'
+      shell: bash
+      continue-on-error: true
+      run: |
+        set -euo pipefail
+        
+        echo "Attempting to restore from MEGA..."
+        
+        # List files in MEGA backup directory
+        LATEST_BACKUP=$(rclone lsf mega:vps-backups/ --include "vps-backup-*.tar.gz" 2>/dev/null | sort -r | head -1 || echo "")
+        
+        if [ -n "$LATEST_BACKUP" ]; then
+          echo "Found backup: $LATEST_BACKUP"
+          rclone copy "mega:vps-backups/$LATEST_BACKUP" . 
           
-          # Use expect to handle prompts automatically
-          sudo apt-get install -y expect
+          if [ -f "$LATEST_BACKUP" ]; then
+            echo "Extracting backup..."
+            sudo mkdir -p /tmp/restore
+            sudo tar -xzf "$LATEST_BACKUP" -C /tmp/restore
+            
+            # Run same restore process as artifact restore
+            sudo bash -c "$(cat << 'EOF'
+        set -euo pipefail
+        
+        echo "Starting restore from MEGA..."
+        
+        # Restore Tailscale state if present
+        if [ -d "/tmp/restore/tailscale-state" ]; then
+          echo "Restoring Tailscale state..."
+          sudo mkdir -p /var/lib/tailscale
+          sudo cp -r /tmp/restore/tailscale-state/* /var/lib/tailscale/ 2>/dev/null || true
+          sudo chown -R root:root /var/lib/tailscale
+        fi
+        
+        # Restore home directories
+        if [ -d "/tmp/restore/home" ]; then
+          echo "Restoring home directories..."
+          sudo cp -r /tmp/restore/home/* /home/ 2>/dev/null || true
+        fi
+        
+        # Restore root directory
+        if [ -d "/tmp/restore/root" ]; then
+          echo "Restoring root directory..."
+          sudo cp -r /tmp/restore/root/. /root/ 2>/dev/null || true
+        fi
+        
+        # Restore selected etc configs
+        if [ -d "/tmp/restore/etc" ]; then
+          echo "Restoring etc configs..."
+          sudo cp -r /tmp/restore/etc/* /etc/ 2>/dev/null || true
+        fi
+        
+        # Restore web content
+        if [ -d "/tmp/restore/var-www" ]; then
+          echo "Restoring web content..."
+          sudo mkdir -p /var/www
+          sudo cp -r /tmp/restore/var-www/* /var/www/ 2>/dev/null || true
+          sudo chown -R www-data:www-data /var/www 2>/dev/null || true
+        fi
+        
+        # Restore opt directory
+        if [ -d "/tmp/restore/opt" ]; then
+          echo "Restoring opt directory..."
+          sudo cp -r /tmp/restore/opt/* /opt/ 2>/dev/null || true
+        fi
+        
+        # Restore aaPanel data
+        if [ -d "/tmp/restore/aapanel-data" ]; then
+          echo "Restoring aaPanel data..."
+          sudo mkdir -p /www
+          sudo cp -r /tmp/restore/aapanel-data/* /www/ 2>/dev/null || true
+        fi
+        
+        # Restore MariaDB data
+        if [ -d "/tmp/restore/mysql" ]; then
+          echo "Restoring MariaDB data..."
+          sudo systemctl stop mariadb 2>/dev/null || true
+          sudo mkdir -p /var/lib/mysql
+          sudo cp -r /tmp/restore/mysql/* /var/lib/mysql/ 2>/dev/null || true
+          sudo chown -R mysql:mysql /var/lib/mysql
+          sudo systemctl start mariadb 2>/dev/null || true
+        fi
+        
+        echo "Restore from MEGA completed"
+        EOF
+        )"
+            
+            echo "RESTORE_SUCCESS=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+        
+        echo "No suitable backup found in MEGA"
+        echo "RESTORE_SUCCESS=false" >> $GITHUB_OUTPUT
+        exit 1
+
+    - name: Fresh provision if no restore succeeded
+      if: steps.artifact-restore.outputs.RESTORE_SUCCESS != 'true' && steps.mega-restore.outputs.RESTORE_SUCCESS != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        echo "No backup found, performing fresh provision..."
+        
+        # Set hostname
+        sudo hostnamectl set-hostname Spidey
+        
+        # Create user jacky with password spidey
+        sudo useradd -m -s /bin/bash jacky 2>/dev/null || echo "User jacky already exists"
+        echo "jacky:spidey" | sudo chpasswd
+        sudo usermod -aG sudo jacky
+        
+        # Install aaPanel with automation
+        echo "Installing aaPanel..."
+        sudo bash -c "$(cat << 'EOF'
+        set -euo pipefail
+        
+        # Download and run aaPanel installer with expect automation
+        wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+        
+        # Create expect script for automation
+        cat > aapanel_install.exp << 'EXPECT_EOF'
+        #!/usr/bin/expect -f
+        set timeout 300
+
+        spawn bash install.sh
+
+        expect {
+        "*Do you want to install aaPanel to the /www directory now*" {
+        send "y\r"
+        exp_continue
+        }
+        "*Please Input 1-2*" {
+        send "y\r"
+        exp_continue
+        }
+        "*Force install*" {
+        send "yes\r"
+        exp_continue
+        }
+        eof
+        }. 
+        EXPECT_EOF
+        
+        chmod +x aapanel_install.exp
+        ./aapanel_install.exp
+        
+        # Wait for installation to complete
+        sleep 30
+        
+        # Configure aaPanel username and password using CLI
+        /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Jacky
+        /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
+        EOF
+        )"
+        
+        # Configure MariaDB
+        echo "Configuring MariaDB..."
+        sudo systemctl start mariadb
+        sudo systemctl enable mariadb
+        
+        # Set MariaDB root password and create test database
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
+        sudo mysql -u root -p"${{ secrets.DB_ROOT_PASSWORD }}" -e "CREATE DATABASE IF NOT EXISTS test;"
+        
+        # Install and configure Tailscale
+        echo "Configuring Tailscale..."
+        sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}"
+        
+        echo "Fresh provision completed"
+
+    - name: Start tmate session for debugging (optional)
+      shell: bash
+      run: |
+        # Start tmate session in background for debugging access
+        tmate -S /tmp/tmate.sock new-session -d
+        sleep 5
+        tmate -S /tmp/tmate.sock wait tmate-ready
+        echo "Tmate session started:"
+        tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
+        echo "Web session:"
+        tmate -S /tmp/tmate.sock display -p '#{tmate_web}'
+
+    - name: Start/restart all services
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        echo "Starting/restarting services..."
+        
+        # Reload systemd daemon
+        sudo systemctl daemon-reload
+        
+        # Start MariaDB
+        sudo systemctl start mariadb || echo "MariaDB start failed"
+        sudo systemctl status mariadb --no-pager || true
+        
+        # Start aaPanel if installed
+        sudo systemctl start bt || echo "aaPanel service not found"
+        
+        # Start Tailscale
+        sudo systemctl start tailscaled
+        sudo tailscale status || echo "Tailscale status check failed"
+        
+        # Start other common services
+        sudo systemctl start nginx 2>/dev/null || echo "Nginx not installed"
+        sudo systemctl start apache2 2>/dev/null || echo "Apache not installed"
+        sudo systemctl start docker 2>/dev/null || echo "Docker not installed"
+        
+        echo "Service startup completed"
+
+    - name: Main runtime loop with periodic backup and shutdown detection
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        echo "Starting main runtime loop..."
+        
+        # Function to create backup
+        create_backup() {
+          echo "Creating backup..."
           
-          # Create expect script for aaPanel installation
-          cat > install_aapanel.exp << 'EOF'
-          #!/usr/bin/expect
-          set timeout 300
-          spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install_7.0_en.sh && bash install.sh aapanel"
+          TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+          BACKUP_NAME="vps-backup-${TIMESTAMP}.tar.gz"
+          BACKUP_DIR="/tmp/backup-staging"
           
-          # Handle first prompt (usually asking to confirm installation)
-          expect {
-            "*y/n*" { send "y\r"; exp_continue }
-            "*Y/N*" { send "Y\r"; exp_continue }
-            "*yes/no*" { send "yes\r"; exp_continue }
-            "*continue*" { send "y\r"; exp_continue }
-            eof
-          }
+          sudo mkdir -p "$BACKUP_DIR"
+          
+          # Create backup manifest
+          cat > "$BACKUP_DIR/backup-manifest.txt" << EOF
+          Backup created: $(date)
+          Contents:
+          - /home (user directories)
+          - /root (root directory)
+          - /etc/passwd, /etc/group, /etc/shadow (user configs)
+          - /var/www (web content)
+          - /opt (optional software)
+          - /www (aaPanel data)
+          - /var/lib/tailscale (Tailscale state)
+          - /var/lib/mysql (MariaDB data)
           EOF
           
-          chmod +x install_aapanel.exp
-          echo "🚀 Starting automated aaPanel installation..."
-          sudo ./install_aapanel.exp
+          # Backup important directories
+          echo "Backing up directories..."
           
-          echo "✅ aaPanel installed! Spidey's control center is ready!"
-
-      - name: 🏁 Starting All Spidey Services
-        run: |
-          echo "🏁 Starting all of Spidey's services..."
-          sudo systemctl start mariadb
-          sudo systemctl start bt-panel || echo "aaPanel will start automatically"
-          echo "🕷️ All services are web-slinging!"
-
-      - name: 🕷️ Spidey's Patrol Loop (6 hours of web-slinging)
-        run: |
-          echo "🕷️ Spidey is starting his 6-hour patrol!"
-          echo "🌃 Watching over the city..."
+          # Home directories
+          sudo cp -r /home "$BACKUP_DIR/" 2>/dev/null || mkdir -p "$BACKUP_DIR/home"
           
-          patrol_start=$(date +%s)
-          patrol_duration=$((6 * 3600 - 1800))  # 6 hours minus 30 min for backup
+          # Root directory (selective)
+          sudo mkdir -p "$BACKUP_DIR/root"
+          sudo cp -r /root/. "$BACKUP_DIR/root/" 2>/dev/null || true
           
-          while true; do
-            current_time=$(date +%s)
-            elapsed=$((current_time - patrol_start))
+          # Selected etc configs
+          sudo mkdir -p "$BACKUP_DIR/etc"
+          sudo cp /etc/passwd /etc/group /etc/shadow "$BACKUP_DIR/etc/" 2>/dev/null || true
+          
+          # Web content
+          if [ -d /var/www ]; then
+            sudo cp -r /var/www "$BACKUP_DIR/var-www" 2>/dev/null || true
+          fi
+          
+          # Opt directory
+          if [ -d /opt ]; then
+            sudo cp -r /opt "$BACKUP_DIR/" 2>/dev/null || true
+          fi
+          
+          # aaPanel data
+          if [ -d /www ]; then
+            sudo cp -r /www "$BACKUP_DIR/aapanel-data" 2>/dev/null || true
+          fi
+          
+          # Tailscale state
+          if [ -d /var/lib/tailscale ]; then
+            sudo cp -r /var/lib/tailscale "$BACKUP_DIR/tailscale-state" 2>/dev/null || true
+          fi
+          
+          # MariaDB data
+          if [ -d /var/lib/mysql ]; then
+            sudo systemctl stop mariadb 2>/dev/null || true
+            sudo cp -r /var/lib/mysql "$BACKUP_DIR/" 2>/dev/null || true
+            sudo systemctl start mariadb 2>/dev/null || true
+          fi
+          
+          # Create tar.gz archive
+          echo "Creating archive..."
+          cd /tmp/backup-staging
+          sudo tar -czf "../$BACKUP_NAME" .
+          sudo chown runner:runner "/tmp/$BACKUP_NAME"
+          
+          echo "Backup created: $BACKUP_NAME"
+          echo "$BACKUP_NAME"
+        }
+        
+        # Runtime variables
+        LAST_BACKUP_TIME=$(date +%s)
+        BACKUP_INTERVAL=$((30 * 60))  # 30 minutes
+        
+        # Main loop - run for approximately 6 hours
+        START_TIME=$(date +%s)
+        RUNTIME_DURATION=$((6 * 60 * 60))  # 6 hours
+        
+        while true; do
+          CURRENT_TIME=$(date +%s)
+          ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+          
+          # Check if runtime duration exceeded
+          if [ $ELAPSED_TIME -ge $RUNTIME_DURATION ]; then
+            echo "Runtime duration reached, performing final backup..."
+            BACKUP_FILE=$(create_backup)
+            break
+          fi
+          
+          # Check for graceful shutdown signal
+          if [ -f /tmp/stop ]; then
+            echo "Shutdown signal detected, performing final backup..."
+            BACKUP_FILE=$(create_backup)
+            break
+          fi
+          
+          # Check if it's time for a periodic backup
+          TIME_SINCE_BACKUP=$((CURRENT_TIME - LAST_BACKUP_TIME))
+          if [ $TIME_SINCE_BACKUP -ge $BACKUP_INTERVAL ]; then
+            echo "Performing periodic backup..."
+            BACKUP_FILE=$(create_backup)
+            LAST_BACKUP_TIME=$CURRENT_TIME
             
-            if [ $elapsed -ge $patrol_duration ]; then
-              echo "⏰ Patrol time is up! Time for backup..."
-              break
+            # Upload backup immediately after creation
+            if [ -n "${BACKUP_FILE:-}" ]; then
+              echo "Uploading backup to MEGA..."
+              rclone copy "/tmp/$BACKUP_FILE" mega:vps-backups/ || echo "MEGA upload failed"
+              
+              # Attempt to create public link
+              rclone link "mega:vps-backups/$BACKUP_FILE" 2>/dev/null > mega-backup-link.txt || \
+                echo "Direct link unavailable" > mega-backup-link.txt
             fi
-            
-            remaining=$((patrol_duration - elapsed))
-            hours=$((remaining / 3600))
-            minutes=$(((remaining % 3600) / 60))
-            
-            echo "🕸️ Spidey is on patrol... ${hours}h ${minutes}m remaining"
-            sleep 300  # Check every 5 minutes
-          done
-
-      - name: 🎒 Creating Backup of Spidey's Web
-        run: |
-          echo "🎒 Spidey is packing up his work for safekeeping..."
+          fi
           
-          # Create comprehensive backup
-          sudo tar -czf spidey-web-backup.tar.gz \
-            --exclude='/proc' \
-            --exclude='/tmp' \
-            --exclude='/sys' \
-            --exclude='/dev' \
-            --exclude='/run' \
-            --exclude='/mnt' \
-            --exclude='/media' \
-            /var/lib/mysql \
-            /www \
-            /root \
-            /home \
-            /etc/systemd/system/multi-user.target.wants/mariadb.service \
-            /usr/local/btpanel 2>/dev/null || true
-            
-          echo "📦 Backup created! Size: $(du -h spidey-web-backup.tar.gz | cut -f1)"
+          # Sleep for 1 minute before next check
+          sleep 60
+        done
+        
+        echo "Main loop completed"
 
-      - name: ⬆️ Uploading to GitHub Artifacts (Primary backup)
-        uses: actions/upload-artifact@v4
-        with:
-          name: spidey-backup-${{ github.run_number }}
-          path: spidey-web-backup.tar.gz
-          retention-days: 30
+    - name: Upload final backup as artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: vps-backup.tar.gz
+        path: /tmp/vps-backup-*.tar.gz
+        retention-days: 30
 
-      - name: ☁️ Uploading to MEGA (Secondary backup)
-        run: |
-          echo "☁️ Spidey is storing backup in the cloud..."
-          rclone copy spidey-web-backup.tar.gz mega:spidey-backup/
-          echo "✅ Cloud backup complete!"
+    - name: Upload backup link info
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: mega-backup-info
+        path: |
+          mega-backup-link.txt
+          /tmp/backup-staging/backup-manifest.txt
+        retention-days: 30
 
-      - name: 🎯 Spidey's Mission Complete!
-        run: |
-          echo "🎯 Another successful mission for Spidey!"
-          echo "🕷️ The web is safe for another day!"
-          echo "📊 Mission Stats:"
-          echo "   💾 Backup created: ✅"
-          echo "   ☁️ Cloud storage: ✅"
-          echo "   🌐 Network secure: ✅"
-          echo "   🗄️ Database running: ✅"
-          echo ""
-          echo "🕸️ Until next time, true believers!"
+    - name: Final service status check
+      if: always()
+      shell: bash
+      run: |
+        echo "=== Final service status ==="
+        sudo systemctl status mariadb --no-pager || echo "MariaDB not running"
+        sudo systemctl status bt --no-pager || echo "aaPanel not running"  
+        sudo tailscale status || echo "Tailscale not connected"
+        echo "=== End status check ==="
