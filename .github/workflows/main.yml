@@ -278,23 +278,37 @@ jobs:
         echo "jacky:spidey" | sudo chpasswd
         sudo usermod -aG sudo jacky
         
-        # Install aaPanel with automation
-        echo "Installing aaPanel..."
-        sudo bash -c "$(cat << 'EOF'
-        set -euo pipefail
-        
-        # Download and run aaPanel installer with expect automation
-        wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-        
-        # Create expect script for automation
-        cat > aapanel_install.exp << 'EXPECT_EOF'
-        #!/usr/bin/expect -f
-        set timeout 300
 
-        spawn bash install.sh
 
-        expect {
-        "*Do you want to install aaPanel to the /www directory now*" {
+        echo "Installing latest aaPanel version 7.0..."
+
+        # Install expect if not already installed
+        if ! command -v expect &> /dev/null; then
+        echo "Installing expect package..."
+        sudo apt-get update
+        sudo apt-get install -y expect
+        fi
+
+        # Download and install latest aaPanel 7.0
+         echo "Downloading and installing aaPanel 7.0..."
+         URL="https://www.aapanel.com/script/install_7.0_en.sh"
+
+          if [ -f /usr/bin/curl ]; then
+          curl -ksSO "$URL"
+          else
+          wget --no-check-certificate -O install_7.0_en.sh "$URL"
+          fi
+
+          # Create expect script for automation
+          cat > aapanel_install.exp << 'EXPECT_EOF'
+          #!/usr/bin/expect -f
+
+            set timeout 600
+
+            spawn bash install_7.0_en.sh aapanel
+
+            expect {
+            "*Do you want to install aaPanel to the /www directory now*" {
         send "y\r"
         exp_continue
         }
@@ -305,22 +319,95 @@ jobs:
         "*Force install*" {
         send "yes\r"
         exp_continue
-        }
-        eof
-        }. 
-        EXPECT_EOF
-        
-        chmod +x aapanel_install.exp
-        ./aapanel_install.exp
-        
-        # Wait for installation to complete
-        sleep 30
-        
-        # Configure aaPanel username and password using CLI
-        /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Jacky
-        /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
-        EOF
-        )"
+    }
+    "*Press any key to start*" {
+        send "\r"
+        exp_continue
+    }
+    eof
+}
+EXPECT_EOF
+
+chmod +x aapanel_install.exp
+./aapanel_install.exp
+
+# Wait for installation to complete
+echo "Waiting for installation to complete..."
+sleep 60
+
+# Check if bt command exists and set username/password
+if [ -f "/usr/bin/bt" ]; then
+    echo "Setting aaPanel username and password using bt command..."
+    
+    # Wait a bit more for panel to fully initialize
+    sleep 30
+    
+    # Set username (bt 5)
+    echo "Setting username..."
+    expect << EOF
+set timeout 30
+spawn sudo bt 5
+expect "*Please enter a new panel username*"
+send "Jacky\r"
+expect eof
+EOF
+    
+    # Set password (bt 6)
+    echo "Setting password..."
+    expect << EOF
+set timeout 30
+spawn sudo bt 6
+expect "*Please enter a new panel password*"
+send "spidey\r"
+expect eof
+EOF
+    
+    echo "================================================"
+    echo "aaPanel 7.0 installation and configuration completed successfully!"
+    echo ""
+    echo "Panel URL: https://YOUR_SERVER_IP:7800"
+    echo "Username: Jacky"
+    echo "Password: spidey"
+    echo ""
+    echo "Security reminder:"
+    echo "1. Change the default port (7800) if needed"
+    echo "2. Configure firewall rules"
+    echo "3. Consider changing SSH port"
+    echo "================================================"
+    
+else
+    echo "Error: bt command not found. Installation may have failed."
+    echo "Checking installation status..."
+    
+    # Check if panel files exist
+    if [ -d "/www/server/panel" ]; then
+        echo "Panel files found but bt command missing. Trying alternative approach..."
+        # Try using python tools as fallback
+        if [ -f "/www/server/panel/pyenv/bin/python" ]; then
+            /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Jacky
+            /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
+            echo "Credentials set using fallback method."
+        else
+            echo "Installation appears to have failed. Please check logs."
+            exit 1
+        fi
+    else
+        echo "Installation failed completely. Please check the installation logs."
+        exit 1
+    fi
+fi
+
+# Cleanup
+echo "Cleaning up temporary files..."
+rm -f install.sh install_7.0_en.sh aapanel_install.exp
+
+# Display final panel information
+if [ -f "/usr/bin/bt" ]; then
+    echo ""
+    echo "Final panel information:"
+    sudo bt 11  # Show panel info
+    sudo bt 12  # Show panel login URL
+fi
         
         # Configure MariaDB
         echo "Configuring MariaDB..."
