@@ -43,7 +43,7 @@ jobs:
         }
         echo "🌐 MEGA connection established!"
         
-    - name: 🔍 Spider-Sense: Searching for Previous Backup Artifacts
+    - name: 🔍 Spider-Sense:Searching for Previous Backup Artifacts
       id: artifact_search
       continue-on-error: true
       run: |
