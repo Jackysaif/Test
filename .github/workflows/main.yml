@@ -153,15 +153,15 @@ jobs:
         echo "Installing aaPanel..."
         INSTALL_SCRIPT="/tmp/install-aapanel.sh"
         cat > $INSTALL_SCRIPT << 'EOF'
-#!/usr/bin/expect -f
-set timeout -1
-spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh && sudo bash install.sh"
-expect "Enter y to install panel.*"
-send "y\r"
-expect "force install.*"
-send "yes\r"
-expect eof
-EOF
+        #!/usr/bin/expect -f
+        set timeout -1
+        spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh && sudo bash install.sh"
+        expect "Enter y to install panel.*"
+        send "y\r"
+        expect "force install.*"
+        send "yes\r"
+        expect eof
+        EOF
         
         chmod +x $INSTALL_SCRIPT
         sudo expect $INSTALL_SCRIPT
@@ -229,51 +229,51 @@ EOF
           
           # Create backup manifest
           cat > "$MANIFEST_FILE" << EOF
-Backup created: $(date)
-Included directories:
-- /home
-- /root 
-- /etc
-- /var/www
-- /opt
-- /var/lib/tailscale
-- /var/lib/mysql
-- aaPanel data directories
-EOF
+         Backup created: $(date)
+         Included directories:
+        - /home
+        - /root 
+        - /etc
+        - /var/www
+        - /opt
+        - /var/lib/tailscale
+        - /var/lib/mysql
+        - aaPanel data directories
+        EOF
           
           # Create restore script
           cat > "$BACKUP_DIR/restore.sh" << 'EOF'
-#!/bin/bash
-set -euo pipefail
+          #!/bin/bash
+          set -euo pipefail
 
-echo "Starting restore process..."
-BACKUP_DIR=$(dirname "$0")
+          echo "Starting restore process..."
+          BACKUP_DIR=$(dirname "$0")
 
-# Stop services for safe restore
-sudo systemctl stop mariadb || true
-if [ -f "/etc/init.d/bt" ]; then
-  sudo /etc/init.d/bt stop || true
-fi
+        # Stop services for safe restore
+         sudo systemctl stop mariadb || true
+         if [ -f "/etc/init.d/bt" ]; then
+         sudo /etc/init.d/bt stop || true
+         fi
 
-# Restore directories with proper permissions
-sudo tar -xzf "$BACKUP_DIR/backup-data.tar.gz" -C /
+        # Restore directories with proper permissions
+         sudo tar -xzf "$BACKUP_DIR/backup-data.tar.gz" -C /
 
-# Restore Tailscale state if available
-if [ -d "/var/lib/tailscale" ]; then
-  sudo chown -R tailscale:tailscale /var/lib/tailscale
-fi
+        # Restore Tailscale state if available
+          if [ -d "/var/lib/tailscale" ]; then
+          sudo chown -R tailscale:tailscale /var/lib/tailscale
+          fi
 
-# Restore MariaDB data with correct permissions
-if [ -d "/var/lib/mysql" ]; then
-  sudo chown -R mysql:mysql /var/lib/mysql
-fi
+         # Restore MariaDB data with correct permissions
+         if [ -d "/var/lib/mysql" ]; then
+         sudo chown -R mysql:mysql /var/lib/mysql
+         fi
 
-# Restore home directories
-sudo chown -R root:root /root
-find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
+         # Restore home directories
+         sudo chown -R root:root /root
+         find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
 
-echo "Restore completed"
-EOF
+         echo "Restore completed"
+          EOF
           
           chmod +x "$BACKUP_DIR/restore.sh"
           
