@@ -274,40 +274,57 @@ jobs:
         # Install aaPanel
         echo "🎛️ Installing aaPanel - Shin-chan's control center!"
         cd /tmp
+        
+        # Download the latest aaPanel installer
         wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh
+        chmod +x install.sh
         
-          # Create expect script for automated installation
-          cat > install_aapanel.exp << 'EOF'
-          #!/usr/bin/expect -f
-          set timeout 300
-        spawn bash install.sh
-         expect {
-         "*to install panel*" {
-        send "y\r"
-        exp_continue
-        }
-        "*force install*" {
-        send "yes\r"
-        exp_continue
-        }
-        eof
-        }
-        EOF
+        # Use a different approach - pipe responses to the installer
+        echo "🤖 Running automated aaPanel installation..."
+        (
+          echo "y"      # Install panel
+          echo "yes"    # Force install if needed  
+          sleep 2
+        ) | sudo bash install.sh
         
-        chmod +x install_aapanel.exp
-        sudo ./install_aapanel.exp
+        # Wait a moment for installation to complete
+        echo "⏳ Waiting for aaPanel installation to complete..."
+        sleep 30
         
         # Configure aaPanel credentials
         echo "🔧 Configuring aaPanel credentials..."
-        sleep 10  # Wait for aaPanel to fully initialize
+        sleep 15  # Wait for aaPanel to fully initialize
         
-        # Set username
-        sudo bt 5 Jacky 2>/dev/null || sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Jacky
-        
-        # Set password  
-        sudo bt 6 spidey 2>/dev/null || sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
-        
-        echo "✅ aaPanel configured with username: Jacky, password: spidey"
+        # Check if aaPanel is installed and try different methods
+        if [ -f /www/server/panel/BT-Panel ]; then
+          echo "✅ aaPanel installation detected!"
+          
+          # Try bt command first
+          if command -v bt &> /dev/null; then
+            echo "🔧 Using bt command to set credentials..."
+            sudo bt 5 Jacky 2>/dev/null || echo "⚠️ bt username command failed"
+            sudo bt 6 spidey 2>/dev/null || echo "⚠️ bt password command failed"
+          fi
+          
+          # Try direct Python method as fallback
+          if [ -f /www/server/panel/tools.py ]; then
+            echo "🐍 Using Python tools to set credentials..."
+            cd /www/server/panel
+            sudo python3 tools.py username Jacky 2>/dev/null || echo "⚠️ Python username command failed" 
+            sudo python3 tools.py password spidey 2>/dev/null || echo "⚠️ Python password command failed"
+          fi
+          
+          # Try alternative method with pyenv
+          if [ -f /www/server/panel/pyenv/bin/python ]; then
+            echo "🔬 Using pyenv Python to set credentials..."
+            sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Jacky 2>/dev/null || true
+            sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey 2>/dev/null || true
+          fi
+          
+          echo "✅ aaPanel credential setup completed (username: Jacky, password: spidey)"
+        else
+          echo "⚠️ aaPanel installation not detected, skipping credential setup"
+        fi
         
         # Start Tailscale
         echo "🔗 Starting Tailscale VPN..."
@@ -462,11 +479,11 @@ jobs:
         # Create manifest
         cat > "$BACKUP_DIR/backup-manifest.txt" << EOF
         🕷️ Spidey VPS Backup - Shin-chan Edition
-         Created: $(date)
-         Session ID: ${{ github.run_id }}
-         Hostname: $(hostname)
+        Created: $(date)
+        Session ID: ${{ github.run_id }}
+        Hostname: $(hostname)
 
-         Backup Contents:
+        Backup Contents:
         - /home (user directories)
         - /root (root home)  
         - /var/lib/tailscale (VPN state)
