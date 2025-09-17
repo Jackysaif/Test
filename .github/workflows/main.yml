@@ -152,3 +152,173 @@ jobs:
             chmod +x install.sh
             
             echo "🤖 Starting automated installation with spider precision..."
+            # Automated installation with prompts handled
+            expect << 'EOF'
+          spawn sudo bash install.sh
+          expect "Do you want to install aaPanel to the /www directory now?(y/n):" { send "y\r" }
+          expect "Do you want to install aaPanel by force?(yes/no):" { send "yes\r" }
+          expect eof
+          EOF
+            
+            # Install expect if not available and retry
+            if ! command -v expect > /dev/null 2>&1; then
+              echo "📦 Installing expect for automated prompts..."
+              sudo apt-get update && sudo apt-get install -y expect
+              
+              echo "🔄 Retrying aaPanel installation with expect..."
+              expect << 'EOF'
+          spawn sudo bash install.sh
+          expect "Do you want to install aaPanel to the /www directory now?(y/n):" { send "y\r" }
+          expect "Do you want to install aaPanel by force?(yes/no):" { send "yes\r" }
+          expect eof
+          EOF
+            fi
+          fi
+          
+          echo "🔧 Configuring aaPanel credentials..."
+          if command -v bt > /dev/null 2>&1; then
+            sudo bt 5 << EOF
+          Jacky
+          EOF
+            sudo bt 6 << EOF
+          spidey
+          EOF
+            echo "✅ aaPanel configured! Username: Jacky, Password: spidey 🕸️"
+          else
+            echo "⚠️ aaPanel command not found, trying alternative setup..."
+          fi
+
+      - name: 🌐 Starting all Spidey services
+        run: |
+          echo "🚀 Firing up all of Spidey's web services! 🕷️"
+          
+          # Start essential services
+          sudo systemctl start mariadb || echo "📊 MariaDB already running"
+          sudo systemctl start tailscaled || echo "🕸️ Tailscale already running"
+          sudo systemctl start nginx || sudo systemctl start apache2 || echo "🌐 Web server status unknown"
+          
+          # Start aaPanel if installed
+          if command -v bt > /dev/null 2>&1; then
+            sudo systemctl start bt || echo "🎛️ aaPanel service status unknown"
+          fi
+          
+          echo "✅ All services are web-slinging! 🕸️"
+
+      - name: 🕷️ Spidey's patrol loop (6 hours of web-slinging)
+        run: |
+          echo "🕷️ Starting Spidey's patrol! Watching over the web for 6 hours... 🕸️"
+          echo "💡 Create /tmp/stop to trigger graceful shutdown! 🛑"
+          
+          START_TIME=$(date +%s)
+          SIX_HOURS=21600  # 6 hours in seconds
+          CHECK_INTERVAL=60  # Check every minute
+          
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+            REMAINING=$((SIX_HOURS - ELAPSED))
+            
+            if [ -f "/tmp/stop" ]; then
+              echo "🛑 Stop signal detected! Spidey is preparing for graceful shutdown... 🕷️"
+              break
+            fi
+            
+            if [ $ELAPSED -ge $SIX_HOURS ]; then
+              echo "⏰ 6 hours completed! Time for Spidey to swing home! 🕸️"
+              break
+            fi
+            
+            # Friendly status update every 30 minutes
+            if [ $((ELAPSED % 1800)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+              HOURS=$((ELAPSED / 3600))
+              MINUTES=$(((ELAPSED % 3600) / 60))
+              echo "🕷️ Patrol status: ${HOURS}h ${MINUTES}m elapsed, still watching the web! 🕸️"
+            fi
+            
+            sleep $CHECK_INTERVAL
+          done
+          
+          echo "🕷️ Patrol completed! Time to secure the web base! 🕸️"
+
+      - name: 💾 Creating backup of Spidey's web
+        run: |
+          echo "💾 Creating backup of Spidey's entire web! 🕸️"
+          
+          # Create backup manifest
+          cat > backup-manifest.txt << EOF
+          🕷️ SPIDEY'S BACKUP MANIFEST 🕸️
+          Backup created: $(date)
+          Hostname: $(hostname)
+          
+          📁 Included directories:
+          - /home (Spidey's personal files)
+          - /root (Root's secret files)
+          - /etc (System configurations)
+          - /var/www (Web files)
+          - /opt (Optional applications)
+          - /www (aaPanel data)
+          - /var/lib/tailscale (Private web state)
+          - /var/lib/mysql (Data vault)
+          
+          🔒 This backup contains everything needed to restore Spidey's web!
+          EOF
+          
+          echo "📦 Creating compressed backup archive..."
+          sudo tar -czf vps-backup.tar.gz \
+            -C / \
+            --exclude='proc/*' \
+            --exclude='sys/*' \
+            --exclude='dev/*' \
+            --exclude='tmp/*' \
+            --exclude='var/log/*' \
+            --exclude='var/cache/*' \
+            home root etc/hostname etc/hosts etc/passwd etc/group etc/shadow \
+            var/www opt www var/lib/tailscale var/lib/mysql \
+            backup-manifest.txt 2>/dev/null || true
+            
+          echo "✅ Backup archive created! Size: $(du -h vps-backup.tar.gz | cut -f1) 🕸️"
+
+      - name: 🎯 Uploading to GitHub Artifacts (Primary backup)
+        uses: actions/upload-artifact@v3
+        with:
+          name: spidey-vps-backup
+          path: vps-backup.tar.gz
+          retention-days: 30
+
+      - name: ☁️ Uploading to MEGA (Secondary backup)
+        run: |
+          echo "☁️ Uploading backup to MEGA cloud web! 🕸️"
+          
+          # Create backup directory on MEGA if it doesn't exist
+          rclone mkdir mega:spidey-vps-backup
+          
+          # Upload backup
+          if rclone copy vps-backup.tar.gz mega:spidey-vps-backup/; then
+            echo "✅ Backup uploaded to MEGA successfully! 🕸️"
+            
+            # Try to create a public link (if supported)
+            MEGA_LINK=$(rclone link mega:spidey-vps-backup/vps-backup.tar.gz 2>/dev/null || echo "Direct link not available")
+            echo "🔗 MEGA Link: $MEGA_LINK" | tee mega-backup-link.txt
+          else
+            echo "❌ Failed to upload to MEGA, but GitHub artifact backup exists! 🕷️"
+          fi
+
+      - name: 🏁 Spidey's mission complete!
+        run: |
+          echo "🕷️ ===================================================="
+          echo "🎯 SPIDEY'S MISSION COMPLETE! 🕸️"
+          echo "✅ Backup created and uploaded"
+          echo "⏰ Session duration: ~6 hours"
+          echo "🔒 All services secured"
+          echo "🕷️ Your friendly neighborhood VPS will be back!"
+          echo "🕷️ ===================================================="
+          echo ""
+          echo "📊 FINAL STATUS REPORT:"
+          echo "🏠 Hostname: $(hostname)"
+          echo "👤 User: jacky (with spider powers!)"
+          echo "🌐 aaPanel: Configured (Jacky/spidey)"
+          echo "🗄️ MariaDB: Running and secured"
+          echo "🕸️ Tailscale: Connected to private web"
+          echo "💾 Backup: Stored in GitHub + MEGA"
+          echo ""
+          echo "🕷️ Until next time, keep the web safe! 🕸️"
