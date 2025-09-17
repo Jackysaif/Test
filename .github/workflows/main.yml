@@ -35,7 +35,7 @@ jobs:
         echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
         echo "✅ MEGA web connection established!"
 
-    - name: 🔍 Spider-Sense: Checking for Previous Backup
+    - name: 🔍 Spider-Sense:Checking for Previous Backup
       id: restore_check
       run: |
         echo "🕷️ Spider-sense is tingling... checking for backups..."
