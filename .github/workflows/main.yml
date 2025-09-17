@@ -6,7 +6,7 @@ on:
     - cron: '0 */6 * * *'  # Every 6 hours
 
 jobs:
-  vps:
+    vps:
     runs-on: ubuntu-22.04
     timeout-minutes: 400  # 6.5 hours to cover session + overhead
     
