@@ -311,7 +311,7 @@ jobs:
       # Step 10: Upload to GitHub Artifacts
       - name: Upload to GitHub Artifacts
         if: steps.create-backup.outputs.backup_created == 'true'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BACKUP_ARTIFACT_NAME }}
           path: vps-backup.tar.gz
