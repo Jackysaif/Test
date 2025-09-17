@@ -1,1457 +1,227 @@
-name: Persistent VPS (Self-Healing Edition)
+# .github/workflows/persistent-vps.yml
+
+name: Persistent VPS with Backup & Restore
 
 on:
-  schedule:
-    # Runs automatically every 6 hours to refresh the session
-    - cron: '0 */6 * * *'
+  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-    # Allows manual triggering from the Actions tab
-    inputs:
-      force_fresh_install:
-        description: 'Force fresh installation (ignore existing backups)'
-        required: false
-        default: 'false'
-        type: boolean
-      session_duration:
-        description: 'Session duration in minutes (default: 330 = 5.5 hours)'
-        required: false
-        default: '330'
-        type: string
 
+  # Runs the workflow automatically every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+
+# Environment variables available to all jobs and steps
 env:
-  # Backup configuration
-  BACKUP_STORE: /mnt/backups/vps
-  BACKUP_NAME: vps-full-backup.tar.gz
-  BACKUP_METADATA: vps-metadata.json
-  # Cloud storage configuration
-  MEGA_REMOTE: mega:vps-backup
-  BACKUP_LINK_FILE: latest_backup_link.txt
-  METADATA_FILE: backup_metadata.json
-  # System configuration
-  VPS_HOSTNAME: github-vps
-  VPS_USER: vpsuser
-  # Session settings
-  DEFAULT_SESSION_MINUTES: 330
-  HEARTBEAT_INTERVAL: 300
+  BACKUP_FILE_NAME: vps-backup.tar.gz
+  MEGA_REMOTE: mega:vps-backup # IMPORTANT: Change 'mega:vps-backup' to your actual rclone remote name
+  ARTIFACT_NAME: vps-backup-artifact
 
 jobs:
-  persistent-vps:
+  vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # GitHub Actions maximum
+    # Total job timeout is 6 hours (360 minutes)
+    timeout-minutes: 360
+
+    # Grant permissions for the GITHUB_TOKEN to read actions and download artifacts
     permissions:
+      actions: read
       contents: read
-      actions: write
 
     steps:
-      # ================================================================
-      # PHASE 1: INITIALIZATION & ENVIRONMENT SETUP
-      # ================================================================
-
-      - name: '🚀 Initialize VPS Session'
-        id: init
-        run: |
-          set -euo pipefail
-          echo "=============================================="
-          echo "🚀 PERSISTENT VPS INITIALIZATION STARTING"
-          echo "=============================================="
-          echo "Session ID: ${{ github.run_id }}"
-          echo "Trigger: ${{ github.event_name }}"
-          echo "Start Time: $(date -Iseconds)"
-          echo "Force Fresh: ${{ inputs.force_fresh_install || 'false' }}"
-          
-          # Calculate session duration
-          DURATION="${{ inputs.session_duration || env.DEFAULT_SESSION_MINUTES }}"
-          echo "duration_minutes=$DURATION" >> $GITHUB_OUTPUT
-          echo "session_end_time=$(($(date +%s) + DURATION * 60))" >> $GITHUB_OUTPUT
-          
-          # System info
-          echo ""
-          echo "📊 System Information:"
-          echo "  Runner: $(uname -a)"
-          echo "  CPU Cores: $(nproc)"
-          echo "  Memory: $(free -h | grep Mem | awk '{print $2}')"
-          echo "  Disk Space: $(df -h / | tail -1 | awk '{print $4}' | sed 's/G/ GB/')"
-          echo "=============================================="
-
-      - name: '📥 Checkout Repository'
+      - name: ⬇️ Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: '🛠️ Install Core System Tools'
+      - name: 🛠️ Install Dependencies
         run: |
-          set -euo pipefail
-          echo "🔧 Installing essential system tools..."
-          
-          # Update package lists
-          echo "🌐 Updating package repositories..."
-          sudo apt-get update -qq
-          
-          # Fix any broken packages first
-          echo "🔧 Fixing any broken packages..."
-          sudo apt-get install -f -y || true
-          sudo dpkg --configure -a || true
-          
-          # Remove conflicting packages
-          echo "🗑️ Removing conflicting packages..."
-          sudo apt-get remove --purge -y containerd docker docker-engine docker.io containerd runc || true
-          sudo apt-get autoremove -y || true
-          
-          # Install core tools (without Docker first)
-          echo "📦 Installing system packages..."
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            curl wget git tar gzip unzip jq \
-            openssh-server openssh-client \
-            htop nano vim screen tmux \
-            net-tools psmisc lsof \
-            software-properties-common \
-            apt-transport-https \
-            ca-certificates \
-            gnupg lsb-release \
-            build-essential \
-            python3 python3-pip \
-            rsync \
-            mariadb-server mariadb-client
-          
-          # Install rclone separately
-          echo "☁️ Installing rclone..."
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          
-          # Install Docker properly
-          echo "🐳 Installing Docker..."
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update -qq
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-          
-          # Configure Docker
-          echo "🔧 Configuring Docker..."
-          sudo systemctl enable docker
-          sudo usermod -aG docker $USER
-          
-          echo "✅ Core system tools installed successfully"
+          echo "Installing essential tools: rclone, tmate, tailscale..."
+          sudo apt-get update
+          # Add Tailscale's repository
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-pub.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          sudo apt-get update
+          sudo apt-get install -y tmate rclone tailscale wget curl tar gzip gh
+          echo "✅ Dependencies installed."
 
-      - name: '☁️ Configure Cloud Storage (Rclone)'
+      - name: 👤 Setup User and Hostname
         run: |
-          set -euo pipefail
-          echo "🔐 Configuring Rclone for MEGA storage..."
-          
-          # Validate required secrets
-          if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-            echo "❌ ERROR: RCLONE_CONFIG secret is required!" >&2
-            echo "Please add your rclone configuration to GitHub Secrets." >&2
-            exit 1
-          fi
-          
-          # Setup rclone configuration
+          echo "Configuring hostname to 'Spidey' and user 'jacky'..."
+          sudo hostnamectl set-hostname Spidey
+          sudo useradd -m -s /bin/bash jacky
+          echo 'jacky:spidey' | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          echo "✅ User and hostname setup complete."
+
+      - name: 📦 Configure Rclone for MEGA
+        # This step only runs if the RCLONE_CONF_MEGA secret is provided
+        if: ${{ secrets.RCLONE_CONF_MEGA != '' }}
+        run: |
+          echo "Configuring rclone for MEGA..."
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-          chmod 600 ~/.config/rclone/rclone.conf
-          
-          # Test rclone connection
-          echo "🧪 Testing MEGA connection..."
-          if rclone lsd "${{ env.MEGA_REMOTE }}" >/dev/null 2>&1; then
-            echo "✅ MEGA connection successful"
-          else
-            echo "⚠️  MEGA connection test failed, but continuing..."
-          fi
+          echo "${{ secrets.RCLONE_CONF_MEGA }}" > ~/.config/rclone/rclone.conf
+          echo "✅ rclone configured."
 
-      # ================================================================
-      # PHASE 2: BACKUP DETECTION & RESTORATION
-      # ================================================================
-
-      - name: '🔍 Detect Available Backups'
-        id: detect_backups
+      - name: 📥 Attempt to Restore Backup
+        id: restore
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          echo "🔎 Searching for existing backups..."
+          echo "Attempting to restore backup..."
+          echo "1. Trying GitHub Artifacts from the last successful run..."
           
-          FORCE_FRESH="${{ inputs.force_fresh_install || 'false' }}"
-          if [[ "$FORCE_FRESH" == "true" ]]; then
-            echo "🔄 Fresh installation forced by user input"
-            echo "has_backup=false" >> $GITHUB_OUTPUT
-            echo "backup_source=none" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          # Use the GitHub CLI to find the last successful run and download its artifact
+          LATEST_RUN_ID=$(gh run list --workflow "${{ github.workflow }}" --status success --json databaseId -q '.[0].databaseId' || echo "")
           
-          # Priority 1: Check MEGA for backup link
-          echo "🎯 Priority 1: Checking MEGA for latest backup link..."
-          if rclone ls "${MEGA_REMOTE}/${BACKUP_LINK_FILE}" >/dev/null 2>&1; then
-            BACKUP_LINK=$(rclone cat "${MEGA_REMOTE}/${BACKUP_LINK_FILE}" 2>/dev/null || echo "")
-            if [[ -n "$BACKUP_LINK" && "$BACKUP_LINK" =~ ^https://api\.github\.com ]]; then
-              echo "✅ Found valid backup link in MEGA!"
-              echo "has_backup=true" >> $GITHUB_OUTPUT
-              echo "backup_source=mega" >> $GITHUB_OUTPUT
-              echo "backup_url=$BACKUP_LINK" >> $GITHUB_OUTPUT
-              
-              # Get metadata if available
-              if rclone ls "${MEGA_REMOTE}/${METADATA_FILE}" >/dev/null 2>&1; then
-                METADATA=$(rclone cat "${MEGA_REMOTE}/${METADATA_FILE}" 2>/dev/null || echo "{}")
-                echo "backup_metadata=$METADATA" >> $GITHUB_OUTPUT
-              fi
+          if [ -n "$LATEST_RUN_ID" ]; then
+            echo "Found previous successful run: $LATEST_RUN_ID. Attempting to download artifact."
+            gh run download "$LATEST_RUN_ID" -n "${{ env.ARTIFACT_NAME }}"
+            if [ -f "${{ env.BACKUP_FILE_NAME }}" ]; then
+              echo "✅ Successfully downloaded backup from GitHub Artifacts."
+              sudo tar --warning=no-unknown-keyword -xzpf "${{ env.BACKUP_FILE_NAME }}" -C /
+              echo "Backup restored. Setting status to 'success'."
+              echo "status=success" >> $GITHUB_OUTPUT
               exit 0
-            fi
-          fi
-          
-          # Priority 2: Search recent GitHub Actions artifacts
-          echo "🎯 Priority 2: Searching recent workflow runs..."
-          WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
-            | jq -r '.workflows[] | select(.name == "Persistent VPS (Self-Healing Edition)") | .id' \
-            | head -1)
-          
-          if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
-            echo "🔍 Found workflow ID: $WORKFLOW_ID"
-            
-            # Get recent successful runs (excluding current run)
-            RECENT_RUNS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?status=success&per_page=5" \
-              | jq -r '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id')
-            
-            for RUN_ID in $RECENT_RUNS; do
-              echo "🔎 Checking run: $RUN_ID"
-              ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
-                | jq -r ".artifacts[] | select(.name == \"${{ env.BACKUP_NAME }}\") | .id" \
-                | head -1)
-              
-              if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-                ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
-                echo "✅ Found backup artifact in run $RUN_ID!"
-                echo "has_backup=true" >> $GITHUB_OUTPUT
-                echo "backup_source=github_artifacts" >> $GITHUB_OUTPUT
-                echo "backup_url=$ARTIFACT_URL" >> $GITHUB_OUTPUT
-                echo "backup_run_id=$RUN_ID" >> $GITHUB_OUTPUT
-                exit 0
-              fi
-            done
-          fi
-          
-          echo "ℹ️  No existing backups found - will perform fresh installation"
-          echo "has_backup=false" >> $GITHUB_OUTPUT
-          echo "backup_source=none" >> $GITHUB_OUTPUT
-
-      - name: '📥 Download and Restore System Backup'
-        if: steps.detect_backups.outputs.has_backup == 'true'
-        run: |
-          set -euo pipefail
-          echo "📥 Restoring system from backup..."
-          echo "Source: ${{ steps.detect_backups.outputs.backup_source }}"
-          
-          # Check available disk space
-          echo "💾 Checking available disk space..."
-          df -h /
-          AVAILABLE_GB=$(df / | tail -1 | awk '{print $4}' | sed 's/G//')
-          echo "Available space: ${AVAILABLE_GB}G"
-          
-          # Create restoration workspace with proper permissions
-          echo "📁 Creating restoration workspace..."
-          sudo mkdir -p /mnt/restore
-          sudo chown $(whoami):$(whoami) /mnt/restore
-          cd /mnt/restore
-          
-          # Clean any existing files
-          rm -f backup_download.zip* backup_*.tar.gz* 2>/dev/null || true
-          
-          echo "🌐 Downloading backup archive..."
-          # Download with better error handling and progress
-          if ! curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "${{ steps.detect_backups.outputs.backup_url }}" \
-            -o "backup_download.zip" \
-            --fail \
-            --max-time 600 \
-            --retry 3 \
-            --retry-delay 10 \
-            --progress-bar; then
-            
-            echo "❌ Download failed. Checking disk space and retrying..."
-            df -h /
-            
-            # Try alternative download location
-            cd /tmp
-            echo "🔄 Retrying download in /tmp..."
-            curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "${{ steps.detect_backups.outputs.backup_url }}" \
-              -o "backup_download.zip" \
-              --fail \
-              --max-time 300 \
-              --retry 2 \
-              --progress-bar
-            
-            mv backup_download.zip /mnt/restore/
-            cd /mnt/restore
-          fi
-          
-          # Verify download
-          if [[ ! -f "backup_download.zip" ]] || [[ ! -s "backup_download.zip" ]]; then
-            echo "❌ Download failed or file is empty!"
-            ls -la
-            exit 1
-          fi
-          
-          DOWNLOAD_SIZE=$(du -h backup_download.zip | cut -f1)
-          echo "📦 Downloaded: $DOWNLOAD_SIZE"
-          
-          echo "📂 Extracting backup archive..."
-          if ! unzip -q backup_download.zip; then
-            echo "❌ Failed to extract backup!"
-            echo "File info:"
-            file backup_download.zip
-            head -c 100 backup_download.zip | hexdump -C
-            exit 1
-          fi
-          
-          # Clean up zip file to save space
-          rm -f backup_download.zip
-          
-          # Verify backup file exists
-          if [[ ! -f "${{ env.BACKUP_NAME }}" ]]; then
-            echo "❌ Expected backup file not found after extraction!"
-            echo "Available files:"
-            ls -la
-            exit 1
-          fi
-          
-          # Validate backup integrity
-          echo "🧪 Validating backup integrity..."
-          if ! tar -tzf "${{ env.BACKUP_NAME }}" >/dev/null 2>&1; then
-            echo "❌ Backup file is corrupted!"
-            file "${{ env.BACKUP_NAME }}"
-            exit 1
-          fi
-          
-          # Display backup information
-          BACKUP_SIZE=$(du -h "${{ env.BACKUP_NAME }}" | cut -f1)
-          FILE_COUNT=$(tar -tzf "${{ env.BACKUP_NAME }}" | wc -l)
-          echo "📋 Backup Details:"
-          echo "  Size: $BACKUP_SIZE"
-          echo "  Files: $FILE_COUNT"
-          
-          # Check if we have enough space for extraction (much less needed now)
-          BACKUP_SIZE_KB=$(du -k "${{ env.BACKUP_NAME }}" | cut -f1)
-          AVAILABLE_KB=$(df /mnt | tail -1 | awk '{print $4}')
-          echo "📊 Space check: Backup=${BACKUP_SIZE_KB}KB, Available=${AVAILABLE_KB}KB"
-          
-          # Restore selective backup (much faster than full OS restore)
-          echo "🔄 Restoring installed software and user data..."
-          echo "ℹ️  This is a selective restore - only your installed software and configs"
-          
-          # First, restore to temporary location to inspect
-          mkdir -p /tmp/restore_preview
-          tar -tzf "${{ env.BACKUP_NAME }}" | head -20 > /tmp/restore_preview/contents.txt
-          echo "📋 Restoring the following components:"
-          cat /tmp/restore_preview/contents.txt
-          
-          # Perform the selective restoration
-          sudo tar -xzpf "${{ env.BACKUP_NAME }}" -C / \
-            --numeric-owner \
-            --same-permissions \
-            --warning=no-timestamp \
-            --overwrite \
-            2>/dev/null || {
-              echo "⚠️  Some conflicts resolved during restoration (normal)"
-            }
-          
-          # Fix permissions after restoration
-          echo "🔧 Fixing permissions after restoration..."
-          sudo chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
-          sudo chown -R root:docker /var/lib/docker 2>/dev/null || true
-          sudo chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
-          sudo chmod 644 /etc/passwd /etc/group 2>/dev/null || true
-          sudo chmod 640 /etc/shadow /etc/gshadow 2>/dev/null || true
-          
-          # Clean up extracted backup to save space
-          rm -f "${{ env.BACKUP_NAME }}"
-          rm -rf /tmp/restore_preview
-          
-          echo "✅ Selective system restoration completed successfully"
-          echo "⚡ Restoration was much faster because we only restored what you installed!"
-
-      # ================================================================
-      # PHASE 3: SYSTEM CONFIGURATION & SERVICE SETUP
-      # ================================================================
-
-      - name: '👤 Configure User Account'
-        run: |
-          set -euo pipefail
-          echo "👤 Setting up VPS user account..."
-          
-          # Validate password secret
-          if [[ -z "${{ secrets.USER_PASSWORD || '' }}" ]]; then
-            echo "❌ ERROR: USER_PASSWORD secret is required!" >&2
-            echo "Please add a secure password to GitHub Secrets." >&2
-            exit 1
-          fi
-          
-          # Create/update user account
-          if id "${{ env.VPS_USER }}" >/dev/null 2>&1; then
-            echo "👤 User ${{ env.VPS_USER }} already exists, updating..."
-          else
-            echo "👤 Creating new user: ${{ env.VPS_USER }}"
-            sudo useradd -m -s /bin/bash "${{ env.VPS_USER }}"
-          fi
-          
-          # Set password and permissions
-          echo "${{ env.VPS_USER }}:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo,docker "${{ env.VPS_USER }}"
-          
-          # Configure sudo access
-          echo "${{ env.VPS_USER }} ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ env.VPS_USER }}" > /dev/null
-          
-          # Set hostname
-          sudo hostnamectl set-hostname "${{ env.VPS_HOSTNAME }}"
-          echo "127.0.1.1 ${{ env.VPS_HOSTNAME }}" | sudo tee -a /etc/hosts > /dev/null
-          
-          echo "✅ User account configured successfully"
-
-      - name: '🎛️ Install and Configure Aapanel'
-        run: |
-          set -euo pipefail
-          echo "🎛️ Setting up Aapanel control panel..."
-          
-          # Check if Aapanel is already installed (from backup restoration)
-          if command -v bt >/dev/null 2>&1 && [[ -d "/www/server" ]]; then
-            echo "✅ Aapanel already installed (restored from backup)"
-            
-            # Restart Aapanel services
-            echo "🔄 Restarting Aapanel services..."
-            sudo bt restart || true
-            sleep 5
-          else
-            echo "📥 Installing Aapanel (fresh installation)..."
-            
-            # Download and install Aapanel
-            curl -fsSL -o /tmp/install_aapanel.sh \
-              "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-            chmod +x /tmp/install_aapanel.sh
-            
-            # Install with timeout and automatic responses
-            timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install_aapanel.sh" || {
-              echo "⚠️  Aapanel installation timed out, checking if partially installed..."
-            }
-            
-            # Wait for installation to complete
-            sleep 10
-          fi
-          
-          # Configure Aapanel if available
-          if command -v bt >/dev/null 2>&1; then
-            echo "🔧 Configuring Aapanel credentials..."
-            
-            # Set admin username and password
-            echo "admin" | sudo bt 6 || echo "Username may already be set"
-            echo "${{ secrets.USER_PASSWORD }}" | sudo bt 5 || echo "Password may already be set"
-            
-            # Start Aapanel
-            sudo bt start || true
-            sleep 3
-            
-            echo "✅ Aapanel configured successfully"
-          else
-            echo "⚠️  Aapanel installation incomplete, continuing without it"
-          fi
-
-      - name: '🐳 Configure Docker and Services'
-        run: |
-          set -euo pipefail
-          echo "🐳 Configuring Docker and system services..."
-          
-          # Ensure Docker daemon is configured
-          sudo mkdir -p /etc/docker
-          sudo tee /etc/docker/daemon.json > /dev/null <<EOF
-          {
-            "log-driver": "json-file",
-            "log-opts": {
-              "max-size": "10m",
-              "max-file": "3"
-            },
-            "storage-driver": "overlay2"
-          }
-          EOF
-          
-          # Configure MariaDB
-          echo "🗄️ Configuring MariaDB..."
-          sudo mysql_install_db --user=mysql --datadir=/var/lib/mysql || true
-          
-          # Reload systemd and start services
-          echo "🔄 Starting system services..."
-          sudo systemctl daemon-reload
-          
-          # Enable and start services
-          for service in docker ssh mariadb; do
-            echo "  Starting $service..."
-            sudo systemctl enable $service 2>/dev/null || true
-            sudo systemctl start $service 2>/dev/null || true
-          done
-          
-          # Wait for services to stabilize
-          sleep 5
-          
-          # Service status check
-          echo "📊 Service Status:"
-          for service in docker ssh mariadb; do
-            if sudo systemctl is-active --quiet $service; then
-              echo "  ✅ $service: ACTIVE"
             else
-              echo "  ⚠️  $service: INACTIVE"
+              echo "⚠️ Artifact download failed or file was not found in run $LATEST_RUN_ID."
             fi
-          done
-
-      # ================================================================
-      # PHASE 4: REMOTE ACCESS CONFIGURATION
-      # ================================================================
-
-      - name: '🌐 Setup Tailscale VPN'
-        run: |
-          set -euo pipefail
-          echo "🌐 Setting up Tailscale VPN for secure remote access..."
-          
-          # Validate Tailscale auth key
-          if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-            echo "❌ ERROR: TAILSCALE_AUTHKEY secret is required!" >&2
-            echo "Please add your Tailscale auth key to GitHub Secrets." >&2
-            exit 1
-          fi
-          
-          # Install Tailscale
-          echo "📥 Installing Tailscale..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Enable and start Tailscale daemon
-          sudo systemctl enable --now tailscaled
-          sleep 3
-          
-          # Connect to Tailscale network
-          echo "🔐 Connecting to Tailscale network..."
-          sudo tailscale up \
-            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-            --hostname="${{ env.VPS_HOSTNAME }}" \
-            --reset \
-            --accept-routes \
-            --accept-dns=false
-          
-          # Wait for connection to establish
-          sleep 5
-          
-          # Get Tailscale IP
-          TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Not available")
-          echo "tailscale_ip=$TAILSCALE_IP" >> $GITHUB_ENV
-          
-          if [[ "$TAILSCALE_IP" != "Not available" ]]; then
-            echo "✅ Tailscale connected successfully"
-            echo "🌐 Tailscale IP: $TAILSCALE_IP"
           else
-            echo "⚠️  Tailscale IP not immediately available"
-          fi
-
-      - name: '🔗 Setup Emergency SSH Access (tmate)'
-        run: |
-          set -euo pipefail
-          echo "🔗 Setting up tmate for emergency SSH access..."
-          
-          # Install tmate if not already installed
-          if ! command -v tmate >/dev/null 2>&1; then
-            echo "📥 Installing tmate..."
-            sudo apt-get update -qq
-            sudo apt-get install -y tmate
+            echo "No previous successful run found to fetch artifact from."
           fi
           
-          # Start tmate session
-          echo "🚀 Starting tmate session..."
-          tmate -S /tmp/tmate.sock new-session -d 'bash'
-          
-          # Wait for tmate to be ready
-          echo "⏳ Waiting for tmate session to initialize..."
-          timeout 30 bash -c 'while ! tmate -S /tmp/tmate.sock has-session 2>/dev/null; do sleep 1; done' || {
-            echo "⚠️  tmate session startup timeout"
-            exit 0
-          }
-          
-          # Wait for remote connection info
-          timeout 30 tmate -S /tmp/tmate.sock wait tmate-ready || {
-            echo "⚠️  tmate remote connection timeout"
-            exit 0
-          }
-          
-          # Get connection information
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Not available")
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || echo "Not available")
-          
-          echo "tmate_ssh=$TMATE_SSH" >> $GITHUB_ENV
-          echo "tmate_web=$TMATE_WEB" >> $GITHUB_ENV
-          
-          echo "✅ tmate emergency access configured"
-
-      # ================================================================
-      # PHASE 5: VPS SESSION MANAGEMENT
-      # ================================================================
-
-      - name: '🎉 VPS Ready - Display Connection Information'
-        run: |
-          set -euo pipefail
-          echo ""
-          echo "=================================================="
-          echo "🎉          VPS IS READY FOR USE!              🎉"
-          echo "=================================================="
-          echo ""
-          echo "📊 System Information:"
-          echo "  Hostname: ${{ env.VPS_HOSTNAME }}"
-          echo "  Username: ${{ env.VPS_USER }}"
-          echo "  Session Duration: ${{ steps.init.outputs.duration_minutes }} minutes"
-          echo "  Backup Restored: ${{ steps.detect_backups.outputs.has_backup }}"
-          if [[ "${{ steps.detect_backups.outputs.has_backup }}" == "true" ]]; then
-            echo "  Backup Source: ${{ steps.detect_backups.outputs.backup_source }}"
-          fi
-          echo ""
-          echo "🌐 Remote Access Options:"
-          if [[ -n "${tailscale_ip:-}" && "${tailscale_ip}" != "Not available" ]]; then
-            echo "  🔐 Tailscale VPN: ssh ${{ env.VPS_USER }}@${tailscale_ip}"
-            echo "  🔐 Tailscale IP: ${tailscale_ip}"
+          echo "2. Trying MEGA as fallback..."
+          if [ -f ~/.config/rclone/rclone.conf ]; then
+            rclone copy "${{ env.MEGA_REMOTE }}/${{ env.BACKUP_FILE_NAME }}" . -P
+            if [ -f "${{ env.BACKUP_FILE_NAME }}" ]; then
+              echo "✅ Successfully downloaded backup from MEGA."
+              sudo tar --warning=no-unknown-keyword -xzpf "${{ env.BACKUP_FILE_NAME }}" -C /
+              echo "Backup restored. Setting status to 'success'."
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "⚠️ Failed to download backup from MEGA."
+            fi
           else
-            echo "  ⚠️  Tailscale: Connection pending..."
+            echo "rclone not configured, skipping MEGA restore."
           fi
-          if [[ -n "${tmate_ssh:-}" && "${tmate_ssh}" != "Not available" ]]; then
-            echo "  🆘 Emergency SSH: ${tmate_ssh}"
-          fi
-          if [[ -n "${tmate_web:-}" && "${tmate_web}" != "Not available" ]]; then
-            echo "  🌐 Web Terminal: ${tmate_web}"
-          fi
-          echo ""
-          if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Aapanel Control Panel:"
-            sudo bt default 2>/dev/null || echo "  ℹ️  Run 'sudo bt default' to get panel URL"
-            echo ""
-          fi
-          echo "💡 Useful Commands:"
-          echo "  • Stop VPS early: touch /tmp/stop"
-          echo "  • Check services: systemctl status docker ssh mariadb"
-          echo "  • Aapanel commands: sudo bt"
-          echo "  • View logs: journalctl -f"
-          echo ""
-          echo "=================================================="
+          
+          echo "❌ No backup found. Proceeding with fresh setup."
+          echo "status=fresh_setup" >> $GITHUB_OUTPUT
 
-      - name: '⏳ Maintain VPS Session'
-        id: maintain_session
+      - name: 🚀 Perform Fresh Setup (if no backup found)
+        if: steps.restore.outputs.status == 'fresh_setup'
         run: |
-          set -euo pipefail
-          echo "🖥️  Starting VPS session maintenance..."
+          echo "🚀 Performing a clean, fresh setup..."
+          echo "Installing aapanel..."
+          wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh
+          sudo bash install.sh aapanel <<< "y"
           
-          SESSION_DURATION=${{ steps.init.outputs.duration_minutes }}
-          END_TIME=${{ steps.init.outputs.session_end_time }}
-          HEARTBEAT_INTERVAL=${{ env.HEARTBEAT_INTERVAL }}
+          echo "aapanel installed. Setting credentials to jacky/spidey..."
+          # Use a heredoc to pipe commands to the 'bt' utility
+          sudo bt <<EOF
+          5
+          spidey
+          6
+          jacky
+          EOF
+          echo "✅ aapanel credentials set."
           
-          echo "📅 Session Details:"
-          echo "  Duration: ${SESSION_DURATION} minutes"
-          echo "  Started: $(date -Iseconds)"
-          echo "  Will end: $(date -Iseconds -d "@${END_TIME}")"
-          echo "  Heartbeat: Every ${HEARTBEAT_INTERVAL} seconds"
-          echo ""
-          echo "💡 To stop early: touch /tmp/stop"
-          echo ""
+          echo "Initializing Tailscale for the first time..."
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=spidey-vps --accept-routes
+          echo "✅ Tailscale is up."
+
+      - name: 🌐 Re-initialize Services (if restored from backup)
+        if: steps.restore.outputs.status == 'success'
+        run: |
+          echo "🔄 Re-initializing services from restored state..."
+          sudo /etc/init.d/bt start
           
-          # Main session loop
-          last_heartbeat=0
-          while [[ $(date +%s) -lt $END_TIME ]]; do
-            current_time=$(date +%s)
-            remaining_minutes=$(( (END_TIME - current_time) / 60 ))
-            
-            # Check for early termination
-            if [[ -f "/tmp/stop" ]]; then
-              echo "✅ Early termination requested by user"
-              rm -f "/tmp/stop"
-              echo "stop_reason=user_requested" >> $GITHUB_OUTPUT
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            echo "Found Tailscale state file. Bringing Tailscale up..."
+            sudo tailscale up --accept-routes
+          else
+            echo "⚠️ No Tailscale state file found after restore. Initializing fresh."
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=spidey-vps --accept-routes
+          fi
+          echo "✅ Services re-initialized."
+
+      - name: 💻 Start tmate Session
+        id: tmate
+        run: |
+          echo "Starting tmate session for remote access..."
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "✅ tmate session is live. Connect with:"
+          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Web Shell: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+
+      - name: ⏳ Keep Alive & Monitor for Shutdown
+        run: |
+          echo "Session is active. Will run for 5h 30m or until '/tmp/stop' is created."
+          echo "The last 30 minutes are reserved for backup."
+          
+          # Timeout is 5.5 hours = 19800 seconds
+          end_time=$(( $(date +%s) + 19800 ))
+          
+          while [ $(date +%s) -lt $end_time ]; do
+            if [ -f /tmp/stop ]; then
+              echo "🛑 Shutdown signal '/tmp/stop' detected. Initiating graceful shutdown."
               break
             fi
-            
-            # Periodic heartbeat and status
-            if (( current_time - last_heartbeat >= HEARTBEAT_INTERVAL )); then
-              echo "💓 Heartbeat: $remaining_minutes minutes remaining - $(date -Iseconds)"
-              
-              # System health check
-              if (( remaining_minutes % 30 == 0 )); then
-                echo "🏥 Health Check:"
-                echo "  Load: $(uptime | awk -F'load average:' '{print $2}')"
-                echo "  Memory: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-                echo "  Disk: $(df -h / | tail -1 | awk '{print $5}')"
-                
-                # Service status
-                for service in docker ssh mariadb tailscaled; do
-                  if systemctl is-active --quiet $service 2>/dev/null; then
-                    echo "  ✅ $service: Active"
-                  else
-                    echo "  ⚠️  $service: Inactive"
-                  fi
-                done
-              fi
-              
-              last_heartbeat=$current_time
-            fi
-            
-            sleep 60
+            sleep 30
           done
           
-          if [[ ! -f "/tmp/stop" ]]; then
-            echo "⏰ Session time limit reached"
-            echo "stop_reason=time_limit" >> $GITHUB_OUTPUT
-          fi
-          
-          echo ""
-          echo "📊 Session Summary:"
-          echo "  Actual runtime: $(( ($(date +%s) - $(date +%s -d '${{ steps.init.outputs.session_start_time || '1 hour ago' }}')) / 60 )) minutes"
-          echo "  Stop reason: $(cat $GITHUB_OUTPUT | grep stop_reason | cut -d'=' -f2 || echo 'time_limit')"
-          echo "🔄 Preparing for backup and shutdown..."
+          echo "Runtime finished. Proceeding to final backup."
 
-      # ================================================================
-      # PHASE 6: BACKUP CREATION & STORAGE
-      # ================================================================
-
-      - name: '💾 Create System Backup'
+      - name: 🗄️ Perform Final Backup
+        # This step always runs to ensure data is saved, even if the job is cancelled.
         if: always()
         id: create_backup
         run: |
-          set -euo pipefail
-          echo "💾 Creating selective backup of installed software and user data..."
-          
-          # Create backup directory with proper permissions
-          sudo mkdir -p "${{ env.BACKUP_STORE }}"
-          sudo chown $(whoami):$(whoami) "${{ env.BACKUP_STORE }}"
-          
-          # Stop services cleanly for consistent backup
-          echo "🛑 Stopping services for consistent backup..."
-          if command -v bt >/dev/null 2>&1; then
-            sudo bt stop || echo "Aapanel stop failed"
-          fi
-          sudo systemctl stop mariadb docker tailscaled || echo "Service stop warnings ignored"
-          sync
-          sleep 3
-          
-          echo "📝 Creating backup manifest..."
-          # Create list of what we're backing up (with proper permissions)
-          cat > "${{ env.BACKUP_STORE }}/backup_manifest.txt" <<EOF
-          # VPS Backup Manifest - $(date)
-          # This backup contains only installed software and user data
-          
-          DIRECTORIES INCLUDED:
-          - /home/* (all user data)
-          - /etc/* (system configurations)  
-          - /var/lib/mysql/* (MariaDB databases)
-          - /var/lib/docker/* (Docker containers and volumes)
-          - /opt/* (optional software installations)
-          - /usr/local/* (locally installed software)
-          - /www/* (Aapanel web files)
-          - /root/.* (root user configs)
-          - Custom configs and installations
-          
-          EXCLUDED:
-          - Base Ubuntu system files
-          - Temporary files
-          - Cache files
-          - Log files (except important ones)
-          - Virtual filesystems
-          EOF
-          
-          echo "📦 Creating selective backup archive..."
-          
-          # Create list of paths that actually exist
+          echo "Starting final backup process..."
+          # Define paths to back up. Add more if needed.
           BACKUP_PATHS=""
+          [ -d /home/jacky ] && BACKUP_PATHS="$BACKUP_PATHS /home/jacky"
+          [ -f /var/lib/tailscale/tailscaled.state ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/tailscale/tailscaled.state"
+          [ -d /www/server/panel ] && BACKUP_PATHS="$BACKUP_PATHS /www/server/panel"
+          [ -d /var/lib/mysql ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/mysql"
           
-          # Check each path and add if it exists
-          for path in /home /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/sudoers.d /etc/hostname /etc/hosts /etc/ssh/sshd_config /root/.ssh /root/.config /root/.bashrc /root/.profile; do
-            if [[ -e "$path" ]]; then
-              BACKUP_PATHS="$BACKUP_PATHS $path"
-            fi
-          done
+          if [ -z "$BACKUP_PATHS" ]; then
+            echo "No data found to back up. Skipping archive creation."
+            echo "backup_created=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
-          # Check for service-specific directories
-          [[ -d /etc/docker ]] && BACKUP_PATHS="$BACKUP_PATHS /etc/docker"
-          [[ -d /etc/mysql ]] && BACKUP_PATHS="$BACKUP_PATHS /etc/mysql"
-          [[ -d /etc/apache2 ]] && BACKUP_PATHS="$BACKUP_PATHS /etc/apache2"
-          [[ -d /etc/nginx ]] && BACKUP_PATHS="$BACKUP_PATHS /etc/nginx"
-          [[ -d /etc/php ]] && BACKUP_PATHS="$BACKUP_PATHS /etc/php"
-          [[ -d /var/lib/mysql ]] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/mysql"
-          [[ -d /var/lib/docker ]] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/docker"
-          [[ -d /var/lib/tailscale ]] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/tailscale"
-          [[ -d /opt ]] && BACKUP_PATHS="$BACKUP_PATHS /opt"
-          [[ -d /usr/local ]] && BACKUP_PATHS="$BACKUP_PATHS /usr/local"
-          [[ -d /www ]] && BACKUP_PATHS="$BACKUP_PATHS /www"
-          [[ -d /server ]] && BACKUP_PATHS="$BACKUP_PATHS /server"
+          echo "Creating archive of essential data..."
+          # Use --ignore-failed-read for ephemeral files that might disappear during tar
+          sudo tar --ignore-failed-read -czpf "${{ env.BACKUP_FILE_NAME }}" $BACKUP_PATHS
           
-          echo "📋 Backing up the following paths:"
-          echo "$BACKUP_PATHS" | tr ' ' '\n' | grep -v '^
+          echo "✅ Backup created: ${{ env.BACKUP_FILE_NAME }}"
+          echo "backup_created=true" >> $GITHUB_OUTPUT
 
-      - name: '⬆️ Upload Backup to GitHub Artifacts'
+      - name: ⬆️ Upload to GitHub Artifact
         if: always() && steps.create_backup.outputs.backup_created == 'true'
+        id: upload_artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BACKUP_NAME }}
-          path: |
-            ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}
-            ${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}
-          retention-days: 7
-          compression-level: 0  # Already compressed
-          if-no-files-found: error
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.BACKUP_FILE_NAME }}
+          retention-days: 5
+          if-no-files-found: warn
 
-      - name: '☁️ Store Backup Link in MEGA'
-        if: always() && steps.create_backup.outputs.backup_created == 'true'
+      - name: ☁️ Upload to MEGA (Fallback)
+        # Runs if the backup was created AND the primary artifact upload failed.
+        if: always() && steps.create_backup.outputs.backup_created == 'true' && steps.upload_artifact.outcome == 'failure'
         run: |
-          set -euo pipefail
-          echo "☁️ Storing backup reference in MEGA cloud storage..."
-          
-          # Wait for GitHub artifact to be processed
-          echo "⏳ Waiting for artifact processing..."
-          sleep 30
-          
-          # Retry loop to get artifact ID
-          for attempt in {1..10}; do
-            echo "🔍 Attempt $attempt/10: Getting artifact ID..."
-            
-            ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-              | jq -r ".artifacts[] | select(.name == \"${{ env.BACKUP_NAME }}\") | .id" \
-              | head -1)
-            
-            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-              echo "✅ Found artifact ID: $ARTIFACT_ID"
-              break
-            fi
-            
-            echo "⏳ Artifact not ready yet, waiting..."
-            sleep 20
-          done
-          
-          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then
-            echo "❌ Could not retrieve artifact ID after 10 attempts!"
-            echo "This may affect restoration in future runs."
-            exit 0  # Don't fail the entire workflow
-          fi
-          
-          # Create artifact download URL
-          ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
-          
-          echo "🔗 Storing backup link in MEGA..."
-          # Remove old backup link
-          rclone delete "${MEGA_REMOTE}/${BACKUP_LINK_FILE}" 2>/dev/null || true
-          
-          # Store new backup link
-          echo "$ARTIFACT_URL" | rclone rcat "${MEGA_REMOTE}/${BACKUP_LINK_FILE}"
-          
-          # Store metadata
-          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}" ]]; then
-            rclone copyto "${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}" \
-              "${MEGA_REMOTE}/${METADATA_FILE}"
-          fi
-          
-          echo "✅ Backup reference stored in MEGA successfully"
-          echo "📋 Stored Information:"
-          echo "  Artifact ID: $ARTIFACT_ID"
-          echo "  Download URL: $ARTIFACT_URL"
-          echo "  MEGA Path: ${MEGA_REMOTE}/${BACKUP_LINK_FILE}"
-
-      - name: '🧹 Cleanup Local Storage'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "🧹 Cleaning up local storage..."
-          
-          # Remove backup files to free disk space
-          sudo rm -rf "${{ env.BACKUP_STORE }}" || true
-          sudo rm -rf /mnt/restore || true
-          sudo rm -rf /tmp/tmate.sock* || true
-          
-          # Clean package cache
-          sudo apt-get clean || true
-          sudo apt-get autoremove -y || true
-          
-          # Clean Docker if it's running
-          if command -v docker >/dev/null 2>&1; then
-            docker system prune -f || true
-          fi
-          
-          echo "✅ Local cleanup completed"
-
-      # ================================================================
-      # PHASE 7: SESSION COMPLETION & REPORTING
-      # ================================================================
-
-      - name: '📊 Generate Session Report'
-        if: always()
-        id: Session_report
-        run: |
-          set -euo pipefail
-          echo "📊 Generating comprehensive session report..."
-          
-          # Calculate session metrics
-          SESSION_START="${{ steps.init.outputs.session_start_time || '1970-01-01T00:00:00Z' }}"
-          SESSION_END=$(date -Iseconds)
-          
-          if [[ "$SESSION_START" != "1970-01-01T00:00:00Z" ]]; then
-            ACTUAL_DURATION=$(( ($(date +%s) - $(date +%s -d "$SESSION_START")) / 60 ))
-          else
-            ACTUAL_DURATION="unknown"
-          fi
-          
-          # System information
-          FINAL_LOAD=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-          MEMORY_USAGE=$(free -h | grep Mem | awk '{print $3"/"$2}')
-          DISK_USAGE=$(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
-          
-          # Service status
-          SERVICES_STATUS=""
-          for service in docker ssh mariadb tailscaled; do
-            if systemctl is-active --quiet $service 2>/dev/null; then
-              SERVICES_STATUS="${SERVICES_STATUS}✅ $service "
+          echo "⚠️ GitHub Artifact upload failed. Falling back to MEGA..."
+          if [ -f ~/.config/rclone/rclone.conf ]; then
+            rclone copy "${{ env.BACKUP_FILE_NAME }}" "${{ env.MEGA_REMOTE }}/" -P
+            if [ $? -eq 0 ]; then
+              echo "✅ Successfully uploaded backup to MEGA."
             else
-              SERVICES_STATUS="${SERVICES_STATUS}❌ $service "
+              echo "❌ CRITICAL: Failed to upload backup to MEGA as well. Data may be lost."
+              exit 1
             fi
-          done
-          
-          # Generate report
-          cat <<EOF > /tmp/session_report.txt
-          ==========================================
-          🎯 PERSISTENT VPS SESSION REPORT
-          ==========================================
-          
-          📅 Session Information:
-            Session ID: ${{ github.run_id }}
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Trigger: ${{ github.event_name }}
-            Started: $SESSION_START
-            Ended: $SESSION_END
-            Planned Duration: ${{ steps.init.outputs.duration_minutes || 'unknown' }} minutes
-            Actual Duration: $ACTUAL_DURATION minutes
-            Stop Reason: ${{ steps.maintain_session.outputs.stop_reason || 'workflow_completion' }}
-          
-          🔄 Backup & Restoration:
-            Had Previous Backup: ${{ steps.detect_backups.outputs.has_backup || 'false' }}
-            Backup Source: ${{ steps.detect_backups.outputs.backup_source || 'none' }}
-            New Backup Created: ${{ steps.create_backup.outputs.backup_created || 'false' }}
-            Backup Size: ${{ steps.create_backup.outputs.backup_size || 'N/A' }}
-            Files Backed Up: ${{ steps.create_backup.outputs.file_count || 'N/A' }}
-          
-          🖥️ System Configuration:
-            Hostname: ${{ env.VPS_HOSTNAME }}
-            Username: ${{ env.VPS_USER }}
-            OS: Ubuntu 22.04 LTS
-            Kernel: $(uname -r)
-            Architecture: $(uname -m)
-          
-          🌐 Network Access:
-            Tailscale IP: ${tailscale_ip:-'Not configured'}
-            Emergency SSH: ${tmate_ssh:-'Not available'}
-            Web Terminal: ${tmate_web:-'Not available'}
-          
-          📊 Final System Status:
-            Load Average: $FINAL_LOAD
-            Memory Usage: $MEMORY_USAGE
-            Disk Usage: $DISK_USAGE
-            Services: $SERVICES_STATUS
-          
-          🛠️ Installed Components:
-            ✅ Core System Tools (curl, git, tar, etc.)
-            $(command -v docker >/dev/null && echo "✅ Docker Engine" || echo "❌ Docker Engine")
-            $(systemctl is-enabled mariadb >/dev/null 2>&1 && echo "✅ MariaDB Database" || echo "❌ MariaDB Database")
-            $(command -v bt >/dev/null && echo "✅ Aapanel Control Panel" || echo "❌ Aapanel Control Panel")
-            $(command -v tailscale >/dev/null && echo "✅ Tailscale VPN" || echo "❌ Tailscale VPN")
-            $(command -v tmate >/dev/null && echo "✅ tmate Remote Access" || echo "❌ tmate Remote Access")
-            $(command -v rclone >/dev/null && echo "✅ Rclone Cloud Storage" || echo "❌ Rclone Cloud Storage")
-          
-          💡 Next Session:
-            - Will automatically start in ~6 hours (if scheduled)
-            - Can be manually triggered from Actions tab
-            - Will restore from backup created in this session
-            - Use 'force_fresh_install' to start clean if needed
-          
-          ==========================================
-          EOF
-          
-          echo "report_generated=true" >> $GITHUB_OUTPUT
-
-      - name: '📋 Display Final Session Summary'
-        if: always()
-        run: |
-          set -euo pipefail
-          
-          if [[ -f "/tmp/session_report.txt" ]]; then
-            echo ""
-            cat /tmp/session_report.txt
-            echo ""
-          fi
-          
-          echo "=============================================="
-          echo "🏁 SESSION COMPLETED SUCCESSFULLY"
-          echo "=============================================="
-          echo ""
-          echo "✨ Key Achievements:"
-          echo "  • VPS environment maintained for ${{ steps.init.outputs.duration_minutes || 'planned' }} minutes"
-          echo "  • System state preserved through comprehensive backup"
-          echo "  • Remote access configured (Tailscale + tmate)"
-          echo "  • All critical services installed and running"
-          echo "  • Automatic restoration capability established"
-          echo ""
-          echo "🔄 Continuous Operation:"
-          echo "  • Next session will auto-start in ~6 hours"
-          echo "  • Previous state will be automatically restored"
-          echo "  • Manual triggers available via Actions tab"
-          echo ""
-          echo "📞 Support & Troubleshooting:"
-          echo "  • Check workflow logs for detailed information"
-          echo "  • Use 'force_fresh_install' if restoration fails"
-          echo "  • Ensure all required secrets are configured"
-          echo ""
-          echo "🎯 Status: ${{ job.status || 'COMPLETED' }}"
-          echo "🕐 End Time: $(date -Iseconds)"
-          echo "=============================================="
-
-      # ================================================================
-      # PHASE 8: ERROR HANDLING & NOTIFICATIONS
-      # ================================================================
-
-      - name: '🚨 Handle Workflow Failures'
-        if: failure()
-        run: |
-          set -euo pipefail
-          echo "🚨 WORKFLOW FAILURE DETECTED"
-          echo "=============================================="
-          echo ""
-          echo "❌ The VPS session encountered an error and could not complete successfully."
-          echo ""
-          echo "🔍 Common Issues & Solutions:"
-          echo ""
-          echo "1. Missing Secrets:"
-          echo "   • RCLONE_CONFIG: Required for backup storage"
-          echo "   • USER_PASSWORD: Required for VPS user account"
-          echo "   • TAILSCALE_AUTHKEY: Required for VPN access"
-          echo ""
-          echo "2. Backup/Restoration Issues:"
-          echo "   • Try running with 'force_fresh_install: true'"
-          echo "   • Check MEGA storage connectivity"
-          echo "   • Verify GitHub artifact retention"
-          echo ""
-          echo "3. Service Startup Problems:"
-          echo "   • Some services may fail on first install"
-          echo "   • Check individual service logs"
-          echo "   • Services often work after restoration"
-          echo ""
-          echo "4. Resource Limitations:"
-          echo "   • GitHub runners have limited resources"
-          echo "   • Large backups may cause timeouts"
-          echo "   • Consider reducing backup scope"
-          echo ""
-          echo "💡 Next Steps:"
-          echo "   • Review the workflow logs above"
-          echo "   • Check your GitHub Secrets configuration"
-          echo "   • Try manual trigger with fresh install"
-          echo "   • Wait for automatic retry in 6 hours"
-          echo ""
-          echo "=============================================="
-          
-          # Try to create a minimal backup even on failure
-          if [[ -d "/home" || -d "/etc" ]]; then
-            echo "🆘 Attempting emergency backup of critical data..."
-            sudo mkdir -p "${{ env.BACKUP_STORE }}" || true
-            sudo tar -czf "${{ env.BACKUP_STORE }}/emergency-backup.tar.gz" \
-              /home /etc /var/lib/mysql /var/lib/docker 2>/dev/null || true
-            echo "Emergency backup attempt completed (may be partial)"
-          fi
-
-      - name: '✅ Workflow Success Confirmation'
-        if: success()
-        run: |
-          echo "✅ PERSISTENT VPS WORKFLOW COMPLETED SUCCESSFULLY!"
-          echo ""
-          echo "🎉 All phases completed without errors:"
-          echo "  ✅ System initialization and tool installation"
-          echo "  ✅ Backup detection and restoration (if available)"
-          echo "  ✅ User account and service configuration"
-          echo "  ✅ Remote access setup (Tailscale + tmate)"
-          echo "  ✅ VPS session maintenance"
-          echo "  ✅ Comprehensive backup creation"
-          echo "  ✅ Cloud storage integration"
-          echo ""
-          echo "🔄 The persistent VPS system is now fully operational!"
-          echo "📅 Next automatic session: $(date -d '+6 hours' -Iseconds)"
-          
-          # Create backup with only existing paths
-          if [[ -n "$BACKUP_PATHS" ]]; then
-            sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
-              --absolute-names \
-              --numeric-owner \
-              --same-permissions \
-              --warning=no-timestamp \
-              --exclude-caches \
-              --exclude='*.log' \
-              --exclude='*.tmp' \
-              --exclude='/var/log/*' \
-              --exclude='/var/cache/*' \
-              --exclude='/var/tmp/*' \
-              --exclude='/tmp/*' \
-              --exclude='/home/*/.cache/*' \
-              --exclude='/root/.cache/*' \
-              $BACKUP_PATHS \
-              2>/dev/null || {
-              echo "⚠️  Some paths not accessible (normal)"
-            }
           else
-            echo "⚠️  No backup paths found, creating minimal backup..."
-            # Create a minimal backup with just user configs
-            sudo tar -czpf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" \
-              --absolute-names \
-              /etc/passwd /etc/shadow /etc/group /etc/hostname /etc/hosts \
-              2>/dev/null || true
-          fi
-          
-          # Add backup manifest to archive
-          cd "${{ env.BACKUP_STORE }}"
-          tar -czpf temp_manifest.tar.gz backup_manifest.txt
-          sudo tar --concatenate -f "${{ env.BACKUP_NAME }}" temp_manifest.tar.gz 2>/dev/null || {
-            echo "ℹ️  Manifest added separately"
-          }
-          rm -f temp_manifest.tar.gz backup_manifest.txt
-          
-          # Verify backup creation
-          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" ]]; then
-            BACKUP_SIZE=$(du -h "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | cut -f1)
-            FILE_COUNT=$(tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | wc -l)
-            
-            echo "✅ Selective backup created successfully!"
-            echo "📊 Backup Details:"
-            echo "  Size: $BACKUP_SIZE (much smaller than full OS backup!)"
-            echo "  Files: $FILE_COUNT"
-            echo "  Location: ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}"
-            echo "  Type: Selective (installed software + user data only)"
-            
-            # Show what's actually in the backup
-            echo ""
-            echo "📋 Backup Contents Preview:"
-            tar -tzf "${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}" | head -20 | sed 's/^/  /'
-            
-            echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
-            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
-            echo "backup_created=true" >> $GITHUB_OUTPUT
-            
-            # Create improved backup metadata
-            cat > "${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}" <<EOF
-          {
-            "created_at": "$(date -Iseconds)",
-            "backup_type": "selective",
-            "run_id": "${{ github.run_id }}",
-            "workflow": "${{ github.workflow }}",
-            "repository": "${{ github.repository }}",
-            "backup_size": "$BACKUP_SIZE",
-            "file_count": $FILE_COUNT,
-            "system_info": {
-              "hostname": "${{ env.VPS_HOSTNAME }}",
-              "kernel": "$(uname -r)",
-              "ubuntu_version": "$(lsb_release -d | cut -f2)"
-            },
-            "services_backed_up": {
-              "aapanel": $(command -v bt >/dev/null && echo "true" || echo "false"),
-              "docker": $(test -d /var/lib/docker && echo "true" || echo "false"),
-              "mariadb": $(test -d /var/lib/mysql && echo "true" || echo "false"),
-              "tailscale": $(test -d /var/lib/tailscale && echo "true" || echo "false"),
-              "user_configs": true,
-              "system_configs": true
-            },
-            "backup_strategy": "selective_installation_only",
-            "estimated_restoration_time": "2-5 minutes"
-          }
-          EOF
-          else
-            echo "❌ Backup creation failed!"
-            echo "backup_created=false" >> $GITHUB_OUTPUT
+            echo "❌ CRITICAL: rclone not configured. Cannot upload backup to MEGA."
             exit 1
           fi
-
-      - name: '⬆️ Upload Backup to GitHub Artifacts'
-        if: always() && steps.create_backup.outputs.backup_created == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BACKUP_NAME }}
-          path: |
-            ${{ env.BACKUP_STORE }}/${{ env.BACKUP_NAME }}
-            ${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}
-          retention-days: 7
-          compression-level: 0  # Already compressed
-          if-no-files-found: error
-
-      - name: '☁️ Store Backup Link in MEGA'
-        if: always() && steps.create_backup.outputs.backup_created == 'true'
-        run: |
-          set -euo pipefail
-          echo "☁️ Storing backup reference in MEGA cloud storage..."
-          
-          # Wait for GitHub artifact to be processed
-          echo "⏳ Waiting for artifact processing..."
-          sleep 30
-          
-          # Retry loop to get artifact ID
-          for attempt in {1..10}; do
-            echo "🔍 Attempt $attempt/10: Getting artifact ID..."
-            
-            ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-              | jq -r ".artifacts[] | select(.name == \"${{ env.BACKUP_NAME }}\") | .id" \
-              | head -1)
-            
-            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-              echo "✅ Found artifact ID: $ARTIFACT_ID"
-              break
-            fi
-            
-            echo "⏳ Artifact not ready yet, waiting..."
-            sleep 20
-          done
-          
-          if [[ -z "$ARTIFACT_ID" || "$ARTIFACT_ID" == "null" ]]; then
-            echo "❌ Could not retrieve artifact ID after 10 attempts!"
-            echo "This may affect restoration in future runs."
-            exit 0  # Don't fail the entire workflow
-          fi
-          
-          # Create artifact download URL
-          ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
-          
-          echo "🔗 Storing backup link in MEGA..."
-          # Remove old backup link
-          rclone delete "${MEGA_REMOTE}/${BACKUP_LINK_FILE}" 2>/dev/null || true
-          
-          # Store new backup link
-          echo "$ARTIFACT_URL" | rclone rcat "${MEGA_REMOTE}/${BACKUP_LINK_FILE}"
-          
-          # Store metadata
-          if [[ -f "${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}" ]]; then
-            rclone copyto "${{ env.BACKUP_STORE }}/${{ env.BACKUP_METADATA }}" \
-              "${MEGA_REMOTE}/${METADATA_FILE}"
-          fi
-          
-          echo "✅ Backup reference stored in MEGA successfully"
-          echo "📋 Stored Information:"
-          echo "  Artifact ID: $ARTIFACT_ID"
-          echo "  Download URL: $ARTIFACT_URL"
-          echo "  MEGA Path: ${MEGA_REMOTE}/${BACKUP_LINK_FILE}"
-
-      - name: '🧹 Cleanup Local Storage'
-        if: always()
-        run: |
-          set -euo pipefail
-          echo "🧹 Cleaning up local storage..."
-          
-          # Remove backup files to free disk space
-          sudo rm -rf "${{ env.BACKUP_STORE }}" || true
-          sudo rm -rf /mnt/restore || true
-          sudo rm -rf /tmp/tmate.sock* || true
-          
-          # Clean package cache
-          sudo apt-get clean || true
-          sudo apt-get autoremove -y || true
-          
-          # Clean Docker if it's running
-          if command -v docker >/dev/null 2>&1; then
-            docker system prune -f || true
-          fi
-          
-          echo "✅ Local cleanup completed"
-
-      # ================================================================
-      # PHASE 7: SESSION COMPLETION & REPORTING
-      # ================================================================
-
-      - name: '📊 Generate Session Report'
-        if: always()
-        id: session_report
-        run: |
-          set -euo pipefail
-          echo "📊 Generating comprehensive session report..."
-          
-          # Calculate session metrics
-          SESSION_START="${{ steps.init.outputs.session_start_time || '1970-01-01T00:00:00Z' }}"
-          SESSION_END=$(date -Iseconds)
-          
-          if [[ "$SESSION_START" != "1970-01-01T00:00:00Z" ]]; then
-            ACTUAL_DURATION=$(( ($(date +%s) - $(date +%s -d "$SESSION_START")) / 60 ))
-          else
-            ACTUAL_DURATION="unknown"
-          fi
-          
-          # System information
-          FINAL_LOAD=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-          MEMORY_USAGE=$(free -h | grep Mem | awk '{print $3"/"$2}')
-          DISK_USAGE=$(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
-          
-          # Service status
-          SERVICES_STATUS=""
-          for service in docker ssh mariadb tailscaled; do
-            if systemctl is-active --quiet $service 2>/dev/null; then
-              SERVICES_STATUS="${SERVICES_STATUS}✅ $service "
-            else
-              SERVICES_STATUS="${SERVICES_STATUS}❌ $service "
-            fi
-          done
-          
-          # Generate report
-          cat <<EOF > /tmp/session_report.txt
-          ==========================================
-          🎯 PERSISTENT VPS SESSION REPORT
-          ==========================================
-          
-          📅 Session Information:
-            Session ID: ${{ github.run_id }}
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Trigger: ${{ github.event_name }}
-            Started: $SESSION_START
-            Ended: $SESSION_END
-            Planned Duration: ${{ steps.init.outputs.duration_minutes || 'unknown' }} minutes
-            Actual Duration: $ACTUAL_DURATION minutes
-            Stop Reason: ${{ steps.maintain_session.outputs.stop_reason || 'workflow_completion' }}
-          
-          🔄 Backup & Restoration:
-            Had Previous Backup: ${{ steps.detect_backups.outputs.has_backup || 'false' }}
-            Backup Source: ${{ steps.detect_backups.outputs.backup_source || 'none' }}
-            New Backup Created: ${{ steps.create_backup.outputs.backup_created || 'false' }}
-            Backup Size: ${{ steps.create_backup.outputs.backup_size || 'N/A' }}
-            Files Backed Up: ${{ steps.create_backup.outputs.file_count || 'N/A' }}
-          
-          🖥️ System Configuration:
-            Hostname: ${{ env.VPS_HOSTNAME }}
-            Username: ${{ env.VPS_USER }}
-            OS: Ubuntu 22.04 LTS
-            Kernel: $(uname -r)
-            Architecture: $(uname -m)
-          
-          🌐 Network Access:
-            Tailscale IP: ${tailscale_ip:-'Not configured'}
-            Emergency SSH: ${tmate_ssh:-'Not available'}
-            Web Terminal: ${tmate_web:-'Not available'}
-          
-          📊 Final System Status:
-            Load Average: $FINAL_LOAD
-            Memory Usage: $MEMORY_USAGE
-            Disk Usage: $DISK_USAGE
-            Services: $SERVICES_STATUS
-          
-          🛠️ Installed Components:
-            ✅ Core System Tools (curl, git, tar, etc.)
-            $(command -v docker >/dev/null && echo "✅ Docker Engine" || echo "❌ Docker Engine")
-            $(systemctl is-enabled mariadb >/dev/null 2>&1 && echo "✅ MariaDB Database" || echo "❌ MariaDB Database")
-            $(command -v bt >/dev/null && echo "✅ Aapanel Control Panel" || echo "❌ Aapanel Control Panel")
-            $(command -v tailscale >/dev/null && echo "✅ Tailscale VPN" || echo "❌ Tailscale VPN")
-            $(command -v tmate >/dev/null && echo "✅ tmate Remote Access" || echo "❌ tmate Remote Access")
-            $(command -v rclone >/dev/null && echo "✅ Rclone Cloud Storage" || echo "❌ Rclone Cloud Storage")
-          
-          💡 Next Session:
-            - Will automatically start in ~6 hours (if scheduled)
-            - Can be manually triggered from Actions tab
-            - Will restore from backup created in this session
-            - Use 'force_fresh_install' to start clean if needed
-          
-          ==========================================
-          EOF
-          
-          echo "report_generated=true" >> $GITHUB_OUTPUT
-
-      - name: '📋 Display Final Session Summary'
-        if: always()
-        run: |
-          set -euo pipefail
-          
-          if [[ -f "/tmp/session_report.txt" ]]; then
-            echo ""
-            cat /tmp/session_report.txt
-            echo ""
-          fi
-          
-          echo "=============================================="
-          echo "🏁 SESSION COMPLETED SUCCESSFULLY"
-          echo "=============================================="
-          echo ""
-          echo "✨ Key Achievements:"
-          echo "  • VPS environment maintained for ${{ steps.init.outputs.duration_minutes || 'planned' }} minutes"
-          echo "  • System state preserved through comprehensive backup"
-          echo "  • Remote access configured (Tailscale + tmate)"
-          echo "  • All critical services installed and running"
-          echo "  • Automatic restoration capability established"
-          echo ""
-          echo "🔄 Continuous Operation:"
-          echo "  • Next session will auto-start in ~6 hours"
-          echo "  • Previous state will be automatically restored"
-          echo "  • Manual triggers available via Actions tab"
-          echo ""
-          echo "📞 Support & Troubleshooting:"
-          echo "  • Check workflow logs for detailed information"
-          echo "  • Use 'force_fresh_install' if restoration fails"
-          echo "  • Ensure all required secrets are configured"
-          echo ""
-          echo "🎯 Status: ${{ job.status || 'COMPLETED' }}"
-          echo "🕐 End Time: $(date -Iseconds)"
-          echo "=============================================="
-
-      # ================================================================
-      # PHASE 8: ERROR HANDLING & NOTIFICATIONS
-      # ================================================================
-
-      - name: '🚨 Handle Workflow Failures'
-        if: failure()
-        run: |
-          set -euo pipefail
-          echo "🚨 WORKFLOW FAILURE DETECTED"
-          echo "=============================================="
-          echo ""
-          echo "❌ The VPS session encountered an error and could not complete successfully."
-          echo ""
-          echo "🔍 Common Issues & Solutions:"
-          echo ""
-          echo "1. Missing Secrets:"
-          echo "   • RCLONE_CONFIG: Required for backup storage"
-          echo "   • USER_PASSWORD: Required for VPS user account"
-          echo "   • TAILSCALE_AUTHKEY: Required for VPN access"
-          echo ""
-          echo "2. Backup/Restoration Issues:"
-          echo "   • Try running with 'force_fresh_install: true'"
-          echo "   • Check MEGA storage connectivity"
-          echo "   • Verify GitHub artifact retention"
-          echo ""
-          echo "3. Service Startup Problems:"
-          echo "   • Some services may fail on first install"
-          echo "   • Check individual service logs"
-          echo "   • Services often work after restoration"
-          echo ""
-          echo "4. Resource Limitations:"
-          echo "   • GitHub runners have limited resources"
-          echo "   • Large backups may cause timeouts"
-          echo "   • Consider reducing backup scope"
-          echo ""
-          echo "💡 Next Steps:"
-          echo "   • Review the workflow logs above"
-          echo "   • Check your GitHub Secrets configuration"
-          echo "   • Try manual trigger with fresh install"
-          echo "   • Wait for automatic retry in 6 hours"
-          echo ""
-          echo "=============================================="
-          
-          # Try to create a minimal backup even on failure
-          if [[ -d "/home" || -d "/etc" ]]; then
-            echo "🆘 Attempting emergency backup of critical data..."
-            sudo mkdir -p "${{ env.BACKUP_STORE }}" || true
-            sudo tar -czf "${{ env.BACKUP_STORE }}/emergency-backup.tar.gz" \
-              /home /etc /var/lib/mysql /var/lib/docker 2>/dev/null || true
-            echo "Emergency backup attempt completed (may be partial)"
-          fi
-
-      - name: '✅ Workflow Success Confirmation'
-        if: success()
-        run: |
-          echo "✅ PERSISTENT VPS WORKFLOW COMPLETED SUCCESSFULLY!"
-          echo ""
-          echo "🎉 All phases completed without errors:"
-          echo "  ✅ System initialization and tool installation"
-          echo "  ✅ Backup detection and restoration (if available)"
-          echo "  ✅ User account and service configuration"
-          echo "  ✅ Remote access setup (Tailscale + tmate)"
-          echo "  ✅ VPS session maintenance"
-          echo "  ✅ Comprehensive backup creation"
-          echo "  ✅ Cloud storage integration"
-          echo ""
-          echo "🔄 The persistent VPS system is now fully operational!"
-          echo "📅 Next automatic session: $(date -d '+6 hours' -Iseconds)"
