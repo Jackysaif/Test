@@ -29,7 +29,7 @@ jobs:
           echo "Installing essential tools: rclone, tmate, tailscale..."
           sudo apt-get update
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-pub.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources/list.d/tailscale.list
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources/list/d/tailscale.list
           sudo apt-get update
           sudo apt-get install -y tmate rclone tailscale wget curl tar gzip gh
           echo "✅ Dependencies installed."
@@ -40,7 +40,7 @@ jobs:
           sudo hostnamectl set-hostname Spidey
           sudo useradd -m -s /bin/bash jacky
           echo 'jacky:spidey' | sudo chpasswd
-          sudo usermod -aG sudo jacky
+          sudo usod -aG sudo jacky
           echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           echo "✅ User and hostname setup complete."
 
