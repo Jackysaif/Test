@@ -1,10 +1,9 @@
-I'll create a comprehensive GitHub Actions workflow for managing persistent VPS sessions. Here's the complete implementation:
+#I'll create a comprehensive GitHub Actions workflow for managing persistent VPS sessions. Here's the complete implementation:
 
 ## Main Workflow File
 
-**.github/workflows/persistent-vps.yml**
 
-```yaml
+
 name: Persistent VPS Session Manager
 
 on:
