@@ -39,7 +39,7 @@ jobs:
           echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf 2>/dev/null || echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
           echo "✅ MEGA connection established! 🕸️"
 
-      - name: 🔍 Spider-sense: Checking for existing backups
+      - name: 🔍 Spider-sense:Checking for existing backups
         id: backup_check
         run: |
           echo "🕷️ Spider-sense is tingling... checking for backups! 🕸️"
