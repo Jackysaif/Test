@@ -207,10 +207,10 @@ jobs:
           echo "=== Installing aaPanel ==="
           # Create expect script for aaPanel installation
           cat > /tmp/aapanel_install.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 300
-spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && bash install.sh aapanel"
-expect {
+          #!/usr/bin/expect -f
+           set timeout 300
+           spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install_6.0_en.sh && bash install.sh aapanel"
+           expect {
             "Do you want to install aaPanel to the" {
                 send "y\r"
                 exp_continue
@@ -224,8 +224,8 @@ expect {
                 exit 1
             }
             eof
-        }
-EOF
+            }
+          EOF
           
           chmod +x /tmp/aapanel_install.exp
           sudo /tmp/aapanel_install.exp || echo "aaPanel installation completed with warnings"
