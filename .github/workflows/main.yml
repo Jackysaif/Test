@@ -183,23 +183,23 @@ jobs:
           
           # Create expect script for automated installation
           cat > install_aapanel.exp << 'EXPECTEOF'
-#!/usr/bin/expect -f
-set timeout 300
-spawn sudo bash install.sh aapanel
-expect {
-    "Do you want to install aaPanel to the /www directory now?(y/n):" {
+        #!/usr/bin/expect -f
+        set timeout 300
+        spawn sudo bash install.sh aapanel
+        expect {
+        "Do you want to install aaPanel to the /www directory now?(y/n):" {
         send "y\r"
         exp_continue
-    }
-    "Please choose your SSL type:" {
+        }
+        "Please choose your SSL type:" {
         send "1\r"
         exp_continue
-    }
-    eof {
+        }
+        eof {
         exit 0
-    }
-}
-EXPECTEOF
+        }
+        }
+        EXPECTEOF
           
           chmod +x install_aapanel.exp
           ./install_aapanel.exp || echo "aaPanel installation completed with possible warnings"
@@ -233,47 +233,47 @@ EXPECTEOF
         
         # Create graceful shutdown monitor
         cat > shutdown_monitor.sh << 'SHUTDOWNEOF'
-#!/bin/bash
-echo "Starting shutdown monitor..."
-while true; do
-    if [ -f "/tmp/stop" ]; then
+        #!/bin/bash
+        echo "Starting shutdown monitor..."
+        while true; do
+        if [ -f "/tmp/stop" ]; then
         echo "Stop signal detected. Initiating graceful shutdown..."
         /home/jacky/scripts/create_backup.sh
         echo "Backup completed. Session will end."
         exit 0
-    fi
-    sleep 30
-done
-SHUTDOWNEOF
+        fi
+        sleep 30
+        done
+        SHUTDOWNEOF
         
         # Create backup script
         cat > create_backup.sh << 'BACKUPEOF'
-#!/bin/bash
-echo "Creating backup at $(date)"
-cd /home/jacky
-mkdir -p backup/{home,configs,data}
+        #!/bin/bash
+        echo "Creating backup at $(date)"
+        cd /home/jacky
+        mkdir -p backup/{home,configs,data}
 
-# Backup user data
-cp -r /home/jacky/{data,scripts,.*} backup/home/ 2>/dev/null || echo "Some home files skipped"
+        # Backup user data
+        cp -r /home/jacky/{data,scripts,.*} backup/home/ 2>/dev/null || echo "Some home files skipped"
 
-# Backup important system configs
-sudo cp -r /etc/{nginx,apache2,mysql,php,ssl} backup/configs/etc/ 2>/dev/null || echo "Some configs not found"
+        # Backup important system configs
+        sudo cp -r /etc/{nginx,apache2,mysql,php,ssl} backup/configs/etc/ 2>/dev/null || echo "Some configs not found"
 
-# Backup aaPanel data
-if [ -d "/www" ]; then
-    sudo cp -r /www/server/panel/data backup/aapanel_data/ 2>/dev/null || echo "aaPanel data backup skipped"
-fi
+        # Backup aaPanel data
+        if [ -d "/www" ]; then
+        sudo cp -r /www/server/panel/data backup/aapanel_data/ 2>/dev/null || echo "aaPanel data backup skipped"
+        fi
 
-# Save installed packages
-dpkg --get-selections | grep -v deinstall | awk '{print $1}' > backup/installed_packages.txt
+        # Save installed packages
+        dpkg --get-selections | grep -v deinstall | awk '{print $1}' > backup/installed_packages.txt
 
-# Save Tailscale state
-tailscale status > backup/tailscale_status.txt 2>/dev/null || echo "No Tailscale status"
-
-# Create compressed backup
-tar -czf vps-backup-latest.tar.gz backup/
-echo "Backup created: $(du -sh vps-backup-latest.tar.gz)"
-BACKUPEOF
+        # Save Tailscale state
+        tailscale status > backup/tailscale_status.txt 2>/dev/null || echo "No Tailscale status"
+ 
+        # Create compressed backup
+        tar -czf vps-backup-latest.tar.gz backup/
+        echo "Backup created: $(du -sh vps-backup-latest.tar.gz)"
+        BACKUPEOF
         
         chmod +x *.sh
         SCRIPTSEOF
