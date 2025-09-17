@@ -1,16 +1,12 @@
-# .github/workflows/persistent-vps.yml
+# .github/workflows/main.yml
 
 name: Persistent VPS with Backup & Restore
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-
-  # Runs the workflow automatically every 6 hours
   schedule:
     - cron: '0 */6 * * *'
 
-# Environment variables available to all jobs and steps
 env:
   BACKUP_FILE_NAME: vps-backup.tar.gz
   MEGA_REMOTE: mega:vps-backup # IMPORTANT: Change 'mega:vps-backup' to your actual rclone remote name
@@ -19,10 +15,7 @@ env:
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    # Total job timeout is 6 hours (360 minutes)
     timeout-minutes: 360
-
-    # Grant permissions for the GITHUB_TOKEN to read actions and download artifacts
     permissions:
       actions: read
       contents: read
@@ -35,9 +28,8 @@ jobs:
         run: |
           echo "Installing essential tools: rclone, tmate, tailscale..."
           sudo apt-get update
-          # Add Tailscale's repository
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.no-pub.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources/list.d/tailscale.list
           sudo apt-get update
           sudo apt-get install -y tmate rclone tailscale wget curl tar gzip gh
           echo "✅ Dependencies installed."
@@ -53,12 +45,13 @@ jobs:
           echo "✅ User and hostname setup complete."
 
       - name: 📦 Configure Rclone for MEGA
-        # This step only runs if the RCLONE_CONF_MEGA secret is provided
         if: ${{ secrets.RCLONE_CONF_MEGA != '' }}
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF_MEGA }}
         run: |
           echo "Configuring rclone for MEGA..."
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONF_MEGA }}" > ~/.config/rclone/rclone.conf
+          echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
           echo "✅ rclone configured."
 
       - name: 📥 Attempt to Restore Backup
@@ -69,7 +62,6 @@ jobs:
           echo "Attempting to restore backup..."
           echo "1. Trying GitHub Artifacts from the last successful run..."
           
-          # Use the GitHub CLI to find the last successful run and download its artifact
           LATEST_RUN_ID=$(gh run list --workflow "${{ github.workflow }}" --status success --json databaseId -q '.[0].databaseId' || echo "")
           
           if [ -n "$LATEST_RUN_ID" ]; then
@@ -109,6 +101,8 @@ jobs:
 
       - name: 🚀 Perform Fresh Setup (if no backup found)
         if: steps.restore.outputs.status == 'fresh_setup'
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           echo "🚀 Performing a clean, fresh setup..."
           echo "Installing aapanel..."
@@ -116,7 +110,6 @@ jobs:
           sudo bash install.sh aapanel <<< "y"
           
           echo "aapanel installed. Setting credentials to jacky/spidey..."
-          # Use a heredoc to pipe commands to the 'bt' utility
           sudo bt <<EOF
           5
           spidey
@@ -126,11 +119,13 @@ jobs:
           echo "✅ aapanel credentials set."
           
           echo "Initializing Tailscale for the first time..."
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=spidey-vps --accept-routes
+          sudo tailscale up --authkey=$TS_AUTHKEY --hostname=spidey-vps --accept-routes
           echo "✅ Tailscale is up."
 
       - name: 🌐 Re-initialize Services (if restored from backup)
         if: steps.restore.outputs.status == 'success'
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           echo "🔄 Re-initializing services from restored state..."
           sudo /etc/init.d/bt start
@@ -140,7 +135,7 @@ jobs:
             sudo tailscale up --accept-routes
           else
             echo "⚠️ No Tailscale state file found after restore. Initializing fresh."
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=spidey-vps --accept-routes
+            sudo tailscale up --authkey=$TS_AUTHKEY --hostname=spidey-vps --accept-routes
           fi
           echo "✅ Services re-initialized."
 
@@ -159,7 +154,6 @@ jobs:
           echo "Session is active. Will run for 5h 30m or until '/tmp/stop' is created."
           echo "The last 30 minutes are reserved for backup."
           
-          # Timeout is 5.5 hours = 19800 seconds
           end_time=$(( $(date +%s) + 19800 ))
           
           while [ $(date +%s) -lt $end_time ]; do
@@ -173,12 +167,10 @@ jobs:
           echo "Runtime finished. Proceeding to final backup."
 
       - name: 🗄️ Perform Final Backup
-        # This step always runs to ensure data is saved, even if the job is cancelled.
         if: always()
         id: create_backup
         run: |
           echo "Starting final backup process..."
-          # Define paths to back up. Add more if needed.
           BACKUP_PATHS=""
           [ -d /home/jacky ] && BACKUP_PATHS="$BACKUP_PATHS /home/jacky"
           [ -f /var/lib/tailscale/tailscaled.state ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/tailscale/tailscaled.state"
@@ -192,7 +184,6 @@ jobs:
           fi
           
           echo "Creating archive of essential data..."
-          # Use --ignore-failed-read for ephemeral files that might disappear during tar
           sudo tar --ignore-failed-read -czpf "${{ env.BACKUP_FILE_NAME }}" $BACKUP_PATHS
           
           echo "✅ Backup created: ${{ env.BACKUP_FILE_NAME }}"
@@ -209,7 +200,6 @@ jobs:
           if-no-files-found: warn
 
       - name: ☁️ Upload to MEGA (Fallback)
-        # Runs if the backup was created AND the primary artifact upload failed.
         if: always() && steps.create_backup.outputs.backup_created == 'true' && steps.upload_artifact.outcome == 'failure'
         run: |
           echo "⚠️ GitHub Artifact upload failed. Falling back to MEGA..."
