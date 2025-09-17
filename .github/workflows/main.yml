@@ -182,23 +182,48 @@ jobs:
           if [ "${{ needs.restore.outputs.restore-status }}" == "fresh" ] || [ ! -f "/www/server/panel/BT-Panel" ]; then
             echo "$(date): Installing aaPanel" >> /tmp/vps.log
             
-            # Download and install aaPanel
+            # Download aaPanel installation script
             wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-            echo "y" | sudo bash install.sh aapanel
             
-            # Wait for installation
-            sleep 30
+            # Make script executable
+            chmod +x install.sh
             
-            # Configure aaPanel
-            echo "y" | sudo /www/server/panel/tools.py panel ${{ secrets.USER_PASSWORD || 'spidey' }}
-            echo "y" | sudo bt 5
-            echo "Jacky" | sudo bt 6
-            echo "${{ secrets.USER_PASSWORD || 'spidey' }}" | sudo bt 5
+            # Install aaPanel with automated responses
+            export DEBIAN_FRONTEND=noninteractive
+            echo -e "y\nyes\n" | sudo bash install.sh aapanel
             
-            echo "$(date): aaPanel installed and configured" >> /tmp/vps.log
+            # Wait for installation to complete
+            sleep 60
+            
+            # Check if installation was successful
+            if [ -f "/www/server/panel/BT-Panel" ]; then
+              echo "$(date): aaPanel installed successfully" >> /tmp/vps.log
+              
+              # Start aaPanel service
+              sudo /etc/init.d/bt start
+              
+              # Configure aaPanel credentials
+              sleep 10
+              
+              # Set username and password
+              cd /www/server/panel
+              echo "Jacky" | sudo python3 tools.py panel Jacky
+              echo "${{ secrets.USER_PASSWORD || 'spidey' }}" | sudo python3 tools.py panel ${{ secrets.USER_PASSWORD || 'spidey' }}
+              
+              echo "$(date): aaPanel configured with username: Jacky" >> /tmp/vps.log
+            else
+              echo "$(date): aaPanel installation failed" >> /tmp/vps.log
+              
+              # Try alternative installation method
+              echo "$(date): Trying alternative aaPanel installation" >> /tmp/vps.log
+              wget -O install_panel.sh https://raw.githubusercontent.com/aaPanel/aaPanel/master/script/install_6.0_en.sh
+              chmod +x install_panel.sh
+              echo -e "y\ny\ny\n" | sudo bash install_panel.sh
+              sleep 30
+            fi
           else
             echo "$(date): aaPanel already installed" >> /tmp/vps.log
-            sudo systemctl start bt
+            sudo /etc/init.d/bt start
           fi
 
       - name: Install additional dependencies
@@ -227,7 +252,8 @@ jobs:
             sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
             sleep 5
           fi
-          sudo systemctl restart bt
+          
+          sudo /etc/init.d/bt start
           
           # Fix permissions
           sudo chown -R Jacky:Jacky /home/Jacky
@@ -289,7 +315,7 @@ jobs:
             sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
             sleep 5
           fi
-          sudo systemctl start bt
+          sudo /etc/init.d/bt start
           
           echo "$(date): All services started" >> /tmp/vps.log
           
@@ -304,9 +330,9 @@ jobs:
               sleep 5
             fi
             
-            if ! systemctl is-active --quiet bt; then
+            if ! pgrep bt > /dev/null; then
               echo "$(date): aaPanel service down, restarting" >> /tmp/vps.log
-              sudo systemctl restart bt
+              sudo /etc/init.d/bt start
             fi
           done
           
@@ -416,6 +442,7 @@ jobs:
           echo "$(date): Performing graceful shutdown" >> /tmp/vps.log
           
           # Stop services
+          sudo /etc/init.d/bt stop 2>/dev/null || true
           sudo pkill tailscaled 2>/dev/null || true
           
           # Create stop signal for any running processes
