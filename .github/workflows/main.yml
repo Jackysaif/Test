@@ -1,408 +1,172 @@
-name: VPS Persistent Session with Backup/Restore
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
+Task: Generate a single GitHub Actions workflow YAML file that implements a persistent VPS session with robust backup/restore logic and automated first-time provisioning. The workflow must be production-ready shell commands (bash), use only GitHub Actions built-in steps and public actions, and obey these exact requirements and secrets.
 
-# Secrets required:
-# TAILSCALE_AUTHKEY: Tailscale auth key for authentication
-# MEGA_RCLONE: Base64 encoded rclone config for MEGA remote
-# DB_ROOT_PASSWORD: Root password for MariaDB
+Top-level behavior and constraints
 
-jobs:
-  vps:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 390 # 6.5 hours to account for backup time + overhead
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+Single YAML file only. Name the job vps and use runs-on: ubuntu-22.04.
 
-    - name: Prepare environment and install dependencies
-      run: |
-        set -euo pipefail
-        
-        # Update package list and install required tools
-        sudo apt-get update
-        sudo apt-get install -y \
-          rclone \
-          jq \
-          tar \
-          gzip \
-          expect \
-          mariadb-server \
-          curl \
-          wget
-        
-        # Install Tailscale
-        curl -fsSL https://tailscale.com/install.sh | sh
-        
-        # Install tmate for debugging (optional)
-        sudo apt-get install -y tmate
-        
-        # Create rclone config directory and decode config
-        mkdir -p ~/.config/rclone
-        echo "${{ secrets.MEGA_RCLONE }}" | base64 -d > ~/.config/rclone/rclone.conf
-        chmod 600 ~/.config/rclone/rclone.conf
+Trigger: workflow_dispatch and a schedule that runs every 6 hours (cron).
 
-    - name: Attempt restore from GitHub artifact
-      id: restore-artifact
-      continue-on-error: true
-      run: |
-        set -euo pipefail
-        
-        echo "Attempting to restore from GitHub artifact..."
-        
-        # Download latest artifact using GitHub API
-        ARTIFACT_NAME="vps-backup"
-        ARTIFACTS_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts"
-        
-        # Get artifacts list and find the latest vps-backup artifact
-        ARTIFACT_ID=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
-          "$ARTIFACTS_URL" | \
-          jq -r ".artifacts | map(select(.name | startswith(\"$ARTIFACT_NAME\"))) | sort_by(.created_at) | last | .id")
-        
-        if [ "$ARTIFACT_ID" != "null" ] && [ -n "$ARTIFACT_ID" ]; then
-          echo "Found artifact ID: $ARTIFACT_ID"
-          
-          # Download artifact
-          curl -s -L -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "$ARTIFACTS_URL/$ARTIFACT_ID/zip" \
-            -o backup-artifact.zip
-          
-          # Extract artifact
-          unzip -q backup-artifact.zip
-          
-          if [ -f "vps-backup.tar.gz" ]; then
-            echo "Extracting backup archive..."
-            tar -xzf vps-backup.tar.gz -C /tmp/restore
-            
-            # Run restore script if exists
-            if [ -f "/tmp/restore/restore.sh" ]; then
-              chmod +x /tmp/restore/restore.sh
-              sudo /tmp/restore/restore.sh
-              echo "Artifact restore completed successfully"
-              echo "RESTORE_SUCCESS=true" >> $GITHUB_ENV
-            else
-              echo "No restore.sh found in backup, performing manual restore"
-              perform_manual_restore
-            fi
-          else
-            echo "Backup file not found in artifact"
-            exit 1
-          fi
-        else
-          echo "No backup artifacts found"
-          exit 1
-        fi
+Session run-time: a session should run for ~6 hours total. The backup step may take ~30 minutes inside that window. Use a job-level timeout-minutes long enough to cover 6 hours+overhead.
 
-    - name: Attempt restore from MEGA (if artifact restore failed)
-      id: restore-mega
-      if: steps.restore-artifact.outcome == 'failure'
-      continue-on-error: true
-      run: |
-        set -euo pipefail
-        
-        echo "Attempting to restore from MEGA backup..."
-        
-        # List and find latest backup on MEGA
-        LATEST_BACKUP=$(rclone lsf mega:vps-backups/ | grep "vps-backup-.*\.tar\.gz" | sort | tail -n1)
-        
-        if [ -n "$LATEST_BACKUP" ]; then
-          echo "Downloading latest backup: $LATEST_BACKUP"
-          rclone copy "mega:vps-backups/$LATEST_BACKUP" ./
-          
-          # Extract backup
-          tar -xzf "$LATEST_BACKUP" -C /tmp/restore
-          
-          # Run restore script if exists
-          if [ -f "/tmp/restore/restore.sh" ]; then
-            chmod +x /tmp/restore/restore.sh
-            sudo /tmp/restore/restore.sh
-            echo "MEGA restore completed successfully"
-            echo "RESTORE_SUCCESS=true" >> $GITHUB_ENV
-          else
-            echo "No restore.sh found in backup, performing manual restore"
-            perform_manual_restore
-          fi
-        else
-          echo "No backups found on MEGA"
-          exit 1
-        fi
+Use sudo for privileged work and ensure correct permissions on files created/restored.
 
-    - name: Fresh provision (if both restores failed)
-      if: steps.restore-artifact.outcome == 'failure' && steps.restore-mega.outcome == 'failure'
-      run: |
-        set -euo pipefail
-        
-        echo "Performing fresh provisioning..."
-        
-        # Create user jacky with password spidey
-        if ! id "jacky" &>/dev/null; then
-          sudo useradd -m -s /bin/bash jacky
-          echo "jacky:spidey" | sudo chpasswd
-          sudo usermod -aG sudo jacky
-          echo "Created user jacky"
-        fi
-        
-        # Set hostname
-        sudo hostnamectl set-hostname Spidey
-        
-        # Install aaPanel
-        echo "Installing aaPanel..."
-        INSTALL_SCRIPT="/tmp/install-aapanel.sh"
-        cat > $INSTALL_SCRIPT << 'EOF'
-        #!/usr/bin/expect -f
-        set timeout -1
-        spawn bash -c "wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh && sudo bash install.sh"
-        expect "Enter y to install panel.*"
-        send "y\r"
-        expect "force install.*"
-        send "yes\r"
-        expect eof
-        EOF
-        
-        chmod +x $INSTALL_SCRIPT
-        sudo expect $INSTALL_SCRIPT
-        
-        # Configure aaPanel credentials
-        sleep 10 # Wait for installation to complete
-        sudo bt 5 Jacky
-        sudo bt 6 spidey
-        
-        # Install and configure MariaDB
-        echo "Installing and configuring MariaDB..."
-        sudo apt-get install -y mariadb-server
-        
-        # Secure MariaDB installation and set root password
-        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
-        sudo mysql -e "FLUSH PRIVILEGES;"
-        
-        # Create test database
-        sudo mysql -u root -p"${{ secrets.DB_ROOT_PASSWORD }}" -e "CREATE DATABASE IF NOT EXISTS test;"
-        
-        # Start and enable MariaDB
-        sudo systemctl enable mariadb
-        sudo systemctl start mariadb
-        
-        # Install and configure Tailscale
-        echo "Setting up Tailscale..."
-        sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}"
-        
-        echo "Fresh provisioning completed successfully"
+Always install rclone before any rclone use.
 
-    - name: Start services after restore
-      if: steps.restore-artifact.outcome == 'success' || steps.restore-mega.outcome == 'success'
-      run: |
-        set -euo pipefail
-        
-        echo "Starting and verifying services..."
-        
-        # Start essential services
-        sudo systemctl start mariadb || true
-        sudo systemctl start tailscale || true
-        
-        # Try to start aaPanel if installed
-        if [ -f "/etc/init.d/bt" ]; then
-          sudo /etc/init.d/bt start || true
-        fi
-        
-        # Verify services are running
-        echo "Service status:"
-        sudo systemctl status mariadb --no-pager -l || true
-        sudo tailscale status || true
+Use GitHub secrets:
 
-    - name: Main session loop with graceful shutdown detection
-      run: |
-        set -euo pipefail
-        
-        # Function to perform backup
-        perform_backup() {
-          echo "Starting backup process..."
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          BACKUP_DIR="/tmp/backup-$TIMESTAMP"
-          BACKUP_FILE="vps-backup-$TIMESTAMP.tar.gz"
-          MANIFEST_FILE="$BACKUP_DIR/backup-manifest.txt"
-          
-          mkdir -p "$BACKUP_DIR"
-          
-          # Create backup manifest
-          cat > "$MANIFEST_FILE" << EOF
-         Backup created: $(date)
-         Included directories:
-        - /home
-        - /root 
-        - /etc
-        - /var/www
-        - /opt
-        - /var/lib/tailscale
-        - /var/lib/mysql
-        - aaPanel data directories
-        EOF
-          
-          # Create restore script
-          cat > "$BACKUP_DIR/restore.sh" << 'EOF'
-          #!/bin/bash
-          set -euo pipefail
+TAILSCALE_AUTHKEY — for Tailscale authkey
 
-          echo "Starting restore process..."
-          BACKUP_DIR=$(dirname "$0")
+MEGA_RCLONE — base64 or rclone config text for MEGA remote (the workflow must decode and write rclone config)
 
-        # Stop services for safe restore
-         sudo systemctl stop mariadb || true
-         if [ -f "/etc/init.d/bt" ]; then
-         sudo /etc/init.d/bt stop || true
-         fi
+DB_ROOT_PASSWORD — root password for MariaDB
 
-        # Restore directories with proper permissions
-         sudo tar -xzf "$BACKUP_DIR/backup-data.tar.gz" -C /
+(Any other secrets may be referenced as secrets.* if needed)
 
-        # Restore Tailscale state if available
-          if [ -d "/var/lib/tailscale" ]; then
-          sudo chown -R tailscale:tailscale /var/lib/tailscale
-          fi
 
-         # Restore MariaDB data with correct permissions
-         if [ -d "/var/lib/mysql" ]; then
-         sudo chown -R mysql:mysql /var/lib/mysql
-         fi
+Primary backup destination: create a GitHub artifact of the backup first. After artifact creation, attempt to upload (a copy) to MEGA using rclone and write the MEGA direct-link or public share URL into a text file mega-backup-link.txt. If artifact creation or retrieval fails, fall back to MEGA-only backup/restore.
 
-         # Restore home directories
-         sudo chown -R root:root /root
-         find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
+The workflow must implement the following fallback logic for restore at job start:
 
-         echo "Restore completed"
-          EOF
-          
-          chmod +x "$BACKUP_DIR/restore.sh"
-          
-          # Create data archive (excluding large temporary files)
-          sudo tar -czf "$BACKUP_DIR/backup-data.tar.gz" \
-            --exclude="*.tmp" \
-            --exclude="*.log" \
-            --exclude="cache/*" \
-            --exclude="tmp/*" \
-            /home \
-            /root \
-            /etc \
-            /var/www \
-            /opt \
-            /var/lib/tailscale \
-            /var/lib/mysql \
-            /www/server/panel/data 2>/dev/null || true
-          
-          # Create final backup archive
-          tar -czf "$BACKUP_FILE" -C "$BACKUP_DIR" .
-          
-          echo "Backup created: $BACKUP_FILE"
-        }
-        
-        # Main loop
-        echo "Starting main session loop (will run for ~6 hours)"
-        START_TIME=$(date +%s)
-        MAX_DURATION=21600 # 6 hours in seconds
-        
-        while true; do
-          CURRENT_TIME=$(date +%s)
-          ELAPSED=$((CURRENT_TIME - START_TIME))
-          
-          # Check if we should exit due to time or graceful shutdown
-          if [ $ELAPSED -ge $MAX_DURATION ]; then
-            echo "Time limit reached, performing final backup..."
-            perform_backup
-            break
-          fi
-          
-          if [ -f "/tmp/stop" ]; then
-            echo "Graceful shutdown requested, performing final backup..."
-            perform_backup
-            sudo rm -f /tmp/stop
-            break
-          fi
-          
-          # Normal operation - simulate some work
-          echo "VPS session active - $(date)"
-          sleep 300 # Check every 5 minutes
-        done
+1. Try to download the most recent GitHub artifact named vps-backup.tar.gz from the repository that triggered the workflow (or from the default workflow run artifacts) and restore from it if present.
 
-    - name: Upload backup to GitHub artifact
-      run: |
-        set -euo pipefail
-        
-        # Find the latest backup file
-        LATEST_BACKUP=$(ls -t vps-backup-*.tar.gz | head -n1)
-        
-        if [ -n "$LATEST_BACKUP" ]; then
-          echo "Uploading $LATEST_BACKUP as GitHub artifact"
-          
-          # Upload artifact
-          echo "BACKUP_FILE=$LATEST_BACKUP" >> $GITHUB_ENV
-        else
-          echo "No backup file found for artifact upload"
-          exit 1
-        fi
 
-    - name: Upload artifact to GitHub
-      uses: actions/upload-artifact@v4
-      with:
-        name: vps-backup
-        path: ${{ env.BACKUP_FILE }}
+2. If artifact not found or restore fails, try to download the latest MEGA backup using rclone (MEGA remote created from MEGA_RCLONE).
 
-    - name: Upload backup to MEGA and generate share link
-      run: |
-        set -euo pipefail
-        
-        if [ -n "${{ env.BACKUP_FILE }}" ]; then
-          echo "Uploading ${{ env.BACKUP_FILE }} to MEGA..."
-          
-          # Upload to MEGA
-          rclone copy "${{ env.BACKUP_FILE }}" mega:vps-backups/
-          
-          # Create public link (MEGA doesn't support direct public links via rclone easily)
-          # We'll use rclone link command which may require premium account
-          # Alternatively, we can just note the filename for manual retrieval
-          echo "https://mega.nz/folder/backups" > mega-backup-link.txt
-          echo "Backup uploaded to MEGA: ${{ env.BACKUP_FILE }}" >> mega-backup-link.txt
-          
-          # Also add link to artifact for documentation
-          cp mega-backup-link.txt ./
-        else
-          echo "No backup file available for MEGA upload"
-        fi
 
-        - name: Upload MEGA link as artifact
-          uses: actions/upload-artifact@v4
-          with:
-         name: mega-backup-info
-         path: mega-backup-link.txt
+3. If both fail or no backup found, perform a fresh install/provision.
 
-        # Helper function for manual restore (called from restore steps)
-          perform_manual_restore() {
-          echo "Performing manual restore from backup files..."
-  
-        # Stop services for safe restore
-          sudo systemctl stop mariadb || true
-          if [ -f "/etc/init.d/bt" ]; then
-          sudo /etc/init.d/bt stop || true
-          fi
-  
-        # Extract data archive
-          if [ -f "/tmp/restore/backup-data.tar.gz" ]; then
-          sudo tar -xzf "/tmp/restore/backup-data.tar.gz" -C /
-          fi
-  
-        # Restore permissions
-          if [ -d "/var/lib/tailscale" ]; then
-          sudo chown -R tailscale:tailscale /var/lib/tailscale
-          fi
-  
-          if [ -d "/var/lib/mysql" ]; then
-          sudo chown -R mysql:mysql /var/lib/mysql
-          fi
-  
-          sudo chown -R root:root /root
-          find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
-  
-          echo "Manual restore completed"
-          }
+
+
+Make backups not of the entire OS image. Back up only important persistent data and service state that is necessary to reproduce the VPS previous state: /home, /root, /etc (selected configs), /var/www, /opt, aaPanel data directory(s), Tailscale state (/var/lib/tailscale or equivalent), /var/lib/mysql (MariaDB data) — but do not back up the whole root filesystem. The workflow must build a tar.gz containing named directories and a small manifest backup-manifest.txt listing what was included.
+
+Provide a graceful shutdown trigger: if a file /tmp/stop is created on the remote machine (i.e. the runner executes touch /tmp/stop), the script must detect it and run a final backup and exit cleanly.
+
+Preserve the old public IP across sessions where possible: attempt to restore Tailscale state first (so Tailscale keeps the same IP/identity). If impossible, re-register Tailscale using TAILSCALE_AUTHKEY and back up the new state to MEGA immediately.
+
+After a restore completes, ensure all restored services (aaPanel, MariaDB, web services, etc.) are started.
+
+Create a sudo user jacky (if not exist) with password spidey and add to sudo group; create a super-user (if separate) per instruction — do everything with proper chown/chmod where needed.
+
+Set the system hostname to Spidey.
+
+Install aaPanel using the updated aaPanel v7.0 installer link (the workflow should fetch the latest official installer URL at runtime). Automate installer prompts:
+
+When the installer asks to enter y to install panel, send y.
+
+When the installer asks for force install, send yes.
+
+After install, set aaPanel credentials using its CLI: set username Jacky and password spidey (use aaPanel bt CLI or equivalent steps; run with sudo).
+
+
+Install MariaDB (directly, not via aaPanel). Configure root password to the value of DB_ROOT_PASSWORD. Create a test database named test. Ensure MariaDB server is running after restore or fresh install.
+
+Use tailscale (install it), and if a Tailscale state snapshot is restored, restore it first; otherwise start tailscale with sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} and then upload the saved state to MEGA.
+
+Keep the workflow file well-structured, logical, and easy to read. Keep comments that explain key blocks.
+
+Use actions/upload-artifact@v4 and actions/download-artifact@v4 (or latest) for artifact steps.
+
+Use rclone to upload/download to MEGA. The MEGA_RCLONE secret contains the rclone config (base64 or raw); decode/write it into ~/.config/rclone/rclone.conf prior to rclone use.
+
+Use tmate or an equivalent keepalive session to allow debugging the remote steps while the job runs (optional improvement you may include).
+
+
+Detailed step requirements (job steps)
+
+1. Checkout repo.
+
+
+2. Prepare environment:
+
+Install rclone, jq, tar, gzip, expect (for automating interactive installers), mariadb-server packages, tailscale (official install), and tmate (optional).
+
+Decode and write ~/.config/rclone/rclone.conf from MEGA_RCLONE secret.
+
+
+
+3. Attempt restore-from-artifact:
+
+Use actions/download-artifact or curl GitHub artifacts API to find the latest vps-backup.tar.gz.
+
+If found, extract to a temp location and run a restore.sh that:
+
+restores Tailscale state (copy files into correct locations with sudo, set ownership),
+
+restore aaPanel files and configs,
+
+restore MariaDB data files (stop mysql, copy files, chown to mysql:mysql, start mysql),
+
+restore service unit files and run systemctl daemon-reload and systemctl restart <services> for restored services.
+
+
+
+
+4. If artifact restore fails / not found, attempt restore-from-MEGA:
+
+Use rclone to list remote and get the latest backup file; download and extract; run same restore.sh.
+
+
+
+5. If both restores fail, run fresh provision:
+
+Create sudo user jacky with password spidey (securely set with chpasswd), add to sudo group.
+
+sudo hostnamectl set-hostname Spidey
+
+Install aaPanel using an automated expect script or yes + CLI to answer y and yes prompts. After install, configure aaPanel account using bt 5 Jacky and bt 6 spidey or the official aaPanel CLI command to set username/password.
+
+Install MariaDB, configure root password from DB_ROOT_PASSWORD, create database test.
+
+Install and start tailscale using TAILSCALE_AUTHKEY.
+
+
+
+6. During normal runtime, provide a backup step that:
+
+Collects the selected directories into vps-backup-<timestamp>.tar.gz and creates backup-manifest.txt.
+
+Uploads that file as a GitHub artifact using actions/upload-artifact.
+
+Then attempts to upload to MEGA using rclone copy to a folder like vps-backups/.
+
+After rclone upload, attempt to create/get a public share link or file link and write that URL into mega-backup-link.txt and to the artifact as well.
+
+
+
+7. Graceful shutdown detection:
+
+The runner process must periodically check for /tmp/stop. If found, run the final backup (same backup steps), then exit job cleanly.
+
+
+
+8. After any restore, start/restart services: aaPanel, mariadb, web servers, docker (if present), and tailscale. Verify service health and log status for each.
+
+
+9. Permissions & safety:
+
+Ensure files restored have correct ownership (e.g., mysql: mysql for MariaDB data).
+
+Use set -euo pipefail in shell blocks.
+
+
+
+
+Output requirements
+
+The YAML must be complete and copy/paste runnable (only requiring the secrets above to be set).
+
+Include helpful inline comments explaining each major section.
+
+Add a short top-of-file comment that lists the secrets required and their expected format.
+
+Keep the YAML limited to a single file; do not split across multiple files.
+
+
+Freedom for improvements
+
+You may add reasonable extra logic to improve reliability (e.g., retry loops for network commands, simple checksums to validate backups, short health checks after service restarts).
+
+Keep improvements sensible and documented within comments.
+
+
+Do not ask clarifying questions. Produce the final single YAML workflow file that implements the behavior above. Name artifact vps-backup.tar.gz (or vps-backup-<timestamp>.tar.gz but ensure download step can find the latest by pattern). Ensure all interactive installers are automated. End.
