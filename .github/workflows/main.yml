@@ -1,219 +1,422 @@
-name: Spidey Persistent VPS Orchestrator
-description: |
-  This workflow automates the creation of a persistent VPS environment named 'Spidey'.
-  It handles user setup, software installation, state persistence via GitHub/Mega backups,
-  and operates on a 6-hour lifecycle with graceful shutdown and restore capabilities.
+name: Persistent VPS Management
 
-# --- SCHEDULE & SESSION CONTROL ---
-# Runs every 6 hours, allowing 30 mins for backup. Session live for ~5h 30m.
 on:
   schedule:
-    - cron: '0 */6 * * *' # At minute 0 of every 6th hour
-  workflow_dispatch: # Allows manual triggering
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-next-session]
 
-# --- ENVIRONMENT VARIABLES ---
 env:
-  VPS_HOSTNAME: Spidey
-  SUDO_USER: Jacky
-  USER_PASSWORD: spidey
-  BT_USERNAME: Jacky
-  BT_PASSWORD: spidey
-  BACKUP_ARTIFACT_NAME: spidey-persistent-state
-  MEGA_CREDENTIALS: ${{ secrets.MEGA_CREDENTIALS }} # Format: email:password
-  META_FILE_URL: https://raw.githubusercontent.com/YourGitHubUser/YourRepo/main/mega_backup_url.txt
+  BACKUP_NAME: vps-backup-${{ github.run_number }}
+  SESSION_DURATION: 19800  # 5.5 hours in seconds
+  BACKUP_DURATION: 1800    # 30 minutes in seconds
 
-# --- THE MAIN WORKFLOW ---
 jobs:
-  orchestrate-session:
+  restore:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      restore-status: ${{ steps.restore-check.outputs.status }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # --- STEP 1: INITIALIZE & CHECK FOR STOP COMMAND ---
-    - name: Check for graceful shutdown signal from previous session
-      run: |
-        # This would use a GitHub API call or check a known location to see if the 'stop' signal was set.
-        # For a real implementation, you would need to implement this logic.
-        echo "Checking if a graceful shutdown was requested..."
-        # If a stop signal is found from the *previous* run, we skip this session.
-        # For now, we simulate no signal found and proceed.
-        echo "No signal found. Proceeding with new session."
+      - name: Setup environment
+        run: |
+          sudo mkdir -p /opt/vps-data
+          sudo chown $USER:$USER /opt/vps-data
+          echo "$(date): Starting restore process" >> /tmp/vps.log
 
-    # --- STEP 2: PROVISION FRESH VPS (SIMULATED HERE) ---
-    - name: Setup Base System
-      run: |
-        echo "🕷️ Provisioning a new VPS instance for $VPS_HOSTNAME..."
-        # In a real scenario, this would be API calls to AWS Lightsail, DigitalOcean, etc.
-        # We are simulating the environment of a fresh Ubuntu server.
+      - name: Download previous backup from artifacts
+        id: artifact-restore
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: /tmp/backup/
 
-    # --- STEP 3: RESTORE PREVIOUS STATE (PERSISTENCE) ---
-    - name: Restore Persistent State
-      run: |
-        echo "Attempting to restore the previous state..."
-
-        # METHOD 1: Try to download from GitHub Artifacts
-        echo "1. Checking GitHub Artifacts..."
-        # The 'download-artifact' action is used in a subsequent step.
-        # This script would handle the extraction and placement of files.
-        # This is a placeholder for the logic that runs after the artifact is downloaded.
-
-        # METHOD 2: If Artifact fails, check the META file for a direct Mega link
-        echo "2. GitHub Artifact not found. Checking MEGA backup via meta file..."
-        MEGA_BACKUP_URL=$(curl -s -f $META_FILE_URL || echo "")
-        if [ ! -z "$MEGA_BACKUP_URL" ]; then
-          echo "Mega URL found: $MEGA_BACKUP_URL"
-          # Install megatools if needed
-          # sudo apt-get install -y megatools
-          # megadl --path /tmp/backup.tar.gz "$MEGA_BACKUP_URL"
-          echo "Simulating download from Mega: $MEGA_BACKUP_URL"
-          touch /tmp/backup.tar.gz # Simulate a downloaded file
-        else
-          echo "No backup found. This is a fresh start or a catastrophic failure."
-          exit 0 # This is not an error; it's just a new start.
-        fi
-
-        # Extract the backup (if it was found and downloaded)
-        if [ -f "/tmp/backup.tar.gz" ]; then
-          echo "Extracting backup to restore user data, apps, and configs..."
-          # tar -xzf /tmp/backup.tar.gz -C / --keep-old-files --skip-old-files
-          echo "Backup extraction simulated."
-        fi
-      shell: bash
-
-    # --- ACTUAL DOWNLOAD OF GITHUB ARTIFACT (RUNS SEPARATELY) ---
-    - name: Download Artifact from GitHub
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ env.BACKUP_ARTIFACT_NAME }}
-        path: /tmp/
-      continue-on-error: true # This is crucial! If artifact doesn't exist, the job continues.
-
-    # --- STEP 4: SYSTEM CONFIGURATION ---
-    - name: Configure System and Users
-      run: |
-        echo "Setting hostname to $VPS_HOSTNAME..."
-        sudo hostnamectl set-hostname $VPS_HOSTNAME
-
-        echo "Creating primary user '$SUDO_USER'..."
-        # Create user, set password, and add to sudo group
-        sudo useradd -m -G sudo -s /bin/bash $SUDO_USER
-        echo "$SUDO_USER:$USER_PASSWORD" | sudo chpasswd
-        # Set the password to expire never (optional)
-        sudo chpasswd -e $SUDO_USER
-
-        # IMPORTANT: From this point, all commands should be run as the new user
-        # for user-specific configs, but for simplicity in this simulation, we continue as root.
-
-    # --- STEP 5: INSTALL & CONFIGURE AAPANEL ---
-    - name: Install aaPanel
-      run: |
-        echo "Installing aaPanel (Chinese version)..."
-        # The -y flag automates the "yes" response
-        wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh && sudo bash install.sh aapanel
-        # After installation, script usually outputs admin URL and password.
-
-        echo "Configuring aaPanel credentials..."
-        # This simulates using the 'bt' command to change the panel username and password.
-        # The actual commands might vary. This assumes the panel is running.
-        # sudo bt 5 <<< "$BT_USERNAME"
-        # sudo bt 6 <<< "$BT_PASSWORD"
-        echo "Panel username set to $BT_USERNAME"
-        echo "Panel password set to $BT_PASSWORD"
-
-    # --- STEP 6: INSTALL & CONFIGURE TAILSCALE ---
-    - name: Setup Tailscale
-      run: |
-        echo "Installing Tailscale..."
-        curl -fsSL https://tailscale.com/install.sh | sh
-        # You would need to authenticate. Using an auth key from secrets is best.
-        # sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname $VPS_HOSTNAME
-        echo "Tailscale installed. Auth key would be applied from secrets."
-
-    # --- STEP 7: APPLICATION LOGIC & RUNTIME ---
-    - name: Run Session Main Process
-      run: |
-        echo "✅ Session started successfully at $(date)"
-        echo "Hostname: $(hostname)"
-        echo "User: $SUDO_USER created."
-        echo "This session will now run for ~5.5 hours."
-
-        # SIMULATION: This is where your actual application would run.
-        # Instead of sleeping, you would run a server, scripts, etc.
-        # We use a loop that checks for the stop signal every minute.
-
-        duration=330 # 5.5 hours in minutes
-        for (( i=1; i<=duration; i++ )); do
-          # Check for the graceful shutdown command file
-          if [ -f "/tmp/stop" ]; then
-            echo "🛑 Graceful shutdown command received. Stopping session..."
-            break
+      - name: Fallback to Mega.nz download
+        id: mega-restore
+        if: steps.artifact-restore.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          if [ -f "mega.txt" ]; then
+            MEGA_URL=$(cat mega.txt)
+            echo "Downloading from Mega.nz: $MEGA_URL"
+            
+            # Install megacmd
+            wget https://mega.nz/linux/MEGAsync/xUbuntu_20.04/amd64/megacmd-xUbuntu_20.04_amd64.deb
+            sudo dpkg -i megacmd-xUbuntu_20.04_amd64.deb || sudo apt-get install -f -y
+            
+            # Download backup
+            mkdir -p /tmp/backup
+            mega-get "$MEGA_URL" /tmp/backup/
+            
+            if [ -f "/tmp/backup/vps-backup.tar.gz" ]; then
+              echo "backup-found=true" >> $GITHUB_OUTPUT
+            else
+              echo "backup-found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "mega.txt not found"
+            echo "backup-found=false" >> $GITHUB_OUTPUT
           fi
-          echo "Session alive... (minute $i/$duration)"
-          sleep 60 # Wait for 1 minute
-        done
 
-        echo "Session runtime complete."
+      - name: Extract and restore backup
+        id: restore-data
+        if: steps.artifact-restore.outcome == 'success' || steps.mega-restore.outputs.backup-found == 'true'
+        run: |
+          cd /tmp/backup
+          if [ -f "vps-backup.tar.gz" ]; then
+            echo "Extracting backup..."
+            sudo tar -xzf vps-backup.tar.gz -C /
+            echo "Backup restored successfully"
+            echo "status=restored" >> $GITHUB_OUTPUT
+          else
+            echo "No backup file found"
+            echo "status=fresh" >> $GITHUB_OUTPUT
+          fi
 
-    # --- STEP 8: GRACEFUL SHUTDOWN & BACKUP ---
-    - name: Prepare Backup and Shutdown
-      if: always() # Run this step even if a previous step fails
-      run: |
-        echo "Initiating shutdown sequence..."
+      - name: Set restore status
+        id: restore-check
+        run: |
+          if [ "${{ steps.restore-data.outputs.status }}" == "restored" ]; then
+            echo "status=restored" >> $GITHUB_OUTPUT
+          else
+            echo "status=fresh" >> $GITHUB_OUTPUT
+          fi
+          echo "$(date): Restore status: ${{ steps.restore-check.outputs.status }}" >> /tmp/vps.log
 
-        # Check if the stop command was the reason for shutdown
-        if [ -f "/tmp/stop" ]; then
-          echo "Final backup requested by user."
-          sudo rm /tmp/stop # Clean up the signal for the next session
-        fi
+  setup:
+    runs-on: ubuntu-latest
+    needs: restore
+    timeout-minutes: 45
+    steps:
+      - name: Setup system basics
+        run: |
+          echo "$(date): Starting system setup" >> /tmp/vps.log
+          
+          # Update system
+          sudo apt-get update
+          sudo apt-get upgrade -y
+          
+          # Set hostname
+          sudo hostnamectl set-hostname Spidey
+          echo "127.0.0.1 Spidey" | sudo tee -a /etc/hosts
 
-        echo "Creating backup of important data..."
-        # Create a tarball of only crucial directories, excluding the OS.
-        # e.g., user home directories, application configs, Tailscale state, aaPanel www data.
-        backup_dirs="/home/$SUDO_USER /etc/tailscale /www"
-        sudo tar -czf /tmp/backup.tar.gz $backup_dirs 2>/dev/null || echo "Some files were not found, continuing."
+      - name: Create user Jacky
+        run: |
+          # Create user if not exists
+          if ! id "Jacky" &>/dev/null; then
+            sudo useradd -m -s /bin/bash Jacky
+            echo "Jacky:${{ secrets.USER_PASSWORD || 'spidey' }}" | sudo chpasswd
+            sudo usermod -aG sudo Jacky
+            
+            # Configure sudo without password
+            echo "Jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+            
+            echo "$(date): User Jacky created" >> /tmp/vps.log
+          else
+            echo "$(date): User Jacky already exists" >> /tmp/vps.log
+          fi
 
-        echo "Backup archive created."
+      - name: Install and configure Tailscale
+        run: |
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Start Tailscale service
+          sudo systemctl enable tailscale
+          sudo systemctl start tailscale
+          
+          # Authenticate with Tailscale
+          if [ "${{ needs.restore.outputs.restore-status }}" == "restored" ] && [ -f "/var/lib/tailscale/tailscaled.state" ]; then
+            echo "$(date): Using restored Tailscale state" >> /tmp/vps.log
+            sudo systemctl restart tailscale
+          else
+            echo "$(date): Authenticating new Tailscale connection" >> /tmp/vps.log
+            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=Spidey
+          fi
+          
+          # Wait for connection
+          sleep 10
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "$(date): Tailscale IP: $TAILSCALE_IP" >> /tmp/vps.log
 
-    # --- STEP 9: UPLOAD BACKUP TO GITHUB ARTIFACTS ---
-    - name: Upload Backup to GitHub Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.BACKUP_ARTIFACT_NAME }}
-        path: /tmp/backup.tar.gz
-        if-no-files-found: ignore
-        retention-days: 1 # Keep only the most recent backup to save space
+      - name: Install aaPanel
+        run: |
+          if [ "${{ needs.restore.outputs.restore-status }}" == "fresh" ] || [ ! -f "/www/server/panel/BT-Panel" ]; then
+            echo "$(date): Installing aaPanel" >> /tmp/vps.log
+            
+            # Download and install aaPanel
+            wget -O install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+            echo "y" | sudo bash install.sh aapanel
+            
+            # Wait for installation
+            sleep 30
+            
+            # Configure aaPanel
+            echo "y" | sudo /www/server/panel/tools.py panel ${{ secrets.USER_PASSWORD || 'spidey' }}
+            echo "y" | sudo bt 5
+            echo "Jacky" | sudo bt 6
+            echo "${{ secrets.USER_PASSWORD || 'spidey' }}" | sudo bt 5
+            
+            echo "$(date): aaPanel installed and configured" >> /tmp/vps.log
+          else
+            echo "$(date): aaPanel already installed" >> /tmp/vps.log
+            sudo systemctl start bt
+          fi
 
-    # --- STEP 10: UPLOAD BACKUP TO MEGA (FALLBACK) ---
-    - name: Upload Backup to MEGA.nz
-      run: |
-        # Check if the backup file exists and is a valid size
-        if [ -f "/tmp/backup.tar.gz" ] && [ -s "/tmp/backup.tar.gz" ]; then
-          echo "Uploading backup to MEGA.nz as a fallback..."
-          # Install megatools: sudo apt-get install -y megatools
-          # Upload the file. The credentials come from the env variable set by the secret.
-          # mega-put /tmp/backup.tar.gz /Root/ --username $(echo $MEGA_CREDENTIALS | cut -d: -f1) --password $(echo $MEGA_CREDENTIALS | cut -d: -f2)
-          echo "Simulating MEGA upload..."
+      - name: Install additional dependencies
+        run: |
+          # Install common tools
+          sudo apt-get install -y htop curl wget git vim nano screen tmux
+          
+          # Install development tools
+          sudo apt-get install -y build-essential python3 python3-pip nodejs npm
+          
+          # Install backup tools
+          sudo apt-get install -y rsync tar gzip
+          
+          echo "$(date): Additional dependencies installed" >> /tmp/vps.log
 
-          # After upload, get the public link and overwrite the meta file in the repo.
-          SIMULATED_MEGA_URL="https://mega.nz/file/simulated-link#spidey-backup"
-          echo "$SIMULATED_MEGA_URL" > mega_backup_url.txt
+      - name: Restore application data
+        if: needs.restore.outputs.restore-status == 'restored'
+        run: |
+          echo "$(date): Restoring application data" >> /tmp/vps.log
+          
+          # Restart services
+          sudo systemctl restart tailscale
+          sudo systemctl restart bt
+          
+          # Fix permissions
+          sudo chown -R Jacky:Jacky /home/Jacky
+          
+          echo "$(date): Application data restored" >> /tmp/vps.log
 
-          # Use GitHub CLI to commit this URL back to the repository for the next session to find.
-          # gh repo clone YourRepo/YourRepo
-          # git config user.name "github-actions"
-          # git config user.email "github-actions@github.com"
-          # git add mega_backup_url.txt
-          # git commit -m "Update latest MEGA backup URL"
-          # git push
-          echo "Meta file updated with simulated URL: $SIMULATED_MEGA_URL"
-        else
-          echo "Backup file is missing or empty. Skipping MEGA upload."
-        fi
-      shell: bash
+  run:
+    runs-on: ubuntu-latest
+    needs: [restore, setup]
+    timeout-minutes: 360  # 6 hours maximum
+    steps:
+      - name: Start session monitoring
+        run: |
+          echo "$(date): Starting VPS session" >> /tmp/vps.log
+          echo "Session will run for ${{ env.SESSION_DURATION }} seconds" >> /tmp/vps.log
+          
+          # Create stop signal handler
+          cat << 'EOF' > /tmp/monitor.sh
+          #!/bin/bash
+          SESSION_START=$(date +%s)
+          SESSION_END=$((SESSION_START + ${{ env.SESSION_DURATION }}))
+          
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            
+            # Check for stop signal
+            if [ -f "/tmp/stop" ]; then
+              echo "$(date): Stop signal detected" >> /tmp/vps.log
+              break
+            fi
+            
+            # Check session timeout
+            if [ $CURRENT_TIME -ge $SESSION_END ]; then
+              echo "$(date): Session timeout reached" >> /tmp/vps.log
+              touch /tmp/stop
+              break
+            fi
+            
+            # Log status every 30 minutes
+            if [ $((CURRENT_TIME % 1800)) -eq 0 ]; then
+              REMAINING=$((SESSION_END - CURRENT_TIME))
+              echo "$(date): Session running. Time remaining: $((REMAINING / 60)) minutes" >> /tmp/vps.log
+            fi
+            
+            sleep 60
+          done
+          EOF
+          
+          chmod +x /tmp/monitor.sh
 
-    # --- STEP 11: TERMINATE VPS (SIMULATED) ---
-    - name: Terminate VPS Instance
-      run: |
-        echo "Shutdown complete. Terminating VPS instance..."
-        # In a real scenario, this would be an API call to your cloud provider
-        # to destroy this current server. The backup is already safe.
-        echo "VPS termination simulated. Goodbye!"
+      - name: Run VPS services
+        run: |
+          # Start monitoring in background
+          /tmp/monitor.sh &
+          MONITOR_PID=$!
+          
+          # Start main services
+          sudo systemctl start tailscale
+          sudo systemctl start bt
+          
+          echo "$(date): All services started" >> /tmp/vps.log
+          
+          # Keep session alive
+          while [ ! -f "/tmp/stop" ]; do
+            sleep 10
+            
+            # Health checks
+            if ! systemctl is-active --quiet tailscale; then
+              echo "$(date): Tailscale service down, restarting" >> /tmp/vps.log
+              sudo systemctl restart tailscale
+            fi
+            
+            if ! systemctl is-active --quiet bt; then
+              echo "$(date): aaPanel service down, restarting" >> /tmp/vps.log
+              sudo systemctl restart bt
+            fi
+          done
+          
+          echo "$(date): Session ending" >> /tmp/vps.log
+          kill $MONITOR_PID 2>/dev/null || true
+
+  backup:
+    runs-on: ubuntu-latest
+    needs: [restore, setup, run]
+    if: always()
+    timeout-minutes: 30
+    steps:
+      - name: Create backup
+        run: |
+          echo "$(date): Starting backup process" >> /tmp/vps.log
+          
+          mkdir -p /tmp/backup-staging
+          
+          # Backup user data
+          sudo tar -czf /tmp/backup-staging/home-jacky.tar.gz -C /home Jacky/ 2>/dev/null || true
+          
+          # Backup Tailscale state
+          if [ -d "/var/lib/tailscale" ]; then
+            sudo tar -czf /tmp/backup-staging/tailscale-state.tar.gz -C /var/lib tailscale/ 2>/dev/null || true
+          fi
+          
+          # Backup aaPanel configuration
+          if [ -d "/www/server/panel" ]; then
+            sudo tar -czf /tmp/backup-staging/aapanel-config.tar.gz -C /www/server panel/config/ 2>/dev/null || true
+          fi
+          
+          # Backup databases
+          if [ -d "/www/server/data" ]; then
+            sudo tar -czf /tmp/backup-staging/databases.tar.gz -C /www/server data/ 2>/dev/null || true
+          fi
+          
+          # Backup custom scripts and configurations
+          sudo tar -czf /tmp/backup-staging/etc-configs.tar.gz -C /etc hostname hosts sudoers.d/ 2>/dev/null || true
+          
+          # Create final backup archive
+          cd /tmp/backup-staging
+          tar -czf /tmp/vps-backup.tar.gz *.tar.gz
+          
+          echo "$(date): Backup created successfully" >> /tmp/vps.log
+
+      - name: Upload backup to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup-${{ github.run_number }}
+          path: /tmp/vps-backup.tar.gz
+          retention-days: 30
+
+      - name: Upload backup to Mega.nz
+        continue-on-error: true
+        run: |
+          if [ -n "${{ secrets.MEGA_EMAIL }}" ] && [ -n "${{ secrets.MEGA_PASSWORD }}" ]; then
+            # Install megacmd
+            wget https://mega.nz/linux/MEGAsync/xUbuntu_20.04/amd64/megacmd-xUbuntu_20.04_amd64.deb
+            sudo dpkg -i megacmd-xUbuntu_20.04_amd64.deb || sudo apt-get install -f -y
+            
+            # Login to Mega
+            mega-login ${{ secrets.MEGA_EMAIL }} ${{ secrets.MEGA_PASSWORD }}
+            
+            # Upload backup
+            mega-put /tmp/vps-backup.tar.gz /vps-backups/
+            
+            # Get public link
+            MEGA_LINK=$(mega-export /vps-backups/vps-backup.tar.gz | grep "Exported:" | awk '{print $2}')
+            echo $MEGA_LINK > mega.txt
+            
+            echo "$(date): Backup uploaded to Mega.nz: $MEGA_LINK" >> /tmp/vps.log
+            mega-logout
+          fi
+
+      - name: Cleanup old artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: artifacts } = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            const vpsBackups = artifacts.artifacts
+              .filter(artifact => artifact.name.startsWith('vps-backup-'))
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            
+            // Keep only the latest 5 backups
+            const toDelete = vpsBackups.slice(5);
+            
+            for (const artifact of toDelete) {
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+              console.log(`Deleted old backup: ${artifact.name}`);
+            }
+
+  shutdown:
+    runs-on: ubuntu-latest
+    needs: [restore, setup, run, backup]
+    if: always()
+    steps:
+      - name: Graceful shutdown
+        run: |
+          echo "$(date): Performing graceful shutdown" >> /tmp/vps.log
+          
+          # Stop services
+          sudo systemctl stop bt 2>/dev/null || true
+          sudo systemctl stop tailscale 2>/dev/null || true
+          
+          # Create stop signal for any running processes
+          touch /tmp/stop
+          
+          echo "$(date): Shutdown completed" >> /tmp/vps.log
+
+      - name: Schedule next session
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'trigger-next-session'
+            });
+
+      - name: Send notification on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `VPS Session Failed - Run #${context.runNumber}`,
+              body: `
+                The VPS session has failed.
+                
+                **Run Details:**
+                - Run Number: ${context.runNumber}
+                - Triggered: ${context.eventName}
+                - Failed At: ${new Date().toISOString()}
+                
+                Please check the workflow logs for more details.
+              `,
+              labels: ['vps-failure', 'automated']
+            });
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-logs-${{ github.run_number }}
+          path: /tmp/vps.log
+          retention-days: 7
