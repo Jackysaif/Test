@@ -124,25 +124,58 @@ jobs:
       - name: Install and configure Tailscale
         run: |
           # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
           
-          # Start Tailscale service
-          sudo systemctl enable tailscale
-          sudo systemctl start tailscale
+          # Wait for installation to complete
+          sleep 5
           
-          # Authenticate with Tailscale
-          if [ "${{ needs.restore.outputs.restore-status }}" == "restored" ] && [ -f "/var/lib/tailscale/tailscaled.state" ]; then
-            echo "$(date): Using restored Tailscale state" >> /tmp/vps.log
-            sudo systemctl restart tailscale
-          else
-            echo "$(date): Authenticating new Tailscale connection" >> /tmp/vps.log
-            sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=Spidey
+          # Check if tailscale binary exists
+          if ! command -v tailscale &> /dev/null; then
+            echo "$(date): Tailscale installation failed" >> /tmp/vps.log
+            exit 1
           fi
           
-          # Wait for connection
+          # Start tailscaled daemon
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          TAILSCALED_PID=$!
+          
+          # Wait for daemon to start
           sleep 10
-          TAILSCALE_IP=$(tailscale ip -4)
-          echo "$(date): Tailscale IP: $TAILSCALE_IP" >> /tmp/vps.log
+          
+          # Check if we have restored state
+          if [ "${{ needs.restore.outputs.restore-status }}" == "restored" ] && [ -f "/var/lib/tailscale/tailscaled.state" ]; then
+            echo "$(date): Using restored Tailscale state" >> /tmp/vps.log
+            # Kill current daemon and restart with restored state
+            sudo kill $TAILSCALED_PID 2>/dev/null || true
+            sleep 2
+            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+            sleep 10
+          else
+            echo "$(date): Authenticating new Tailscale connection" >> /tmp/vps.log
+            # Authenticate with authkey
+            if [ -n "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+              sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=Spidey --accept-routes
+            else
+              echo "$(date): TAILSCALE_AUTHKEY not set, skipping authentication" >> /tmp/vps.log
+              exit 1
+            fi
+          fi
+          
+          # Wait for connection and get IP
+          sleep 15
+          for i in {1..12}; do
+            TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "")
+            if [ -n "$TAILSCALE_IP" ]; then
+              echo "$(date): Tailscale IP: $TAILSCALE_IP" >> /tmp/vps.log
+              break
+            fi
+            echo "$(date): Waiting for Tailscale connection... attempt $i" >> /tmp/vps.log
+            sleep 5
+          done
+          
+          if [ -z "$TAILSCALE_IP" ]; then
+            echo "$(date): Failed to get Tailscale IP" >> /tmp/vps.log
+          fi
 
       - name: Install aaPanel
         run: |
@@ -187,7 +220,13 @@ jobs:
           echo "$(date): Restoring application data" >> /tmp/vps.log
           
           # Restart services
-          sudo systemctl restart tailscale
+          if pgrep tailscaled > /dev/null; then
+            echo "$(date): Restarting Tailscale daemon" >> /tmp/vps.log
+            sudo pkill tailscaled
+            sleep 2
+            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+            sleep 5
+          fi
           sudo systemctl restart bt
           
           # Fix permissions
@@ -246,7 +285,10 @@ jobs:
           MONITOR_PID=$!
           
           # Start main services
-          sudo systemctl start tailscale
+          if ! pgrep tailscaled > /dev/null; then
+            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+            sleep 5
+          fi
           sudo systemctl start bt
           
           echo "$(date): All services started" >> /tmp/vps.log
@@ -256,9 +298,10 @@ jobs:
             sleep 10
             
             # Health checks
-            if ! systemctl is-active --quiet tailscale; then
-              echo "$(date): Tailscale service down, restarting" >> /tmp/vps.log
-              sudo systemctl restart tailscale
+            if ! pgrep tailscaled > /dev/null; then
+              echo "$(date): Tailscale daemon down, restarting" >> /tmp/vps.log
+              sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+              sleep 5
             fi
             
             if ! systemctl is-active --quiet bt; then
@@ -373,8 +416,7 @@ jobs:
           echo "$(date): Performing graceful shutdown" >> /tmp/vps.log
           
           # Stop services
-          sudo systemctl stop bt 2>/dev/null || true
-          sudo systemctl stop tailscale 2>/dev/null || true
+          sudo pkill tailscaled 2>/dev/null || true
           
           # Create stop signal for any running processes
           touch /tmp/stop
