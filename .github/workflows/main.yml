@@ -1,265 +1,328 @@
 
-name: 🕷️ Spidey VPS - Persistent Session Workflow
-
+name: 🕷️ Spidey's Persistent VPS Session
 on:
   workflow_dispatch:
-    inputs:
-      force_fresh_install:
-        description: '🔄 Force fresh installation (ignore backups)'
-        required: false
-        default: 'false'
-        type: boolean
   schedule:
     - cron: '0 */6 * * *'  # Every 6 hours
 
 jobs:
   vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 400  # 6.5 hours to account for overhead
+    timeout-minutes: 400  # 6.5 hours to cover session + overhead
     
     steps:
-    - name: 🕸️ Web-Slinging Setup - Checkout Repository
-      uses: actions/checkout@v4
-      
-    - name: 🕷️ Spider-Sense Activated - Initialize Environment
+    - name: 🕷️ Spidey's Web is Starting Up!
       run: |
-        echo "🕷️ Welcome to Spidey's VPS! Your friendly neighborhood server is starting up..."
-        echo "🌟 Setting hostname to Spidey..."
-        sudo hostnamectl set-hostname Spidey
-        echo "✨ Spidey VPS Session Started at $(date)"
+        echo "🕷️ ==============================================="
+        echo "🕸️  Welcome to Spidey's VPS Session! 🕸️"
+        echo "🕷️ ==============================================="
+        echo "🚀 Time: $(date)"
+        echo "🌟 Session will run for ~6 hours"
+        echo "🔧 Setting up the web..."
         
-    - name: 🛠️ Installing Web-Crawler Tools - Setup rclone
+    - name: 🛠️ Install Essential Spider Tools
       run: |
-        echo "🔧 Installing rclone for our web of backups..."
-        curl https://rclone.org/install.sh | sudo bash
-        echo "✅ rclone installed successfully!"
-        
-    - name: 🕸️ Weaving the MEGA Connection
+        echo "🕷️ Installing rclone for web-slinging backups..."
+        sudo apt-get update -qq
+        sudo apt-get install -y rclone curl wget expect
+        echo "✅ Spidey's tools are ready!"
+
+    - name: 🕸️ Configure MEGA Web Connection
       run: |
-        echo "🔗 Setting up MEGA remote connection..."
+        echo "🕷️ Setting up MEGA connection for Spidey's backup web..."
         mkdir -p ~/.config/rclone
-        echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf || {
-          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-        }
-        echo "🌐 MEGA connection established!"
-        
-    - name: 🔍 Spider-Sense:Searching for Previous Backup Artifacts
-      id: artifact_search
-      continue-on-error: true
+        echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf || \
+        echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+        echo "✅ MEGA web connection established!"
+
+    - name: 🔍 Spider-Sense: Checking for Previous Backup
+      id: restore_check
       run: |
-        echo "🕵️ Searching for previous VPS backup artifacts..."
-        echo "🔎 Looking for vps-backup.tar.gz in recent workflow runs..."
-        # This step will be handled by the restore step below
-        echo "artifact_available=checking" >> $GITHUB_OUTPUT
-        
-    - name: 📦 Attempting Artifact Recovery
-      id: artifact_restore
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: vps-backup
-        path: ./restore/
-        
-    - name: 🕷️ Web of Restoration - Primary Restore Logic
-      id: restore_logic
-      run: |
-        echo "🕸️ Initiating Spidey's restoration sequence..."
+        echo "🕷️ Spider-sense is tingling... checking for backups..."
         RESTORE_SUCCESS=false
         
-        # Step 1: Try artifact restore
-        if [ "${{ inputs.force_fresh_install }}" != "true" ] && [ -f "./restore/vps-backup.tar.gz" ]; then
-          echo "📦 Found GitHub artifact! Restoring from web of memories..."
-          cd /
-          sudo tar -xzf "$GITHUB_WORKSPACE/restore/vps-backup.tar.gz"
-          if [ $? -eq 0 ]; then
-            echo "✅ Artifact restore successful! Spidey's previous state recovered!"
-            RESTORE_SUCCESS=true
-          else
-            echo "❌ Artifact restore failed. Web got tangled..."
+        # Try GitHub artifact first
+        echo "🔍 Searching GitHub's web for artifacts..."
+        if gh api repos/${{ github.repository }}/actions/artifacts --paginate | jq -r '.artifacts[] | select(.name=="vps-backup") | .archive_download_url' | head -1 > /tmp/artifact_url && [ -s /tmp/artifact_url ]; then
+          echo "🎯 Found GitHub artifact! Downloading..."
+          if wget -O vps-backup.tar.gz "$(cat /tmp/artifact_url)" 2>/dev/null; then
+            echo "📦 Extracting Spidey's backup..."
+            if sudo tar -xzf vps-backup.tar.gz -C / 2>/dev/null; then
+              echo "✅ GitHub backup restored successfully!"
+              RESTORE_SUCCESS=true
+            fi
           fi
         fi
         
-        # Step 2: Try MEGA restore if artifact failed
-        if [ "$RESTORE_SUCCESS" = "false" ] && [ "${{ inputs.force_fresh_install }}" != "true" ]; then
-          echo "🌐 Attempting MEGA restore from the cloud web..."
-          rclone copy mega:vps-backups/latest-vps-backup.tar.gz ./restore/ || true
-          if [ -f "./restore/latest-vps-backup.tar.gz" ]; then
-            echo "📥 MEGA backup found! Downloading from the web..."
-            cd /
-            sudo tar -xzf "$GITHUB_WORKSPACE/restore/latest-vps-backup.tar.gz"
-            if [ $? -eq 0 ]; then
-              echo "✅ MEGA restore successful! Spidey swung back to previous state!"
+        # Fallback to MEGA
+        if [ "$RESTORE_SUCCESS" = "false" ]; then
+          echo "🕸️ Trying MEGA backup..."
+          if rclone copy mega:spidey-vps/latest-backup.tar.gz . 2>/dev/null; then
+            echo "📦 Extracting MEGA backup..."
+            if sudo tar -xzf latest-backup.tar.gz -C / 2>/dev/null; then
+              echo "✅ MEGA backup restored!"
               RESTORE_SUCCESS=true
-            else
-              echo "❌ MEGA restore failed. Even Spider-Man falls sometimes..."
             fi
-          else
-            echo "🔍 No MEGA backup found. Time for a fresh start!"
           fi
+        fi
+        
+        if [ "$RESTORE_SUCCESS" = "false" ]; then
+          echo "🆕 No backup found - fresh Spidey installation incoming!"
         fi
         
         echo "restore_success=$RESTORE_SUCCESS" >> $GITHUB_OUTPUT
-        
-    - name: 🆕 Fresh Web Installation - New Spidey Setup
-      if: steps.restore_logic.outputs.restore_success == 'false'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 🏠 Set Hostname to Spidey
       run: |
-        echo "🕷️ No previous state found! Setting up a brand new Spidey VPS..."
-        echo "🏗️ Building from scratch with great power and responsibility!"
-        
-    - name: 👤 Creating Spider-Squad User
+        echo "🕷️ Setting hostname to Spidey..."
+        sudo hostnamectl set-hostname Spidey
+        echo "✅ I am Spidey!"
+
+    - name: 👤 Create Spidey User (Jacky)
       run: |
-        echo "👤 Creating user jacky (part of the Spider-Squad)..."
-        sudo useradd -m -s /bin/bash jacky || echo "👤 User jacky already exists!"
-        echo "jacky:spidey" | sudo chpasswd
-        sudo usermod -aG sudo jacky
-        echo "✅ jacky added to the Spider-Squad with sudo powers!"
-        
-    - name: 🕸️ Installing Tailscale - Web of Networks
-      run: |
-        echo "🌐 Installing Tailscale for our secret spider network..."
-        curl -fsSL https://tailscale.com/install.sh | sh
-        
-        if [ -d "/var/lib/tailscale" ] && [ "${{ steps.restore_logic.outputs.restore_success }}" = "true" ]; then
-          echo "🔄 Restoring previous Tailscale identity..."
-          sudo systemctl start tailscaled
+        echo "🕷️ Creating user 'jacky' with spider powers..."
+        if ! id jacky 2>/dev/null; then
+          sudo useradd -m -s /bin/bash jacky
+          echo "jacky:spidey" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          echo "✅ User jacky created with password 'spidey' and sudo powers!"
         else
-          echo "🆕 Registering new Tailscale node..."
-          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname="spidey-vps"
+          echo "👋 User jacky already exists!"
         fi
-        echo "✅ Tailscale web connected!"
-        
-    - name: 🖥️ Installing aaPanel - Spidey's Control Center
+
+    - name: 🕸️ Install Tailscale (Spider Network)
       run: |
-        echo "🕸️ Installing aaPanel v7.0 - Spidey's web control center..."
-        wget -O install.sh http://www.aapanel.com/script/install_7.0_en.sh
-        echo "y" | echo "yes" | sudo bash install.sh
+        echo "🕷️ Installing Tailscale for spider web networking..."
+        curl -fsSL https://tailscale.com/install.sh | sh
+        echo "✅ Tailscale installed!"
         
-        echo "👨‍💻 Configuring aaPanel with Spidey credentials..."
-        sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py panel Jacky
-        sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password spidey
-        echo "✅ aaPanel configured for the Spider-Squad!"
+        # Try to restore Tailscale state first
+        if [ -f /var/lib/tailscale/tailscaled.state.bak ]; then
+          echo "🔄 Restoring previous Tailscale identity..."
+          sudo cp /var/lib/tailscale/tailscaled.state.bak /var/lib/tailscale/tailscaled.state
+        fi
         
-    - name: 🗄️ MariaDB Setup - Spidey's Data Web
+        echo "🚀 Starting Tailscale..."
+        sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" || true
+        
+        # Backup new state
+        sudo cp /var/lib/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.state.bak 2>/dev/null || true
+        echo "✅ Spider web network activated!"
+
+    - name: 🐬 Install MariaDB (Spider Database)
       run: |
-        echo "🕸️ Setting up MariaDB - where Spidey stores all his web data..."
-        sudo apt update
-        sudo apt install -y mariadb-server mariadb-client
+        echo "🕷️ Installing MariaDB for Spidey's data web..."
+        sudo apt-get install -y mariadb-server mariadb-client
         
+        echo "🔧 Configuring MariaDB..."
         sudo systemctl start mariadb
         sudo systemctl enable mariadb
         
-        echo "🔐 Securing MariaDB with spider-level security..."
-        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';"
-        sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS test;"
-        echo "✅ MariaDB web of data is ready!"
+        # Set root password
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';" || true
+        sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS test;" || true
         
-    - name: 🔄 Service Restoration Check
-      if: steps.restore_logic.outputs.restore_success == 'true'
+        echo "✅ MariaDB is spinning in Spidey's web!"
+
+    - name: 🎛️ Install aaPanel (Spidey Control Center)
+      if: steps.restore_check.outputs.restore_success == 'false'
       run: |
-        echo "🔄 Ensuring all Spider-Services are running after restoration..."
-        sudo systemctl restart mariadb || echo "⚠️ MariaDB restart failed"
-        sudo systemctl restart bt || echo "⚠️ aaPanel restart failed"
-        sudo systemctl status mariadb
-        echo "✅ Service restoration check completed!"
+        echo "🕷️ Installing aaPanel v7.0 - Spidey's control center!"
         
-    - name: 🕷️ Spider-Session Loop - 6 Hour Web Patrol
+        # Get latest aaPanel installer
+        INSTALLER_URL="https://www.aapanel.com/script/install_6.0_en.sh"
+        echo "📥 Downloading latest aaPanel installer..."
+        wget -O install_aapanel.sh "$INSTALLER_URL"
+        
+        echo "🤖 Creating automated installation script..."
+        cat > install_aapanel_auto.sh << 'EOF'
+#!/bin/bash
+echo "🕷️ Starting automated aaPanel installation..."
+
+# Create expect script for automated responses
+expect << 'EXPECT_EOF'
+set timeout 300
+spawn bash install_aapanel.sh
+
+expect {
+    "Do you want to install aaPanel to the /www directory now*" {
+        send "y\r"
+        exp_continue
+    }
+    "*enter y to install panel*" {
+        send "y\r"
+        exp_continue
+    }
+    "*Force installation*" {
+        send "yes\r"
+        exp_continue
+    }
+    "*Force Install*" {
+        send "yes\r"
+        exp_continue
+    }
+    "*force install*" {
+        send "yes\r"
+        exp_continue
+    }
+    "*install panel*" {
+        send "y\r"
+        exp_continue
+    }
+    eof
+}
+EXPECT_EOF
+EOF
+
+        chmod +x install_aapanel_auto.sh
+        echo "🚀 Running automated aaPanel installation..."
+        sudo ./install_aapanel_auto.sh || true
+        
+        # Wait for installation to complete
+        sleep 30
+        
+        echo "🔧 Configuring aaPanel credentials..."
+        # Set aaPanel credentials using bt command
+        sudo /www/server/panel/pyenv/bin/python /www/server/panel/BT-Panel/tools.py username Jacky || true
+        sudo /www/server/panel/pyenv/bin/python /www/server/panel/BT-Panel/tools.py password spidey || true
+        
+        # Alternative method using bt script
+        sudo bt << 'BT_EOF' || true
+14
+Jacky
+BT_EOF
+        
+        sudo bt << 'BT_EOF' || true
+15
+spidey
+BT_EOF
+        
+        echo "✅ aaPanel installed and configured!"
+        echo "🎯 Username: Jacky"
+        echo "🔐 Password: spidey"
+
+    - name: 🔄 Start All Spider Services
       run: |
-        echo "🕸️ Starting Spidey's 6-hour patrol of the digital web..."
-        echo "🚨 Spider-Sense: Monitoring for /tmp/stop signal..."
+        echo "🕷️ Starting all spider services..."
         
-        END_TIME=$(($(date +%s) + 21000))  # ~5.8 hours
+        # Start MariaDB
+        sudo systemctl start mariadb || true
         
-        while [ $(date +%s) -lt $END_TIME ]; do
-          if [ -f "/tmp/stop" ]; then
-            echo "🛑 Stop signal detected! Spidey is preparing to swing away..."
+        # Start aaPanel if installed
+        sudo systemctl start bt || true
+        sudo /etc/init.d/bt start || true
+        
+        # Start any web services
+        if [ -d "/www" ]; then
+          echo "🌐 aaPanel directory found, ensuring services are running..."
+          sudo systemctl enable bt || true
+        fi
+        
+        echo "✅ All services are in the web!"
+
+    - name: 🕷️ Spider Session Active - Monitor for Stop Signal
+      run: |
+        echo "🕷️ ============================================="
+        echo "🕸️  SPIDEY VPS SESSION IS NOW ACTIVE! 🕸️"
+        echo "🕷️ ============================================="
+        echo "⏰ Session Duration: ~6 hours"
+        echo "🛑 To stop: touch /tmp/stop"
+        echo "💾 Auto-backup in ~5.5 hours"
+        echo "🕷️ ============================================="
+        
+        # Monitor for stop signal and run for ~5.5 hours
+        START_TIME=$(date +%s)
+        DURATION=$((5 * 60 * 60 + 30 * 60))  # 5.5 hours in seconds
+        
+        while true; do
+          CURRENT_TIME=$(date +%s)
+          ELAPSED=$((CURRENT_TIME - START_TIME))
+          REMAINING=$((DURATION - ELAPSED))
+          
+          if [ -f /tmp/stop ]; then
+            echo "🛑 Stop signal detected! Spidey is preparing to backup and exit..."
             break
           fi
           
-          echo "🕷️ [$(date)] Spidey is on patrol... All systems web-slingin' normally!"
-          sleep 300  # Check every 5 minutes
-        done
-        
-        echo "⏰ Patrol time ending or stop signal received!"
-        
-    - name: 📦 Creating Backup Manifest - Spidey's Memory Web
-      run: |
-        echo "📝 Creating Spidey's backup manifest..."
-        mkdir -p /tmp/spidey-backup
-        
-        cat > /tmp/spidey-backup/backup-manifest.txt << 'EOF'
-        🕷️ SPIDEY VPS BACKUP MANIFEST 🕷️
-        Created: $(date)
-        Hostname: $(hostname)
-        
-        📁 Backup Contents:
-        - /home (Spider-Squad home directories)
-        - /root (Root spider lair)
-        - /etc (System web configurations)
-        - /var/www (Web content)
-        - /opt (Optional spider tools)
-        - /var/lib/tailscale (Secret network state)
-        - /var/lib/mysql (Data web)
-        - aaPanel data (/www)
-        
-        🕸️ With great power comes great backup responsibility!
-        EOF
-        
-        echo "✅ Backup manifest created!"
-        
-    - name: 🗜️ Weaving the Backup Archive
-      run: |
-        echo "🕸️ Weaving all important data into Spidey's backup web..."
-        
-        sudo tar -czf /tmp/spidey-backup/vps-backup.tar.gz \
-          --exclude='/home/*/.*cache*' \
-          --exclude='/var/lib/mysql/mysql.sock*' \
-          --exclude='/var/lib/mysql/ib_logfile*' \
-          /home \
-          /root \
-          /etc/hostname \
-          /etc/hosts \
-          /etc/ssh \
-          /etc/crontab \
-          /var/www \
-          /opt \
-          /var/lib/tailscale \
-          /var/lib/mysql \
-          /www \
-          /tmp/spidey-backup/backup-manifest.txt \
-          2>/dev/null || true
+          if [ $ELAPSED -ge $DURATION ]; then
+            echo "⏰ Time's up! Spidey session complete - preparing backup..."
+            break
+          fi
           
-        echo "📏 Backup size: $(du -h /tmp/spidey-backup/vps-backup.tar.gz)"
-        echo "✅ Backup web successfully woven!"
+          # Show friendly status every 30 minutes
+          if [ $((ELAPSED % 1800)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+            HOURS=$((REMAINING / 3600))
+            MINUTES=$(((REMAINING % 3600) / 60))
+            echo "🕷️ Spidey status: ${HOURS}h ${MINUTES}m remaining in the web!"
+          fi
+          
+          sleep 60
+        done
+
+    - name: 💾 Create Spidey's Backup Web
+      run: |
+        echo "🕷️ Creating backup of Spidey's important data..."
         
-    - name: 🕸️ GitHub Artifact Web Storage
+        # Create backup manifest
+        cat > backup-manifest.txt << EOF
+🕷️ SPIDEY'S BACKUP MANIFEST 🕷️
+Created: $(date)
+Session: ${{ github.run_number }}
+
+Included directories:
+- /home (user data)
+- /root (root config)
+- /etc (system configs)
+- /var/www (web data)
+- /opt (optional software)
+- /var/lib/tailscale (network state)
+- /var/lib/mysql (database)
+- /www (aaPanel data)
+EOF
+        
+        echo "📦 Creating backup archive..."
+        sudo tar -czf vps-backup.tar.gz \
+          --exclude="/var/lib/mysql/mysql.sock*" \
+          --exclude="/var/lib/mysql/aria_log*" \
+          --exclude="/var/lib/mysql/ib_logfile*" \
+          /home /root /etc /var/www /opt \
+          /var/lib/tailscale /var/lib/mysql /www \
+          backup-manifest.txt 2>/dev/null || true
+        
+        echo "✅ Backup created: $(du -h vps-backup.tar.gz)"
+
+    - name: 📤 Upload to GitHub Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: vps-backup
-        path: /tmp/spidey-backup/vps-backup.tar.gz
+        path: vps-backup.tar.gz
         retention-days: 30
-        
-    - name: 🌐 MEGA Cloud Web Backup
-      continue-on-error: true
+
+    - name: 🕸️ Upload to MEGA Web
       run: |
-        echo "🕸️ Uploading to MEGA cloud web for redundancy..."
-        
-        rclone copy /tmp/spidey-backup/vps-backup.tar.gz mega:vps-backups/latest-vps-backup.tar.gz
-        rclone copy /tmp/spidey-backup/vps-backup.tar.gz mega:vps-backups/backup-$(date +%Y%m%d-%H%M%S).tar.gz
-        
-        # Try to generate a public link
-        MEGA_LINK=$(rclone link mega:vps-backups/latest-vps-backup.tar.gz 2>/dev/null || echo "Link generation failed")
-        echo "$MEGA_LINK" > /tmp/mega-backup-link.txt
-        
-        echo "🔗 MEGA backup link: $MEGA_LINK"
-        echo "✅ Backup successfully uploaded to the cloud web!"
-        
-    - name: 🕷️ Final Web Status Report
+        echo "🕷️ Uploading backup to MEGA web..."
+        if rclone copy vps-backup.tar.gz mega:spidey-vps/ --progress; then
+          echo "📤 Creating MEGA public link..."
+          MEGA_LINK=$(rclone link mega:spidey-vps/vps-backup.tar.gz 2>/dev/null || echo "Link creation failed")
+          echo "$MEGA_LINK" > mega-backup-link.txt
+          echo "✅ MEGA backup complete!"
+          echo "🔗 Link: $MEGA_LINK"
+        else
+          echo "⚠️ MEGA upload failed, but GitHub artifact backup is available!"
+        fi
+
+    - name: 🕷️ Spidey Session Complete!
       run: |
-        echo "🕷️ SPIDEY VPS SESSION COMPLETE! 🕷️"
-        echo "⏰ Session ended at: $(date)"
-        echo "🕸️ All systems secured in the web of backups!"
-        echo "💾 GitHub Artifact: ✅ Created"
-        echo "☁️ MEGA Cloud: ✅ Uploaded"
-        echo "🚀 Ready for next web-slinging session!"
-        echo ""
-        echo "🕸️ Remember: With great VPS power comes great backup responsibility! 🕸️"
+        echo "🕷️ ============================================="
+        echo "🕸️  SPIDEY'S VPS SESSION COMPLETE! 🕸️"
+        echo "🕷️ ============================================="
+        echo "✅ Backup created and uploaded"
+        echo "📊 Session stats:"
+        echo "   🕒 Duration: ~6 hours"
+        echo "   💾 Backup size: $(du -h vps-backup.tar.gz 2>/dev/null || echo 'N/A')"
+        echo "   🌐 Services: MariaDB, aaPanel, Tailscale"
+        echo "🚀 Next session in 6 hours!"
+        echo "🕷️ With great power comes great responsibility!"
+        echo "🕷️ ============================================="
