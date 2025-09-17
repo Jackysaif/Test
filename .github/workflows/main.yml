@@ -240,7 +240,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: ${{ $(cat /tmp/backup_file_path.txt) }}
+          path: ${{ (cat /tmp/backup_file_path.txt) }}
           retention-days: 7  # Short retention to avoid accumulation
         # Note: No run block, but imagine: echo "🚀 Uploading to GitHub... Skurd attaching!"
 
