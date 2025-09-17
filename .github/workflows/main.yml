@@ -138,16 +138,16 @@ jobs:
         
         echo "🤖 Creating automated installation script..."
         cat > install_aapanel_auto.sh << 'EOF'
-#!/bin/bash
-echo "🕷️ Starting automated aaPanel installation..."
+        #!/bin/bash
+        echo "🕷️ Starting automated aaPanel installation..."
 
-# Create expect script for automated responses
-expect << 'EXPECT_EOF'
-set timeout 300
-spawn bash install_aapanel.sh
+        # Create expect script for automated responses
+        expect << 'EXPECT_EOF'
+        set timeout 300
+        spawn bash install_aapanel.sh
 
-expect {
-    "Do you want to install aaPanel to the /www directory now*" {
+        expect {
+        "Do you want to install aaPanel to the /www directory now*" {
         send "y\r"
         exp_continue
     }
