@@ -371,38 +371,38 @@ jobs:
           echo "No backup file available for MEGA upload"
         fi
 
-    - name: Upload MEGA link as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: mega-backup-info
-        path: mega-backup-link.txt
+        - name: Upload MEGA link as artifact
+          uses: actions/upload-artifact@v4
+          with:
+         name: mega-backup-info
+         path: mega-backup-link.txt
 
-# Helper function for manual restore (called from restore steps)
-perform_manual_restore() {
-  echo "Performing manual restore from backup files..."
+        # Helper function for manual restore (called from restore steps)
+          perform_manual_restore() {
+          echo "Performing manual restore from backup files..."
   
-  # Stop services for safe restore
-  sudo systemctl stop mariadb || true
-  if [ -f "/etc/init.d/bt" ]; then
-    sudo /etc/init.d/bt stop || true
-  fi
+        # Stop services for safe restore
+          sudo systemctl stop mariadb || true
+          if [ -f "/etc/init.d/bt" ]; then
+          sudo /etc/init.d/bt stop || true
+          fi
   
-  # Extract data archive
-  if [ -f "/tmp/restore/backup-data.tar.gz" ]; then
-    sudo tar -xzf "/tmp/restore/backup-data.tar.gz" -C /
-  fi
+        # Extract data archive
+          if [ -f "/tmp/restore/backup-data.tar.gz" ]; then
+          sudo tar -xzf "/tmp/restore/backup-data.tar.gz" -C /
+          fi
   
-  # Restore permissions
-  if [ -d "/var/lib/tailscale" ]; then
-    sudo chown -R tailscale:tailscale /var/lib/tailscale
-  fi
+        # Restore permissions
+          if [ -d "/var/lib/tailscale" ]; then
+          sudo chown -R tailscale:tailscale /var/lib/tailscale
+          fi
   
-  if [ -d "/var/lib/mysql" ]; then
-    sudo chown -R mysql:mysql /var/lib/mysql
-  fi
+          if [ -d "/var/lib/mysql" ]; then
+          sudo chown -R mysql:mysql /var/lib/mysql
+          fi
   
-  sudo chown -R root:root /root
-  find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
+          sudo chown -R root:root /root
+          find /home -exec sudo chown --reference=/etc/passwd {} \; 2>/dev/null || true
   
-  echo "Manual restore completed"
-}
+          echo "Manual restore completed"
+          }
