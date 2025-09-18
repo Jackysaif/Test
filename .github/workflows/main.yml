@@ -144,26 +144,31 @@ jobs:
         fi
         
         # Create secure configuration directory
-        sudo mkdir -p ~/.config/rclone
-        sudo chmod 700 ~/.config/rclone
+        mkdir -p ~/.config/rclone
+        sudo mkdir -p /root/.config/rclone
+        chmod 700 ~/.config/rclone
+        sudo chmod 700 /root/.config/rclone
         
         # Deploy Galvan Prime credentials with fallback detection
         echo "🔐 Decoding Galvan Prime credentials..."
-        if echo "${{ secrets.RCLONE_CONFIG }}" | sudo base64 -d &>/dev/null; then
+        if echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d &>/dev/null; then
           # Base64 encoded configuration
-          echo "${{ secrets.RCLONE_CONFIG }}" | sudo base64 -d > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d | sudo tee /root/.config/rclone/rclone.conf > /dev/null
           echo "✅ Base64 encoded credentials decoded successfully!"
         else
           # Plain text configuration  
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | sudo tee /root/.config/rclone/rclone.conf > /dev/null
           echo "✅ Plain text credentials configured successfully!"
         fi
         
-        sudo chmod 600 ~/.config/rclone/rclone.conf
+        chmod 600 ~/.config/rclone/rclone.conf
+        sudo chmod 600 /root/.config/rclone/rclone.conf
         
         # Test Galvan Prime connectivity
         echo "🧪 Testing Galvan Prime connectivity..."
-        if rclone lsd mega: &>/dev/null; then
+        if sudo rclone lsd mega: &>/dev/null || rclone lsd mega: &>/dev/null; then
           echo "✅ Galvan Prime cloud connection established! 🌌"
         else
           echo "⚠️ Galvan Prime connectivity test failed, but proceeding..."
@@ -184,8 +189,8 @@ jobs:
         
         # Priority 1: Scan Galvan Prime vault for backup links
         echo "🛸 Scanning Galvan Prime vault for data cores..."
-        if rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" &>/dev/null; then
-            BACKUP_LINK=$(rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || echo "")
+        if sudo rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" &>/dev/null || rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" &>/dev/null; then
+            BACKUP_LINK=$(sudo rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || echo "")
             if [[ -n "$BACKUP_LINK" ]]; then
               echo "✅ TEMPORAL DATA CORE LINK FOUND IN GALVAN PRIME! 🌌"
               echo "🔗 Link: ${BACKUP_LINK:0:50}..."
@@ -249,7 +254,8 @@ jobs:
         # Priority 3: Direct Galvan Prime backup scan
         if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
           echo "🛸 Performing direct Galvan Prime backup scan..."
-          LATEST_BACKUP=$(rclone lsf "${GALVAN_CLOUD}/" | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1 2>/dev/null || echo "")
+          LATEST_BACKUP=$(sudo rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1 2>/dev/null || \
+                         rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1 2>/dev/null || echo "")
           
           if [[ -n "$LATEST_BACKUP" ]]; then
             echo "✅ DIRECT GALVAN BACKUP FOUND! 🌌"  
@@ -295,7 +301,7 @@ jobs:
             
             # Download with retry mechanism
             for attempt in {1..3}; do
-              if curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              if sudo curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                      "${{ steps.data_core_scan.outputs.artifact_url }}" \
                      -o "data_core.zip"; then
                 echo "✅ Download successful on attempt $attempt!"
@@ -308,10 +314,10 @@ jobs:
             
             # Extract and verify
             echo "📦 Extracting temporal data core..."
-            sudo unzip -q data_core.zip 2>/dev/null || unzip data_core.zip
+            sudo unzip -q data_core.zip 2>/dev/null || sudo unzip data_core.zip
             
             # Find the actual backup file
-            BACKUP_FILE=$(find . -name "*.tar.gz" -type f | head -1)
+            BACKUP_FILE=$(sudo find . -name "*.tar.gz" -type f | head -1)
             if [[ -z "$BACKUP_FILE" ]]; then
               echo "❌ No backup file found in extracted data!"
               ls -la
@@ -324,7 +330,7 @@ jobs:
             BACKUP_FILE="${{ steps.data_core_scan.outputs.backup_file }}"
             
             for attempt in {1..3}; do
-              if rclone copy "${GALVAN_CLOUD}/${BACKUP_FILE}" .; then
+              if sudo rclone copy "${GALVAN_CLOUD}/${BACKUP_FILE}" . || rclone copy "${GALVAN_CLOUD}/${BACKUP_FILE}" .; then
                 echo "✅ Direct download successful on attempt $attempt!"
                 break
               else
@@ -338,10 +344,10 @@ jobs:
         # Validate data core integrity
         echo "🧪 Validating temporal data core integrity..."
         if [[ -f "$BACKUP_FILE" ]]; then
-          CORE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+          CORE_SIZE=$(sudo du -h "$BACKUP_FILE" | cut -f1)
           echo "📋 Data Core Size: $CORE_SIZE"
           
-          if tar -tzf "$BACKUP_FILE" &>/dev/null; then
+          if sudo tar -tzf "$BACKUP_FILE" &>/dev/null; then
             echo "✅ Data core integrity verified! 🛡️"
           else
             echo "❌ Data core corruption detected!"
@@ -361,9 +367,9 @@ jobs:
         
         # Extract data core
         echo "📂 Extracting temporal data core..."
-        tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null || {
+        sudo tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null || {
           echo "⚠️ Standard extraction failed, trying alternative method..."
-          tar -xf "$BACKUP_FILE" -C "$STAGING_AREA"
+          sudo tar -xf "$BACKUP_FILE" -C "$STAGING_AREA"
         }
         
         # Execute restoration protocols with error handling
@@ -483,7 +489,7 @@ jobs:
         
         # Set hero credentials
         echo "🔑 Configuring hero authentication..."
-        echo "Jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd || {
+        echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd || {
           echo "❌ Password configuration failed!"
           exit 1
         }
@@ -559,17 +565,17 @@ jobs:
             # Create automated installation script
             echo "🤖 Creating automated installation protocol..."
             cat > /tmp/auto_install_aapanel.exp << 'EOF'
-            #!/usr/bin/expect -f
-            set timeout 600
-            spawn bash /tmp/aapanel_install.sh
-            expect {
-            "*Do you want to install*" { send "y\r"; exp_continue }
-            "*install now*" { send "y\r"; exp_continue }
-            "*force install*" { send "yes\r"; exp_continue }
-             "*confirm*" { send "y\r"; exp_continue }
-                eof
-              }
-          EOF
+#!/usr/bin/expect -f
+set timeout 600
+spawn bash /tmp/aapanel_install.sh
+expect {
+    "*Do you want to install*" { send "y\r"; exp_continue }
+    "*install now*" { send "y\r"; exp_continue }
+    "*force install*" { send "yes\r"; exp_continue }
+    "*confirm*" { send "y\r"; exp_continue }
+    eof
+}
+EOF
             chmod +x /tmp/auto_install_aapanel.exp
             
             # Execute installation with timeout protection
@@ -1001,7 +1007,7 @@ jobs:
             }
             
             # Cleanup
-            sudo rm -rf "$QUICK_BACKUP_DIR" "/tmp/omnitrix-quick-$TIMESTAMP.tar.gz"
+            sudo rm -rf "$QUICK_BACKUP_DIR" "omnitrix-quick-$TIMESTAMP.tar.gz"
             
             LAST_BACKUP=$CURRENT_TIME
             echo "✅ Periodic backup complete!"
@@ -1214,8 +1220,8 @@ jobs:
         🌌 UNIVERSE CONTINUITY: 100% data preservation
         👽 ALIEN FORCE: Maximum efficiency protocols
 
-          It's Hero Time! 💥
-         EOF
+        It's Hero Time! 💥
+        EOF
         
         # Create temporal data core
         echo "🔬 Compressing universe into temporal data core..."
