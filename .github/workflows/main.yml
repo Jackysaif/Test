@@ -196,22 +196,7 @@ jobs:
           fi
           echo "✅ Aapanel ready! This is Panel!"
 
-      - name: '🗄️ Configure MariaDB 🔑'
-        if: steps.check_backup.outputs.has_backup == 'false'
-        run: |
-          set -euo pipefail
-          echo "🗄️ Configuring MariaDB for fresh install... Building the temple!"
-          if [[ -z "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
-            echo "❌ ERROR: DB_ROOT_PASSWORD secret missing!" >&2
-            exit 1
-          fi
-          DB_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
-          sudo mysql -u root <<EOF
-          ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASS';
-          FLUSH PRIVILEGES;
-          EOF || { echo "🛑 Password set failed!"; exit 1; }
-          mysql -u root -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS test;" || { echo "📊 Database create failed!"; exit 1; }
-          echo "✅ MariaDB configured. Oracle speaks!"
+      
 
       - name: '🚀 Start All Services 🔄'
         run: |
