@@ -237,7 +237,7 @@ jobs:
             # Immediate backup of new state to MEGA
             sudo tar czf /tmp/tailscale-state.tar.gz /var/lib/tailscale || { echo "📦 State tar failed!"; exit 1; }
             rclone copy /tmp/tailscale-state.tar.gz "${{ env.MEGA_REMOTE }}/" || { echo "☁️ State upload failed!"; exit 1; }
-            rm /tmp/tailscale-state.tar.gz
+            sudo rm /tmp/tailscale-state.tar.gz
           fi
           echo "💬 Starting tmate for emergency SSH access... Scout's link!"
           tmate -S /tmp/tmate.sock new-session -d
@@ -264,7 +264,7 @@ jobs:
           while [ $SECONDS -lt $end_time ]; do
             if [ -f "/tmp/stop" ]; then
               echo "✅ Graceful shutdown requested. Honorable retreat!"
-              rm -f "/tmp/stop"
+              sudo rm -f "/tmp/stop"
               break
             fi
             if [ $((SECONDS % 600)) -eq 0 ]; then
