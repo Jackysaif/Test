@@ -565,17 +565,17 @@ jobs:
             # Create automated installation script
             echo "🤖 Creating automated installation protocol..."
             cat > /tmp/auto_install_aapanel.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 600
-spawn bash /tmp/aapanel_install.sh
-expect {
-    "*Do you want to install*" { send "y\r"; exp_continue }
-    "*install now*" { send "y\r"; exp_continue }
-    "*force install*" { send "yes\r"; exp_continue }
-    "*confirm*" { send "y\r"; exp_continue }
-    eof
-}
-EOF
+            #!/usr/bin/expect -f
+            set timeout 600
+            spawn bash /tmp/aapanel_install.sh
+            expect {
+            "*Do you want to install*" { send "y\r"; exp_continue }
+            "*install now*" { send "y\r"; exp_continue }
+            "*force install*" { send "yes\r"; exp_continue }
+            "*confirm*" { send "y\r"; exp_continue }
+            eof
+            }
+            EOF
             chmod +x /tmp/auto_install_aapanel.exp
             
             # Execute installation with timeout protection
