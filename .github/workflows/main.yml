@@ -2,24 +2,6 @@
 # ═══════════════════════════════════════════════════════════════════
 #                    🔋 POWERED BY ALIEN TECHNOLOGY 🔋
 # ═══════════════════════════════════════════════════════════════════
-# 
-# 🌟 REQUIRED PLUMBER SECRETS:
-# ┣━ 🔗 TAILSCALE_AUTHKEY: Plumber communication network key
-# ┣━ ☁️ RCLONE_CONFIG: Galvan Prime cloud storage configuration  
-# ┣━ 🔐 USER_PASSWORD: Hero access credentials
-# ┗━ 🗄️ DB_ROOT_PASSWORD: Database vault master key (optional)
-#
-# 🎯 ALIEN POWERS ACTIVATED:
-# ┣━ 🛸 6-hour persistent universe session
-# ┣━ ⚡ Lightning-fast selective data backup/restore
-# ┣━ 🔄 Multi-dimensional fallback systems
-# ┣━ 🌐 Galactic network integration (Tailscale VPN)
-# ┣━ 🎛️ Command center deployment (aaPanel)
-# ┣━ 🗄️ Database fortress (MariaDB)
-# ┣━ 👤 Hero account management
-# ┗━ 🛡️ Self-healing error recovery
-#
-# Ben Tennyson says: "It's Hero Time!" 💥
 
 name: "🛸 OMNITRIX VPS - Ben 10 Alien Force Edition 👽"
 
@@ -32,25 +14,23 @@ on:
         default: 'humungousaur'
         type: choice
         options:
-          - humungousaur  # Standard power mode
-          - brainstorm    # Debug mode with extended analysis
-          - jetray        # Speed mode (faster execution)
-          - chromastone   # Shield mode (extra error handling)
+          - humungousaur
+          - brainstorm
+          - jetray
+          - chromastone
       debug_session:
-        description: '🔍 Enable Brainstorm Debug Mode'
+        description: '🔍 Enable Debug Mode'
         required: false
         default: 'false'
         type: boolean
   schedule:
-    # Every 6 hours - Ben's patrol schedule! 🌟
     - cron: '0 */6 * * *'
 
 env:
-  # 🛸 Alien Technology Configuration
   BACKUP_NEXUS: /mnt/omnitrix/backups
   BACKUP_ARTIFACT: omnitrix-data-core.tar.gz
   GALVAN_CLOUD: mega:omnitrix-vault
-  HERO_SESSION_DURATION: 19800  # 5.5 hours in seconds
+  HERO_SESSION_DURATION: 19800
   PLUMBER_NETWORK: Plumbers-HQ
   
 jobs:
@@ -63,264 +43,225 @@ jobs:
       actions: write
     
     steps:
-    # ═══════════════════════════════════════════════════════════════════
-    # 🌟 PHASE 1: OMNITRIX INITIALIZATION & ALIEN TECH DEPLOYMENT
-    # ═══════════════════════════════════════════════════════════════════
-    
     - name: "🛸 Scanning Universe Repository"
       uses: actions/checkout@v4
       
     - name: "⚡ DEPLOYING ALIEN TECHNOLOGY SUITE"
       run: |
-        set -euo pipefail
+        set -e
         
         echo "═══════════════════════════════════════════════════════════"
         echo "🛸            OMNITRIX SYSTEM ACTIVATION               👽"
         echo "═══════════════════════════════════════════════════════════"
-        echo "🔋 Alien Form Selected: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
-        echo "🌟 Hero: Ben Tennyson | Session: Alien Force"
+        echo "🔋 Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
         echo "⏰ Mission Start: $(date)"
         echo "═══════════════════════════════════════════════════════════"
         
-        # Update galactic package registry
+        # Update package registry
         echo "🛸 Updating Galactic Package Registry..."
         sudo apt-get update -qq || {
-          echo "⚠️ Primary registry failed, trying backup mirrors..."
-          sleep 5
-          sudo apt-get update -qq || echo "⚠️ Registry update incomplete, proceeding..."
+          echo "⚠️ Primary update failed, trying alternatives..."
+          sudo apt-get update --fix-missing -qq || true
         }
         
-        # Install Plumber communication tools
+        # Install rclone with multiple methods
         echo "🔗 Installing Plumber Communication Suite..."
-        curl -fsSL https://rclone.org/install.sh | sudo bash || {
-          echo "⚠️ Rclone installation failed, trying alternative..."
-          wget https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip rclone-current-linux-amd64.zip
-          sudo cp rclone-*/rclone /usr/bin/
-          sudo chmod +x /usr/bin/rclone
+        if ! command -v rclone >/dev/null 2>&1; then
+          if curl -fsSL https://rclone.org/install.sh | sudo bash; then
+            echo "✅ Rclone installed via official installer"
+          else
+            echo "🔄 Trying alternative rclone installation..."
+            cd /tmp
+            if wget -q https://downloads.rclone.org/rclone-current-linux-amd64.zip; then
+              sudo apt-get install -y unzip || true
+              if unzip -q rclone-current-linux-amd64.zip 2>/dev/null; then
+                sudo cp rclone-*/rclone /usr/bin/ && sudo chmod +x /usr/bin/rclone
+                echo "✅ Rclone installed via direct download"
+              fi
+            fi
+          fi
+        fi
+        
+        # Install essential tools
+        echo "👽 Installing Essential Alien Technology..."
+        TOOLS="curl wget jq tar gzip unzip openssh-server nano vim git net-tools"
+        TOOLS="$TOOLS software-properties-common apt-transport-https ca-certificates"
+        TOOLS="$TOOLS gnupg psmisc screen expect tmate mariadb-server mariadb-client"
+        
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TOOLS || {
+          echo "⚠️ Some tools failed to install, continuing..."
         }
-        
-        # Deploy alien technology toolkit
-        echo "👽 Deploying Alien Technology Toolkit..."
-        ALIEN_TOOLS=(
-          tar gzip unzip curl wget jq
-          openssh-server htop nano vim git net-tools 
-          software-properties-common apt-transport-https 
-          ca-certificates gnupg lsb-release psmisc screen
-          expect tmate mariadb-server mariadb-client
-          build-essential python3-pip
-        )
-        
-        for tool in "${ALIEN_TOOLS[@]}"; do
-          if ! dpkg -l | grep -q "^ii  $tool "; then
-            echo "📦 Installing $tool..."
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $tool || {
-              echo "⚠️ $tool installation failed, adding to retry list..."
-            }
-          fi
-        done
-        
-        # Verify critical tools
-        CRITICAL_TOOLS=("rclone" "jq" "curl" "tar")
-        for tool in "${CRITICAL_TOOLS[@]}"; do
-          if ! command -v $tool &> /dev/null; then
-            echo "❌ CRITICAL: $tool not available!"
-            exit 1
-          fi
-        done
         
         echo "✅ ALIEN TECHNOLOGY DEPLOYMENT COMPLETE! 🛸"
 
     - name: "☁️ GALVAN PRIME CLOUD CONFIGURATION"
       run: |
-        set -euo pipefail
-        echo "☁️ Establishing connection to Galvan Prime Cloud Storage..."
+        set -e
         
-        # Validate Galvan configuration
+        echo "☁️ Establishing connection to Galvan Prime Cloud..."
+        
         if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-          echo "❌ CRITICAL ERROR: Galvan Prime access credentials missing!"
-          echo "🛸 The Omnitrix requires RCLONE_CONFIG for cloud connectivity!"
+          echo "❌ CRITICAL: RCLONE_CONFIG secret missing!"
           exit 1
         fi
         
-        # Create secure configuration directory
-        mkdir -p ~/.config/rclone
-        sudo mkdir -p /root/.config/rclone
-        chmod 700 ~/.config/rclone
-        sudo chmod 700 /root/.config/rclone
+        # Create config directories
+        mkdir -p ~/.config/rclone || true
+        sudo mkdir -p /root/.config/rclone || true
         
-        # Deploy Galvan Prime credentials with fallback detection
-        echo "🔐 Decoding Galvan Prime credentials..."
-        if echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d &>/dev/null; then
-          # Base64 encoded configuration
+        # Deploy configuration
+        echo "🔐 Deploying Galvan Prime credentials..."
+        if echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d >/dev/null 2>&1; then
           echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
-          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d | sudo tee /root/.config/rclone/rclone.conf > /dev/null
-          echo "✅ Base64 encoded credentials decoded successfully!"
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d | sudo tee /root/.config/rclone/rclone.conf >/dev/null
         else
-          # Plain text configuration  
           echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-          echo "${{ secrets.RCLONE_CONFIG }}" | sudo tee /root/.config/rclone/rclone.conf > /dev/null
-          echo "✅ Plain text credentials configured successfully!"
+          echo "${{ secrets.RCLONE_CONFIG }}" | sudo tee /root/.config/rclone/rclone.conf >/dev/null
         fi
         
-        chmod 600 ~/.config/rclone/rclone.conf
-        sudo chmod 600 /root/.config/rclone/rclone.conf
+        chmod 600 ~/.config/rclone/rclone.conf || true
+        sudo chmod 600 /root/.config/rclone/rclone.conf || true
         
-        # Test Galvan Prime connectivity
+        # Test connectivity
         echo "🧪 Testing Galvan Prime connectivity..."
-        if sudo rclone lsd mega: &>/dev/null || rclone lsd mega: &>/dev/null; then
-          echo "✅ Galvan Prime cloud connection established! 🌌"
+        if rclone lsd mega: >/dev/null 2>&1 || sudo rclone lsd mega: >/dev/null 2>&1; then
+          echo "✅ Galvan Prime connection established! 🌌"
         else
-          echo "⚠️ Galvan Prime connectivity test failed, but proceeding..."
-          echo "💡 Cloud features may be limited during this session"
+          echo "⚠️ Connectivity test failed, proceeding with limited cloud features"
         fi
-
-    # ═══════════════════════════════════════════════════════════════════
-    # 🌟 PHASE 2: TEMPORAL DATA CORE RECOVERY PROTOCOLS
-    # ═══════════════════════════════════════════════════════════════════
 
     - name: "🔍 SCANNING FOR TEMPORAL DATA CORES"
       id: data_core_scan
       run: |
-        set -euo pipefail
-        echo "🔍 Initiating temporal data core scan across dimensions..."
+        set -e
+        
+        echo "🔍 Scanning for temporal data cores..."
         
         RECOVERY_SUCCESS=false
         
-        # Priority 1: Scan Galvan Prime vault for backup links
-        echo "🛸 Scanning Galvan Prime vault for data cores..."
-        if sudo rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" &>/dev/null || rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" &>/dev/null; then
-            BACKUP_LINK=$(sudo rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || echo "")
-            if [[ -n "$BACKUP_LINK" ]]; then
-              echo "✅ TEMPORAL DATA CORE LINK FOUND IN GALVAN PRIME! 🌌"
-              echo "🔗 Link: ${BACKUP_LINK:0:50}..."
-              echo "has_backup=true" >> $GITHUB_OUTPUT
-              echo "backup_source=galvan_prime" >> $GITHUB_OUTPUT  
-              echo "artifact_url=${BACKUP_LINK}" >> $GITHUB_OUTPUT
-              RECOVERY_SUCCESS=true
-            fi
+        # Check Galvan Prime for backup links
+        echo "🛸 Scanning Galvan Prime vault..."
+        if rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" >/dev/null 2>&1 || sudo rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" >/dev/null 2>&1; then
+          BACKUP_LINK=$(rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || sudo rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null)
+          if [[ -n "$BACKUP_LINK" ]]; then
+            echo "✅ Found Galvan Prime backup link!"
+            echo "has_backup=true" >> $GITHUB_OUTPUT
+            echo "backup_source=galvan_prime" >> $GITHUB_OUTPUT
+            echo "artifact_url=$BACKUP_LINK" >> $GITHUB_OUTPUT
+            RECOVERY_SUCCESS=true
+          fi
         fi
         
-        # Priority 2: Scan recent GitHub artifacts if Galvan Prime fails
+        # Check GitHub artifacts
         if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
-          echo "🔍 Galvan Prime scan failed, scanning recent GitHub artifacts..."
+          echo "🔍 Scanning GitHub artifacts..."
+          WORKFLOW_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" 2>/dev/null || echo "")
           
-          # Find workflow ID with retry logic
-          for attempt in {1..3}; do
-            WORKFLOW_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
-              | jq -r '.workflows[] | select(.name | contains("OMNITRIX") or contains("Ben 10") or contains("Persistent")) | .id' \
-              | head -1 2>/dev/null || echo "")
+          if [[ -n "$WORKFLOW_RESPONSE" ]]; then
+            WORKFLOW_ID=$(echo "$WORKFLOW_RESPONSE" | jq -r '.workflows[] | select(.name | test("OMNITRIX|Ben|Persistent"; "i")) | .id' | head -1)
             
             if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
-              break
-            fi
-            
-            echo "⚠️ Workflow scan attempt $attempt failed, retrying..."
-            sleep 5
-          done
-          
-          if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
-            echo "🔍 Found workflow ID: $WORKFLOW_ID"
-            
-            # Find recent successful runs
-            RECENT_RUN=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${WORKFLOW_ID}/runs?status=success&per_page=5" \
-              | jq -r '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' \
-              | head -1 2>/dev/null || echo "")
+              RUNS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/runs?status=success&per_page=5" 2>/dev/null || echo "")
               
-            if [[ -n "$RECENT_RUN" && "$RECENT_RUN" != "null" ]]; then
-              echo "🔍 Scanning run: $RECENT_RUN"
-              
-              # Find backup artifact
-              ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/runs/${RECENT_RUN}/artifacts" \
-                | jq -r --arg name "$BACKUP_ARTIFACT" '.artifacts[] | select(.name | contains($name) or contains("backup") or contains("omnitrix")) | .id' \
-                | head -1 2>/dev/null || echo "")
+              if [[ -n "$RUNS_RESPONSE" ]]; then
+                RECENT_RUN=$(echo "$RUNS_RESPONSE" | jq -r --argjson current "${{ github.run_id }}" '.workflow_runs[] | select(.id != $current) | .id' | head -1)
                 
-              if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-                ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip"
-                echo "✅ TEMPORAL DATA CORE FOUND IN GITHUB DIMENSION! 📦"
-                echo "🆔 Artifact ID: $ARTIFACT_ID"
-                echo "has_backup=true" >> $GITHUB_OUTPUT
-                echo "backup_source=github_artifact" >> $GITHUB_OUTPUT
-                echo "artifact_url=${ARTIFACT_URL}" >> $GITHUB_OUTPUT
-                RECOVERY_SUCCESS=true
+                if [[ -n "$RECENT_RUN" && "$RECENT_RUN" != "null" ]]; then
+                  ARTIFACTS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                    "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RECENT_RUN/artifacts" 2>/dev/null || echo "")
+                  
+                  if [[ -n "$ARTIFACTS_RESPONSE" ]]; then
+                    ARTIFACT_ID=$(echo "$ARTIFACTS_RESPONSE" | jq -r '.artifacts[] | select(.name | test("backup|omnitrix|data"; "i")) | .id' | head -1)
+                    
+                    if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
+                      ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
+                      echo "✅ Found GitHub artifact backup!"
+                      echo "has_backup=true" >> $GITHUB_OUTPUT
+                      echo "backup_source=github_artifact" >> $GITHUB_OUTPUT
+                      echo "artifact_url=$ARTIFACT_URL" >> $GITHUB_OUTPUT
+                      RECOVERY_SUCCESS=true
+                    fi
+                  fi
+                fi
               fi
             fi
           fi
         fi
         
-        # Priority 3: Direct Galvan Prime backup scan
+        # Check direct Galvan Prime backups
         if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
-          echo "🛸 Performing direct Galvan Prime backup scan..."
-          LATEST_BACKUP=$(sudo rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1 2>/dev/null || \
-                         rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1 2>/dev/null || echo "")
-          
-          if [[ -n "$LATEST_BACKUP" ]]; then
-            echo "✅ DIRECT GALVAN BACKUP FOUND! 🌌"  
-            echo "📁 File: $LATEST_BACKUP"
-            echo "has_backup=true" >> $GITHUB_OUTPUT
-            echo "backup_source=galvan_direct" >> $GITHUB_OUTPUT
-            echo "backup_file=${LATEST_BACKUP}" >> $GITHUB_OUTPUT
-            RECOVERY_SUCCESS=true
+          echo "🛸 Checking direct Galvan Prime backups..."
+          BACKUP_LIST=$(rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null || sudo rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null || echo "")
+          if [[ -n "$BACKUP_LIST" ]]; then
+            LATEST_BACKUP=$(echo "$BACKUP_LIST" | grep -E "(backup|omnitrix).*\.tar\.gz" | sort -r | head -1)
+            if [[ -n "$LATEST_BACKUP" ]]; then
+              echo "✅ Found direct Galvan backup!"
+              echo "has_backup=true" >> $GITHUB_OUTPUT
+              echo "backup_source=galvan_direct" >> $GITHUB_OUTPUT
+              echo "backup_file=$LATEST_BACKUP" >> $GITHUB_OUTPUT
+              RECOVERY_SUCCESS=true
+            fi
           fi
         fi
         
-        # Final result
         if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
-          echo "ℹ️ No temporal data cores found across all dimensions"
-          echo "🛸 Initiating fresh universe creation protocol..."
+          echo "ℹ️ No temporal data cores found - fresh installation mode"
           echo "has_backup=false" >> $GITHUB_OUTPUT
           echo "backup_source=none" >> $GITHUB_OUTPUT
         else
-          echo "✅ TEMPORAL DATA CORE RECOVERY PROTOCOL SUCCESSFUL! 🎯"
+          echo "✅ TEMPORAL DATA CORE RECOVERY SUCCESSFUL! 🎯"
         fi
 
     - name: "📥 TEMPORAL DATA CORE RESTORATION"
       if: steps.data_core_scan.outputs.has_backup == 'true'
       run: |
-        set -euo pipefail
+        set -e
         
         echo "═══════════════════════════════════════════════════════════"
-        echo "📥        TEMPORAL DATA CORE RESTORATION PROTOCOL        👽"
+        echo "📥        TEMPORAL DATA CORE RESTORATION               👽"
         echo "═══════════════════════════════════════════════════════════"
         echo "🔋 Source: ${{ steps.data_core_scan.outputs.backup_source }}"
-        echo "⚡ Initiating quantum data reconstruction..."
-        echo "═══════════════════════════════════════════════════════════"
         
-        # Create secure restoration chamber
-        RESTORE_CHAMBER="/mnt/omnitrix/restore"
+        # Create restoration chamber
+        RESTORE_CHAMBER="/tmp/omnitrix_restore"
         sudo mkdir -p "$RESTORE_CHAMBER"
         cd "$RESTORE_CHAMBER"
         
-        # Execute restoration based on source
+        # Download/restore based on source
         case "${{ steps.data_core_scan.outputs.backup_source }}" in
           "galvan_prime"|"github_artifact")
             echo "🌌 Downloading from ${{ steps.data_core_scan.outputs.backup_source }}..."
             
-            # Download with retry mechanism
             for attempt in {1..3}; do
-              if sudo curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                     "${{ steps.data_core_scan.outputs.artifact_url }}" \
-                     -o "data_core.zip"; then
-                echo "✅ Download successful on attempt $attempt!"
+              if curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                     "${{ steps.data_core_scan.outputs.artifact_url }}" -o data_core.zip; then
+                echo "✅ Download successful!"
                 break
-              else
-                echo "⚠️ Download attempt $attempt failed, retrying..."
-                sleep $((attempt * 5))
               fi
+              echo "⚠️ Download attempt $attempt failed, retrying..."
+              sleep 5
             done
             
-            # Extract and verify
-            echo "📦 Extracting temporal data core..."
-            sudo unzip -q data_core.zip 2>/dev/null || sudo unzip data_core.zip
+            if [[ ! -f data_core.zip ]]; then
+              echo "❌ Download failed after all attempts"
+              exit 1
+            fi
             
-            # Find the actual backup file
-            BACKUP_FILE=$(sudo find . -name "*.tar.gz" -type f | head -1)
-            if [[ -z "$BACKUP_FILE" ]]; then
-              echo "❌ No backup file found in extracted data!"
-              ls -la
+            # Extract archive
+            if ! unzip -q data_core.zip 2>/dev/null; then
+              echo "⚠️ Quiet extraction failed, trying verbose..."
+              unzip data_core.zip || {
+                echo "❌ Archive extraction failed"
+                exit 1
+              }
+            fi
+            
+            # Find backup file
+            BACKUP_FILE=$(find . -name "*.tar.gz" -type f | head -1)
+            if [[ ! -f "$BACKUP_FILE" ]]; then
+              echo "❌ No backup file found in archive"
               exit 1
             fi
             ;;
@@ -329,869 +270,387 @@ jobs:
             echo "🛸 Direct download from Galvan Prime..."
             BACKUP_FILE="${{ steps.data_core_scan.outputs.backup_file }}"
             
-            for attempt in {1..3}; do
-              if sudo rclone copy "${GALVAN_CLOUD}/${BACKUP_FILE}" . || rclone copy "${GALVAN_CLOUD}/${BACKUP_FILE}" .; then
-                echo "✅ Direct download successful on attempt $attempt!"
-                break
-              else
-                echo "⚠️ Direct download attempt $attempt failed, retrying..."
-                sleep $((attempt * 5))
-              fi
-            done
+            if ! rclone copy "${GALVAN_CLOUD}/$BACKUP_FILE" . && ! sudo rclone copy "${GALVAN_CLOUD}/$BACKUP_FILE" .; then
+              echo "❌ Direct download failed"
+              exit 1
+            fi
             ;;
         esac
         
-        # Validate data core integrity
-        echo "🧪 Validating temporal data core integrity..."
+        # Validate and extract backup
         if [[ -f "$BACKUP_FILE" ]]; then
-          CORE_SIZE=$(sudo du -h "$BACKUP_FILE" | cut -f1)
+          CORE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
           echo "📋 Data Core Size: $CORE_SIZE"
           
-          if sudo tar -tzf "$BACKUP_FILE" &>/dev/null; then
-            echo "✅ Data core integrity verified! 🛡️"
+          if tar -tzf "$BACKUP_FILE" >/dev/null 2>&1; then
+            echo "✅ Data core integrity verified!"
           else
-            echo "❌ Data core corruption detected!"
-            echo "🔄 Attempting repair protocols..."
-            # Try to extract anyway - sometimes works
+            echo "⚠️ Integrity check failed, attempting extraction anyway..."
           fi
+          
+          # Create staging area and extract
+          STAGING_AREA="/tmp/restore_data"
+          sudo mkdir -p "$STAGING_AREA"
+          
+          if tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null || tar -xf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null; then
+            echo "✅ Data core extraction successful!"
+          else
+            echo "❌ Data core extraction failed"
+            exit 1
+          fi
+          
+          # Restore data with proper permissions
+          echo "🔧 Restoring alien technology and data..."
+          
+          # Restore home directories
+          if [[ -d "$STAGING_AREA/universe_preservation/home" ]]; then
+            echo "🏠 Restoring hero base..."
+            sudo cp -rf "$STAGING_AREA/universe_preservation/home"/* /home/ 2>/dev/null || true
+          fi
+          
+          # Restore root directory
+          if [[ -d "$STAGING_AREA/universe_preservation/root" ]]; then
+            echo "👑 Restoring command center..."
+            sudo cp -rf "$STAGING_AREA/universe_preservation/root/." /root/ 2>/dev/null || true
+            sudo chown -R root:root /root 2>/dev/null || true
+          fi
+          
+          # Restore Tailscale state
+          if [[ -d "$STAGING_AREA/universe_preservation/tailscale" ]]; then
+            echo "🔗 Restoring Plumber network state..."
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp -rf "$STAGING_AREA/universe_preservation/tailscale"/* /var/lib/tailscale/ 2>/dev/null || true
+            sudo chown -R root:root /var/lib/tailscale 2>/dev/null || true
+          fi
+          
+          # Restore MariaDB data
+          if [[ -d "$STAGING_AREA/universe_preservation/mysql" ]]; then
+            echo "🗄️ Restoring database fortress..."
+            sudo systemctl stop mariadb 2>/dev/null || true
+            sleep 2
+            sudo cp -rf "$STAGING_AREA/universe_preservation/mysql"/* /var/lib/mysql/ 2>/dev/null || true
+            sudo chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
+            sudo systemctl start mariadb 2>/dev/null || true
+          fi
+          
+          # Restore web files
+          if [[ -d "$STAGING_AREA/universe_preservation/www" ]]; then
+            echo "🌐 Restoring web arsenal..."
+            sudo mkdir -p /var/www
+            sudo cp -rf "$STAGING_AREA/universe_preservation/www"/* /var/www/ 2>/dev/null || true
+            sudo chown -R www-data:www-data /var/www 2>/dev/null || true
+          fi
+          
+          # Restore aaPanel data
+          if [[ -d "$STAGING_AREA/universe_preservation/aapanel" ]]; then
+            echo "🎛️ Restoring alien control panel..."
+            sudo cp -rf "$STAGING_AREA/universe_preservation/aapanel"/* /www/ 2>/dev/null || true
+          fi
+          
+          # Restore system configs
+          if [[ -d "$STAGING_AREA/universe_preservation/etc_configs" ]]; then
+            echo "⚙️ Restoring system configurations..."
+            sudo cp -rf "$STAGING_AREA/universe_preservation/etc_configs"/* /etc/ 2>/dev/null || true
+          fi
+          
+          # Restore opt directory
+          if [[ -d "$STAGING_AREA/universe_preservation/opt" ]]; then
+            echo "👽 Restoring alien applications..."
+            sudo cp -rf "$STAGING_AREA/universe_preservation/opt"/* /opt/ 2>/dev/null || true
+          fi
+          
+          # Cleanup
+          sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER"
+          
+          echo "✅ TEMPORAL DATA CORE RESTORATION COMPLETE! 🎉"
         else
-          echo "❌ Data core file not found!"
+          echo "❌ Backup file not found or invalid"
           exit 1
         fi
-        
-        echo "🔄 Initiating quantum data restoration sequence..."
-        
-        # Create restoration staging area
-        STAGING_AREA="/tmp/omnitrix_restore"
-        sudo mkdir -p "$STAGING_AREA"
-        
-        # Extract data core
-        echo "📂 Extracting temporal data core..."
-        sudo tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null || {
-          echo "⚠️ Standard extraction failed, trying alternative method..."
-          sudo tar -xf "$BACKUP_FILE" -C "$STAGING_AREA"
-        }
-        
-        # Execute restoration protocols with error handling
-        echo "🔧 Executing restoration protocols..."
-        
-        # Restore Hero Base (home directories)
-        if [ -d "$STAGING_AREA/selective_backup/home" ]; then
-          echo "🏠 Restoring Hero Base (home directories)..."
-          sudo cp -rf "$STAGING_AREA/selective_backup/home"/* /home/ 2>/dev/null || {
-            echo "⚠️ Some home files failed to restore, continuing..."
-          }
-        fi
-        
-        # Restore Command Center (root)
-        if [ -d "$STAGING_AREA/selective_backup/root" ]; then
-          echo "👑 Restoring Command Center (root directory)..."
-          sudo cp -rf "$STAGING_AREA/selective_backup/root/." /root/ 2>/dev/null || {
-            echo "⚠️ Some root files failed to restore, continuing..."
-          }
-          sudo chown -R root:root /root 2>/dev/null || true
-        fi
-        
-        # Restore Plumber Network State (Tailscale)
-        if [ -d "$STAGING_AREA/selective_backup/tailscale" ]; then
-          echo "🔗 Restoring Plumber Network State..."
-          sudo mkdir -p /var/lib/tailscale
-          sudo cp -rf "$STAGING_AREA/selective_backup/tailscale"/* /var/lib/tailscale/ 2>/dev/null || {
-            echo "⚠️ Tailscale state restoration failed, will reconnect fresh..."
-          }
-          sudo chown -R root:root /var/lib/tailscale 2>/dev/null || true
-        fi
-        
-        # Restore Database Fortress (MariaDB)
-        if [ -d "$STAGING_AREA/selective_backup/mysql" ]; then
-          echo "🗄️ Restoring Database Fortress..."
-          sudo systemctl stop mariadb 2>/dev/null || true
-          sleep 3
-          sudo mkdir -p /var/lib/mysql
-          sudo cp -rf "$STAGING_AREA/selective_backup/mysql"/* /var/lib/mysql/ 2>/dev/null || {
-            echo "⚠️ Database restoration failed, will recreate fresh..."
-          }
-          sudo chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
-          sudo systemctl start mariadb 2>/dev/null || true
-        fi
-        
-        # Restore Web Arsenal (/var/www)
-        if [ -d "$STAGING_AREA/selective_backup/www" ]; then
-          echo "🌐 Restoring Web Arsenal..."
-          sudo mkdir -p /var/www
-          sudo cp -rf "$STAGING_AREA/selective_backup/www"/* /var/www/ 2>/dev/null || {
-            echo "⚠️ Some web files failed to restore, continuing..."
-          }
-          sudo chown -R www-data:www-data /var/www 2>/dev/null || true
-        fi
-        
-        # Restore Control Panel (aaPanel)
-        if [ -d "$STAGING_AREA/selective_backup/aapanel" ]; then
-          echo "🎛️ Restoring Alien Control Panel..."
-          sudo mkdir -p /www
-          sudo cp -rf "$STAGING_AREA/selective_backup/aapanel"/* /www/ 2>/dev/null || {
-            echo "⚠️ Some control panel files failed to restore, continuing..."
-          }
-          sudo chown -R root:root /www 2>/dev/null || true
-        fi
-        
-        # Restore System Configurations
-        if [ -d "$STAGING_AREA/selective_backup/etc_configs" ]; then
-          echo "⚙️ Restoring System Configurations..."
-          sudo cp -rf "$STAGING_AREA/selective_backup/etc_configs"/* /etc/ 2>/dev/null || {
-            echo "⚠️ Some config files failed to restore, continuing..."
-          }
-        fi
-        
-        # Restore Alien Applications (/opt)
-        if [ -d "$STAGING_AREA/selective_backup/opt" ]; then
-          echo "👽 Restoring Alien Applications..."
-          sudo mkdir -p /opt
-          sudo cp -rf "$STAGING_AREA/selective_backup/opt"/* /opt/ 2>/dev/null || {
-            echo "⚠️ Some applications failed to restore, continuing..."
-          }
-        fi
-        
-        # Cleanup restoration chamber
-        sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER"
-        
-        echo "✅ TEMPORAL DATA CORE RESTORATION COMPLETE! 🎉"
-        echo "🛸 Previous universe state successfully reconstructed!"
-
-    # ═══════════════════════════════════════════════════════════════════
-    # 🌟 PHASE 3: UNIVERSE CONFIGURATION & ALIEN DEPLOYMENT
-    # ═══════════════════════════════════════════════════════════════════
 
     - name: "👤 HERO ACCOUNT CONFIGURATION"
       run: |
-        set -euo pipefail
+        set -e
         
-        echo "👤 Configuring Hero Account - Ben Tennyson Access Protocol..."
+        echo "👤 Configuring Hero Account - Ben Tennyson Protocol..."
         
-        # Validate hero credentials
         if [[ -z "${{ secrets.USER_PASSWORD || '' }}" ]]; then
-          echo "❌ CRITICAL: Hero access credentials missing!"
-          echo "🛸 The Omnitrix requires USER_PASSWORD for hero authentication!"
+          echo "❌ CRITICAL: USER_PASSWORD secret missing!"
           exit 1
         fi
         
-        # Create hero account with fallback handling
-        echo "🔐 Creating hero account: jacky..."
-        if ! id jacky &>/dev/null; then
+        # Create hero account
+        if ! id jacky >/dev/null 2>&1; then
           sudo useradd -m -s /bin/bash jacky || {
-            echo "⚠️ Standard user creation failed, trying alternative..."
             sudo adduser --disabled-password --gecos "" jacky
           }
-          echo "✅ Hero account created successfully!"
+          echo "✅ Hero account created!"
         else
-          echo "✅ Hero account already exists!"
+          echo "✅ Hero account exists!"
         fi
         
-        # Set hero credentials
-        echo "🔑 Configuring hero authentication..."
-        echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd || {
-          echo "❌ Password configuration failed!"
-          exit 1
-        }
-        
-        # Grant hero powers (sudo access)
-        echo "⚡ Granting hero powers..."
-        sudo usermod -aG sudo jacky 2>/dev/null || {
-          sudo usermod -aG admin jacky 2>/dev/null || {
-            echo "⚠️ Sudo group assignment failed, creating manual entry..."
-          }
-        }
-        
-        # Create heroes sudoers file
-        echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/hero > /dev/null
+        # Set password and permissions
+        echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
+        sudo usermod -aG sudo jacky 2>/dev/null || true
+        echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/hero >/dev/null
         sudo chmod 440 /etc/sudoers.d/hero
         
-        # Configure Docker access if available
-        if getent group docker &>/dev/null; then
-          sudo usermod -aG docker jacky 2>/dev/null || true
-        fi
-        
-        # Set universe identifier
-        echo "🌍 Setting universe identifier..."
+        # Set hostname
         sudo hostnamectl set-hostname "$PLUMBER_NETWORK" 2>/dev/null || {
-          echo "$PLUMBER_NETWORK" | sudo tee /etc/hostname > /dev/null
+          echo "$PLUMBER_NETWORK" | sudo tee /etc/hostname >/dev/null
         }
-        echo "127.0.1.1 $PLUMBER_NETWORK" | sudo tee -a /etc/hosts > /dev/null
+        echo "127.0.1.1 $PLUMBER_NETWORK" | sudo tee -a /etc/hosts >/dev/null
         
-        echo "✅ Hero account configuration complete! 🦸‍♂️"
-        echo "🎯 Hero: jacky | Powers: sudo, docker | Universe: $PLUMBER_NETWORK"
+        echo "✅ Hero account configured! 🦸‍♂️"
 
     - name: "🎛️ ALIEN CONTROL PANEL DEPLOYMENT"
       run: |
-          set -euo pipefail
-          if command -v bt >/dev/null 2>&1; then
-            echo "✅ Aapanel already installed (from backup)."
-          else
-            echo "📥 Installing Aapanel (fresh install)..."
-            curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
-            chmod +x /tmp/install.sh
-            timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || {
-              echo "⚠️ Aapanel installation timed out, continuing..."
+        set -e
+        
+        echo "🎛️ Deploying Alien Control Panel (aaPanel)..."
+        
+        # Check if already installed
+        if command -v bt >/dev/null 2>&1 && [[ -d /www/server ]]; then
+          echo "✅ Control panel already deployed!"
+        else
+          echo "🚀 Installing fresh control panel..."
+          
+          # Download installer with fallbacks
+          INSTALLER_DOWNLOADED=false
+          INSTALLER_URLS=(
+            "http://www.aapanel.com/script/install_6.0_en.sh"
+            "http://download.bt.cn/install/install_6.0_en.sh"
+          )
+          
+          cd /tmp
+          for url in "${INSTALLER_URLS[@]}"; do
+            if curl -fsSL "$url" -o aapanel_install.sh; then
+              INSTALLER_DOWNLOADED=true
+              echo "✅ Installer downloaded from: $url"
+              break
+            fi
+          done
+          
+          if [[ "$INSTALLER_DOWNLOADED" == "true" ]]; then
+            chmod +x aapanel_install.sh
+            
+            # Install with timeout and automated responses
+            echo "🤖 Running automated installation..."
+            timeout 600 bash -c 'printf "y\nyes\ny\n" | sudo bash aapanel_install.sh' || {
+              echo "⚠️ Installation timeout or failed, continuing..."
             }
+            
+            # Wait for initialization
+            sleep 15
+          else
+            echo "⚠️ All installer URLs failed, skipping aaPanel installation"
           fi
-          if command -v bt >/dev/null 2>&1; then
-            echo "🎛️ Setting Aapanel credentials..."
-            sleep 5
-            echo "Jacky" | sudo bt 6 || true
-            echo "spidey" | sudo bt 5 || true
+        fi
+        
+        # Configure credentials if panel exists
+        if command -v bt >/dev/null 2>&1; then
+          echo "🔧 Configuring control panel credentials..."
+          
+          # Try multiple credential setting methods
+          (echo "Ben10" | sudo timeout 30 bt 6) 2>/dev/null || true
+          (echo "omnitrix" | sudo timeout 30 bt 5) 2>/dev/null || true
+          
+          # Alternative method using tools.py
+          if [[ -f /www/server/panel/tools.py ]]; then
+            cd /www/server/panel
+            sudo timeout 30 python3 tools.py username Ben10 2>/dev/null || true
+            sudo timeout 30 python3 tools.py password omnitrix 2>/dev/null || true
           fi
           
-    - name: "🗄️ DATABASE FORTRESS INITIALIZATION"  
+          echo "✅ Control panel configured! Username: Ben10, Password: omnitrix"
+        fi
+
+    - name: "🗄️ DATABASE FORTRESS INITIALIZATION"
       run: |
-        set -euo pipefail
+        set -e
         
-        echo "🗄️ Initializing Database Fortress (MariaDB) - Plumber Archive System..."
+        echo "🗄️ Initializing Database Fortress (MariaDB)..."
         
-        # Enable and start database service
-        echo "⚡ Powering up database fortress..."
-        sudo systemctl enable mariadb || echo "⚠️ MariaDB enable failed"
+        # Start MariaDB
+        sudo systemctl enable mariadb || true
         sudo systemctl start mariadb || {
           echo "⚠️ MariaDB start failed, attempting repair..."
-          sudo mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql
-          sudo systemctl start mariadb || echo "⚠️ MariaDB requires manual intervention"
+          sudo mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql 2>/dev/null || true
+          sudo systemctl start mariadb || true
         }
         
-        # Verify database service
+        # Wait for service to be ready
         sleep 5
-        if sudo systemctl is-active mariadb &>/dev/null; then
-          echo "✅ Database fortress online! 🏰"
+        
+        # Configure database
+        if sudo systemctl is-active mariadb >/dev/null 2>&1; then
+          echo "✅ Database fortress online!"
+          
+          # Set root password if provided
+          if [[ -n "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
+            sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';" 2>/dev/null || \
+            sudo mysqladmin -u root password '${{ secrets.DB_ROOT_PASSWORD }}' 2>/dev/null || true
+            
+            # Create databases
+            sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "CREATE DATABASE IF NOT EXISTS omnitrix_data;" 2>/dev/null || \
+            sudo mysql -u root -p'${{ secrets.DB_ROOT_PASSWORD }}' -e "CREATE DATABASE IF NOT EXISTS test;" 2>/dev/null || true
+          else
+            # Default setup without password
+            sudo mysql -e "CREATE DATABASE IF NOT EXISTS omnitrix_data;" 2>/dev/null || \
+            sudo mysql -e "CREATE DATABASE IF NOT EXISTS test;" 2>/dev/null || true
+          fi
         else
-          echo "⚠️ Database fortress may need manual activation"
+          echo "⚠️ Database fortress offline, manual intervention may be required"
         fi
         
-        # Configure database security
-        echo "🛡️ Configuring database fortress security..."
-        
-        # Set root password if provided
-        if [[ -n "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
-          echo "🔐 Setting master vault password..."
-          
-          # Try multiple methods for setting root password
-          sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';" 2>/dev/null || \
-          sudo mysqladmin -u root password '${{ secrets.DB_ROOT_PASSWORD }}' 2>/dev/null || \
-          echo "⚠️ Root password configuration failed - using default security"
-          
-          # Create hero database
-          sudo mysql -u root -p"${{ secrets.DB_ROOT_PASSWORD }}" -e "CREATE DATABASE IF NOT EXISTS omnitrix_data;" 2>/dev/null || \
-          sudo mysql -u root -p"${{ secrets.DB_ROOT_PASSWORD }}" -e "CREATE DATABASE IF NOT EXISTS test;" 2>/dev/null || \
-          echo "⚠️ Hero database creation failed"
-        else
-          echo "🔓 Using default database security..."
-          # Create databases with default access
-          sudo mysql -e "CREATE DATABASE IF NOT EXISTS omnitrix_data;" 2>/dev/null || \
-          sudo mysql -e "CREATE DATABASE IF NOT EXISTS test;" 2>/dev/null || \
-          echo "⚠️ Database creation failed"
-        fi
-        
-        echo "✅ Database fortress initialization complete! 🗄️"
+        echo "✅ Database fortress initialized!"
 
     - name: "⚡ ALIEN POWER SYSTEMS ACTIVATION"
       run: |
-        set -euo pipefail
+        set -e
         
-        echo "⚡ Activating all alien power systems across the universe..."
+        echo "⚡ Activating alien power systems..."
         
-        # Reload system configurations
-        echo "🔄 Reloading system configurations..."
+        # Reload configurations
         sudo systemctl daemon-reload
         
-        # Essential power systems
-        POWER_SYSTEMS=("ssh" "mariadb")
+        # Start essential services
+        SERVICES=("ssh" "mariadb")
         
-        echo "🌟 Activating essential power systems..."
-        for system in "${POWER_SYSTEMS[@]}"; do
-          echo "⚡ Powering up $system..."
-          
-          # Enable with fallback
-          sudo systemctl enable "$system" 2>/dev/null || {
-            echo "⚠️ $system enable failed, trying alternative..."
-            sudo systemctl enable "$system.service" 2>/dev/null || true
-          }
-          
-          # Start with fallback  
-          sudo systemctl start "$system" 2>/dev/null || {
-            echo "⚠️ $system start failed, attempting restart..."
-            sudo systemctl restart "$system" 2>/dev/null || {
-              echo "⚠️ $system requires manual intervention"
-            }
+        for service in "${SERVICES[@]}"; do
+          echo "⚡ Activating $service..."
+          sudo systemctl enable "$service" 2>/dev/null || true
+          sudo systemctl start "$service" 2>/dev/null || {
+            sudo systemctl restart "$service" 2>/dev/null || true
           }
         done
         
-        # Optional power systems
-        OPTIONAL_SYSTEMS=("docker" "nginx" "apache2")
-        
-        echo "🔋 Activating optional power systems..."
-        for system in "${OPTIONAL_SYSTEMS[@]}"; do
-          if systemctl list-units --all | grep -q "$system"; then
-            echo "⚡ Found $system, activating..."
-            sudo systemctl enable --now "$system" 2>/dev/null || {
-              echo "⚠️ $system activation failed, but continuing..."
-            }
+        # Start optional services
+        OPTIONAL=("docker" "nginx" "apache2")
+        for service in "${OPTIONAL[@]}"; do
+          if systemctl list-units --all | grep -q "$service"; then
+            sudo systemctl enable --now "$service" 2>/dev/null || true
           fi
         done
         
-        # Activate Alien Control Panel
-        if command -v bt &>/dev/null; then
-          echo "🎛️ Activating Alien Control Panel..."
-          sudo bt start 2>/dev/null || {
-            sudo systemctl start bt 2>/dev/null || {
-              sudo /etc/init.d/bt start 2>/dev/null || {
-                echo "⚠️ Control panel activation may require manual intervention"
-              }
-            }
-          }
-          sleep 3
+        # Start aaPanel
+        if command -v bt >/dev/null 2>&1; then
+          sudo bt start 2>/dev/null || \
+          sudo systemctl start bt 2>/dev/null || \
+          sudo /etc/init.d/bt start 2>/dev/null || true
         fi
         
-        # Power system diagnostics
-        echo "🔍 Running power system diagnostics..."
         sleep 5
         
+        # Power system status
         echo "═══════════════════════════════════════════════════════════"
-        echo "🔋            POWER SYSTEM STATUS REPORT              ⚡"
+        echo "🔋            POWER SYSTEM STATUS                     ⚡"
         echo "═══════════════════════════════════════════════════════════"
         
-        for system in ssh mariadb docker nginx apache2 bt; do
-          if systemctl is-active "$system" &>/dev/null; then
-            echo "  ✅ $system - ONLINE AND OPERATIONAL"
+        for service in ssh mariadb docker bt; do
+          if systemctl is-active "$service" >/dev/null 2>&1; then
+            echo "  ✅ $service - ONLINE"
           else
-            echo "  ⚠️ $system - OFFLINE OR UNAVAILABLE"
+            echo "  ⚠️ $service - OFFLINE"
           fi
         done
         
         echo "═══════════════════════════════════════════════════════════"
-        echo "✅ ALIEN POWER SYSTEMS ACTIVATION COMPLETE! ⚡"
+        echo "✅ POWER SYSTEMS ACTIVATED!"
 
     - name: "🔗 PLUMBER NETWORK INTEGRATION"
       run: |
-        set -euo pipefail
+        set -e
         
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🔗        PLUMBER NETWORK INTEGRATION PROTOCOL         🌌" 
-        echo "═══════════════════════════════════════════════════════════"
+        echo "🔗 Establishing Plumber Network connection..."
         
-        # Validate Plumber credentials
         if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-          echo "❌ CRITICAL: Plumber network authentication key missing!"
-          echo "🛸 The Omnitrix requires TAILSCALE_AUTHKEY for network integration!"
+          echo "❌ CRITICAL: TAILSCALE_AUTHKEY missing!"
           exit 1
         fi
         
-        # Install Plumber network client
-        echo "📡 Installing Plumber network client (Tailscale)..."
-        
-        TAILSCALE_SUCCESS=false
-        # Method 1: Official installer
-        if curl -fsSL https://tailscale.com/install.sh | sh; then
-          TAILSCALE_SUCCESS=true
-          echo "✅ Plumber client installed via official installer!"
-        else
-          echo "⚠️ Official installer failed, trying package manager..."
-          
-          # Method 2: Package manager
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
-          
-          if sudo apt-get update && sudo apt-get install -y tailscale; then
-            TAILSCALE_SUCCESS=true
-            echo "✅ Plumber client installed via package manager!"
-          fi
-        fi
-        
-        if [[ "$TAILSCALE_SUCCESS" == "false" ]]; then
-          echo "❌ All Plumber network installation methods failed!"
-          echo "🛸 Network integration will be unavailable this session"
-          exit 1
-        fi
-        
-        # Activate Plumber network service
-        echo "⚡ Activating Plumber network service..."
-        sudo systemctl enable --now tailscaled || {
-          echo "⚠️ Service activation failed, attempting manual start..."
-          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock &
-          sleep 3
-        }
-        
-        # Establish network connection
-        echo "🌌 Establishing connection to Plumber headquarters..."
-        
-        CONNECTION_SUCCESS=false
-        for attempt in {1..3}; do
-          echo "🔗 Connection attempt $attempt/3..."
-          
-          if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-                             --hostname="$PLUMBER_NETWORK" \
-                             --reset \
-                             --accept-routes \
-                             --timeout=60s; then
-            CONNECTION_SUCCESS=true
-            echo "✅ Plumber network connection established!"
-            break
+        # Install Tailscale
+        if ! command -v tailscale >/dev/null 2>&1; then
+          if curl -fsSL https://tailscale.com/install.sh | sh; then
+            echo "✅ Tailscale installed!"
           else
-            echo "⚠️ Connection attempt $attempt failed, retrying..."
-            sleep 10
+            echo "⚠️ Tailscale installation failed, trying package manager..."
+            curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+            curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+            sudo apt-get update && sudo apt-get install -y tailscale
           fi
+        fi
+        
+        # Start Tailscale service
+        sudo systemctl enable --now tailscaled || true
+        sleep 3
+        
+        # Connect to network
+        CONNECTED=false
+        for attempt in {1..3}; do
+          if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname="$PLUMBER_NETWORK" --reset --accept-routes; then
+            CONNECTED=true
+            echo "✅ Plumber network connected!"
+            break
+          fi
+          echo "⚠️ Connection attempt $attempt failed, retrying..."
+          sleep 10
         done
         
-        if [[ "$CONNECTION_SUCCESS" == "false" ]]; then
-          echo "❌ All connection attempts failed!"
-          echo "🛸 Continuing without network integration..."
+        # Start emergency communications
+        if command -v tmate >/dev/null 2>&1; then
+          tmate -S /tmp/emergency.sock new-session -d 2>/dev/null || true
+          tmate -S /tmp/emergency.sock wait tmate-ready 2>/dev/null || true
         fi
         
-        # Deploy emergency communication system
-        echo "📡 Deploying emergency communication system (tmate)..."
-        if command -v tmate &>/dev/null; then
-          tmate -S /tmp/emergency_comms.sock new-session -d 2>/dev/null || true
-          tmate -S /tmp/emergency_comms.sock wait tmate-ready 2>/dev/null || true
-        fi
-        
-        # Network status report
+        # Network status
         echo "═══════════════════════════════════════════════════════════"
-        echo "🌌           PLUMBER NETWORK STATUS REPORT             🔗"
+        echo "🌌           PLUMBER NETWORK STATUS                   🔗"
         echo "═══════════════════════════════════════════════════════════"
         
-        if [[ "$CONNECTION_SUCCESS" == "true" ]]; then
+        if [[ "$CONNECTED" == "true" ]]; then
           PLUMBER_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Acquiring...")
-          echo "🌐 Plumber Network IP: $PLUMBER_IP"
-          echo "🏢 Network Status: CONNECTED TO HEADQUARTERS"
+          echo "🌐 Network IP: $PLUMBER_IP"
+          echo "🏢 Status: CONNECTED TO HQ"
           
-          # Show network devices
-          echo "👥 Connected Plumber Devices:"
-          sudo tailscale status 2>/dev/null | head -5 || echo "   Getting device list..."
+          if command -v tmate >/dev/null 2>&1; then
+            EMERGENCY_SSH=$(tmate -S /tmp/emergency.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Initializing...")
+            echo "🚨 Emergency SSH: $EMERGENCY_SSH"
+          fi
+          
+          echo "🔐 Hero SSH: ssh jacky@$PLUMBER_IP"
+          
+          if command -v bt >/dev/null 2>&1; then
+            echo "🎛️ Control Panel: http://$PLUMBER_IP:7800"
+            echo "   Username: Ben10 | Password: omnitrix"
+          fi
         else
-          echo "🌐 Plumber Network: OFFLINE"
-          echo "📡 Emergency Systems: STANDBY"
-        fi
-        
-        # Emergency access information
-        if command -v tmate &>/dev/null; then
-          EMERGENCY_SSH=$(tmate -S /tmp/emergency_comms.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Initializing...")
-          echo "🚨 Emergency SSH: $EMERGENCY_SSH"
-        fi
-        
-        echo "🔐 Hero SSH Access: ssh jacky@$PLUMBER_IP"
-        echo "🗝️ Hero Password: [CONFIGURED]"
-        
-        if command -v bt &>/dev/null; then
-          echo ""
-          echo "🎛️ Alien Control Panel Access:"
-          sudo bt default 2>/dev/null || {
-            echo "   📍 URL: http://$PLUMBER_IP:7800"  
-            echo "   👤 Username: Ben10"
-            echo "   🔑 Password: omnitrix"
-          }
+          echo "⚠️ Network: OFFLINE"
         fi
         
         echo "═══════════════════════════════════════════════════════════"
-        echo "✅ PLUMBER NETWORK INTEGRATION COMPLETE! 🌌"
+        echo "✅ PLUMBER NETWORK INTEGRATION COMPLETE!"
 
-    # ═══════════════════════════════════════════════════════════════════
-    # 🌟 PHASE 4: ALIEN FORCE OPERATIONAL MODE
-    # ═══════════════════════════════════════════════════════════════════
-
-    - name: "👽 BRAINSTORM DEBUG SESSION"
-      if: github.event.inputs.debug_session == 'true' || github.event.inputs.alien_mode == 'brainstorm'
+    - name: "👽 DEBUG SESSION"
+      if: github.event.inputs.debug_session == 'true'
       run: |
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🧠        BRAINSTORM DEBUG SESSION ACTIVATED           👽"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "⚡ Galvan intellect engaged for system analysis!"
-        echo "🔍 Extended debugging session: 15 minutes"
-        echo "💡 Use emergency SSH for direct system access"
-        echo "═══════════════════════════════════════════════════════════"
+        echo "🧠 BRAINSTORM DEBUG MODE ACTIVATED!"
+        echo "⏰ Debug session: 15 minutes"
         
-        # Enhanced system analysis
-        echo "🔬 Running comprehensive system analysis..."
-        
-        echo "📊 System Resources:"
-        df -h | head -10
+        echo "📊 System Analysis:"
+        df -h | head -5
         free -h
+        sudo tailscale status 2>/dev/null || echo "Tailscale status unavailable"
         
-        echo "📡 Network Configuration:"
-        ip addr show | grep -E "inet |UP"
+        echo "🔍 15-minute debug window active..."
+        sleep 900
         
-        echo "🔍 Active Services:"
-        systemctl list-units --state=active --type=service | head -10
-        
-        echo "🐳 Docker Status:"
-        docker version 2>/dev/null || echo "Docker not available"
-        
-        echo "⏰ Debug session active for 15 minutes..."
-        echo "🧠 Brainstorm says: Use this time wisely, Ben!"
-        
-        sleep 900  # 15 minutes
-        
-        echo "✅ Brainstorm debug session complete! 🧠"
+        echo "✅ Debug session complete!"
 
     - name: "🛸 OMNITRIX OPERATIONAL SESSION"
       run: |
-        set -euo pipefail
+        set -e
         
         echo "═══════════════════════════════════════════════════════════"
-        echo "🛸           OMNITRIX OPERATIONAL SESSION              👽"  
-        echo "═══════════════════════════════════════════════════════════"
-        echo "⚡ Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
-        echo "⏰ Session Duration: $((HERO_SESSION_DURATION / 3600)) hours $((HERO_SESSION_DURATION % 3600 / 60)) minutes"
-        echo "🕐 Mission Start: $(date)"
-        echo "🛡️ Hero on patrol! Universe protection active!"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        # Initialize session variables
-        MISSION_START=$(date +%s)
-        LAST_STATUS_UPDATE=0
-        BACKUP_INTERVAL=$((30 * 60))  # 30 minutes
-        LAST_BACKUP=0
-        STATUS_INTERVAL=$((10 * 60))  # 10 minutes
-        
-        # Operational mode selection
-        case "${{ github.event.inputs.alien_mode || 'humungousaur' }}" in
-          "humungousaur")
-            echo "🦕 HUMUNGOUSAUR MODE: Maximum power and durability!"
-            CHECK_INTERVAL=60  # 1 minute checks
-            ;;
-          "brainstorm")
-            echo "🧠 BRAINSTORM MODE: Enhanced monitoring and analysis!"
-            CHECK_INTERVAL=30  # 30 second checks
-            ;;
-          "jetray")
-            echo "⚡ JETRAY MODE: High-speed operations!"
-            CHECK_INTERVAL=15  # 15 second checks
-            STATUS_INTERVAL=$((5 * 60))  # 5 minute status
-            ;;
-          "chromastone")
-            echo "💎 CHROMASTONE MODE: Maximum protection and error handling!"
-            CHECK_INTERVAL=45  # 45 second checks
-            ;;
-          *)
-            echo "🛸 DEFAULT MODE: Standard alien operations!"
-            CHECK_INTERVAL=60
-            ;;
-        esac
-        
-        # Main operational loop
-        while true; do
-          CURRENT_TIME=$(date +%s)
-          ELAPSED=$((CURRENT_TIME - MISSION_START))
-          
-          # Check for mission completion
-          if [ $ELAPSED -gt $HERO_SESSION_DURATION ]; then
-            echo "⏰ Mission duration completed! Time for universe backup..."
-            break
-          fi
-          
-          # Check for emergency shutdown signal
-          if [ -f /tmp/stop ] || [ -f /tmp/emergency_shutdown ]; then
-            echo "🚨 EMERGENCY SHUTDOWN SIGNAL DETECTED!"
-            echo "🛡️ Initiating emergency protocols..."
-            rm -f /tmp/stop /tmp/emergency_shutdown 2>/dev/null || true
-            break
-          fi
-          
-          # Periodic system backup
-          if [ $((CURRENT_TIME - LAST_BACKUP)) -gt $BACKUP_INTERVAL ]; then
-            echo "💾 Initiating periodic universe backup..."
-            
-            # Quick backup of critical data
-            QUICK_BACKUP_DIR="/tmp/omnitrix_quick_backup"
-            sudo mkdir -p "$QUICK_BACKUP_DIR"
-            
-            # Backup critical alien data
-            echo "⚡ Backing up critical alien technology..."
-            sudo cp -r /var/lib/tailscale "$QUICK_BACKUP_DIR/" 2>/dev/null || true
-            sudo cp -r /home/jacky "$QUICK_BACKUP_DIR/" 2>/dev/null || true
-            
-            # Create quick backup archive
-            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-            sudo tar -czf "/tmp/omnitrix-quick-$TIMESTAMP.tar.gz" -C /tmp omnitrix_quick_backup 2>/dev/null || true
-            
-            # Upload to Galvan Prime if possible
-            rclone copy "/tmp/omnitrix-quick-$TIMESTAMP.tar.gz" "${GALVAN_CLOUD}/" 2>/dev/null || {
-              echo "⚠️ Galvan Prime upload failed, backup stored locally"
-            }
-            
-            # Cleanup
-            sudo rm -rf "$QUICK_BACKUP_DIR" "omnitrix-quick-$TIMESTAMP.tar.gz"
-            
-            LAST_BACKUP=$CURRENT_TIME
-            echo "✅ Periodic backup complete!"
-          fi
-          
-          # Status update
-          if [ $((CURRENT_TIME - LAST_STATUS_UPDATE)) -gt $STATUS_INTERVAL ]; then
-            REMAINING=$((HERO_SESSION_DURATION - ELAPSED))
-            HOURS=$((REMAINING / 3600))
-            MINUTES=$(((REMAINING % 3600) / 60))
-            
-            echo "═══════════════════════════════════════════════════════════"
-            echo "🛸 OMNITRIX STATUS REPORT - $(date)"
-            echo "═══════════════════════════════════════════════════════════"
-            echo "⏰ Time Remaining: ${HOURS}h ${MINUTES}m"
-            echo "👽 Alien Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
-            echo "🌐 Universe: $PLUMBER_NETWORK"
-            
-            # System health check
-            echo "🔍 System Health:"
-            echo "  🔗 Network: $(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null || echo 'Unknown')"
-            echo "  🗄️ Database: $(systemctl is-active mariadb 2>/dev/null || echo 'Unknown')" 
-            echo "  🎛️ Control Panel: $(systemctl is-active bt 2>/dev/null || command -v bt &>/dev/null && echo 'Active' || echo 'Unknown')"
-            echo "  💾 Disk Usage: $(df -h / | awk 'NR==2 {print $5}')"
-            echo "  🧠 Memory: $(free | awk 'NR==2{printf "%.1f%%", $3*100/$2}')"
-            
-            echo "🛡️ Hero Patrol: ACTIVE"
-            echo "═══════════════════════════════════════════════════════════"
-            
-            LAST_STATUS_UPDATE=$CURRENT_TIME
-          fi
-          
-          # Alien-specific monitoring
-          case "${{ github.event.inputs.alien_mode || 'humungousaur' }}" in
-            "brainstorm")
-              # Enhanced monitoring for Brainstorm mode
-              if [ $((ELAPSED % 300)) -eq 0 ]; then  # Every 5 minutes
-                echo "🧠 Brainstorm Analysis: Monitoring $(($(ps aux | wc -l) - 1)) processes, $(ss -tuln | wc -l) network connections"
-              fi
-              ;;
-            "chromastone")
-              # Error detection for Chromastone mode
-              if journalctl --since="1 minute ago" --priority=err --quiet --no-pager | grep -q .; then
-                echo "💎 Chromastone Shield: Error patterns detected, increasing monitoring"
-              fi
-              ;;
-          esac
-          
-          # Sleep based on alien mode
-          sleep $CHECK_INTERVAL
-        done
-        
-        echo "🎬 OMNITRIX OPERATIONAL SESSION COMPLETE!"
-        echo "🛸 Preparing for universe preservation protocols..."
-
-    # ═══════════════════════════════════════════════════════════════════  
-    # 🌟 PHASE 5: UNIVERSE PRESERVATION & TEMPORAL BACKUP PROTOCOLS
-    # ═══════════════════════════════════════════════════════════════════
-
-    - name: "💾 UNIVERSE PRESERVATION PROTOCOL"
-      if: always()
-      run: |
-        set -euo pipefail
-        
-        echo "═══════════════════════════════════════════════════════════"
-        echo "💾      UNIVERSE PRESERVATION PROTOCOL INITIATED       🌌"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🛸 Creating temporal data core for universe continuity..."
-        echo "⚡ Initiating selective alien technology backup..."
-        echo "═══════════════════════════════════════════════════════════"
-        
-        # Create preservation chamber
-        sudo mkdir -p "$BACKUP_NEXUS"
-        
-        # Graceful service shutdown for consistent backup
-        echo "🛑 Initiating graceful alien system shutdown..."
-        
-        SERVICES_TO_STOP=("bt" "mariadb" "nginx" "apache2")
-        for service in "${SERVICES_TO_STOP[@]}"; do
-          if systemctl is-active "$service" &>/dev/null; then
-            echo "⚡ Gracefully shutting down $service..."
-            sudo systemctl stop "$service" 2>/dev/null || {
-              echo "⚠️ $service shutdown failed, force stopping..."
-              sudo pkill -f "$service" 2>/dev/null || true
-            }
-          fi
-        done
-        
-        # Wait for clean shutdown
-        sleep 10
-        
-        # Create preservation staging area
-        PRESERVATION_CHAMBER="/tmp/universe_preservation"
-        sudo mkdir -p "$PRESERVATION_CHAMBER"
-        
-        echo "📦 Collecting alien technology and hero data..."
-        
-        # Hero Base Data (home directories)
-        echo "🏠 Preserving Hero Base data..."
-        if [ -d /home ] && [ "$(sudo ls -A /home 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/home"
-          sudo cp -rf /home/* "$PRESERVATION_CHAMBER/home/" 2>/dev/null || {
-            echo "⚠️ Some hero base files failed to preserve"
-          }
-        fi
-        
-        # Command Center (root directory)  
-        echo "👑 Preserving Command Center..."
-        if [ -d /root ] && [ "$(sudo ls -A /root 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/root"
-          sudo cp -rf /root/. "$PRESERVATION_CHAMBER/root/" 2>/dev/null || {
-            echo "⚠️ Some command center files failed to preserve"
-          }
-        fi
-        
-        # Plumber Network State (Tailscale)
-        echo "🔗 Preserving Plumber Network quantum state..."
-        if [ -d /var/lib/tailscale ] && [ "$(sudo ls -A /var/lib/tailscale 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/tailscale"
-          sudo cp -rf /var/lib/tailscale/* "$PRESERVATION_CHAMBER/tailscale/" 2>/dev/null || {
-            echo "⚠️ Plumber network state preservation incomplete"
-          }
-        fi
-        
-        # Database Fortress (MariaDB)
-        echo "🗄️ Preserving Database Fortress..."
-        if [ -d /var/lib/mysql ] && [ "$(sudo ls -A /var/lib/mysql 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/mysql"
-          sudo cp -rf /var/lib/mysql/* "$PRESERVATION_CHAMBER/mysql/" 2>/dev/null || {
-            echo "⚠️ Database fortress preservation incomplete"
-          }
-        fi
-        
-        # Web Arsenal (/var/www)
-        echo "🌐 Preserving Web Arsenal..."
-        if [ -d /var/www ] && [ "$(sudo ls -A /var/www 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/www"
-          sudo cp -rf /var/www/* "$PRESERVATION_CHAMBER/www/" 2>/dev/null || {
-            echo "⚠️ Web arsenal preservation incomplete"
-          }
-        fi
-        
-        # Alien Control Panel (aaPanel)
-        echo "🎛️ Preserving Alien Control Panel..."
-        if [ -d /www ] && [ "$(sudo ls -A /www 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/aapanel"
-          sudo cp -rf /www/* "$PRESERVATION_CHAMBER/aapanel/" 2>/dev/null || {
-            echo "⚠️ Control panel preservation incomplete"
-          }
-        fi
-        
-        # System Configuration Matrix
-        echo "⚙️ Preserving System Configuration Matrix..."
-        sudo mkdir -p "$PRESERVATION_CHAMBER/etc_configs"
-        
-        # Critical configuration preservation
-        CRITICAL_CONFIGS=(
-          "hostname" "hosts" "ssh" "nginx" "apache2" 
-          "mysql" "sudoers.d" "crontab" "systemd/system"
-          "network" "resolv.conf"
-        )
-        
-        for config in "${CRITICAL_CONFIGS[@]}"; do
-          if [ -e "/etc/$config" ]; then
-            echo "📄 Preserving /etc/$config..."
-            sudo cp -rf "/etc/$config" "$PRESERVATION_CHAMBER/etc_configs/" 2>/dev/null || true
-          fi
-        done
-        
-        # Alien Applications (/opt)
-        echo "👽 Preserving Alien Applications..."
-        if [ -d /opt ] && [ "$(sudo ls -A /opt 2>/dev/null)" ]; then
-          sudo mkdir -p "$PRESERVATION_CHAMBER/opt"
-          sudo cp -rf /opt/* "$PRESERVATION_CHAMBER/opt/" 2>/dev/null || {
-            echo "⚠️ Alien applications preservation incomplete"
-          }
-        fi
-        
-        # Create universe manifest
-        echo "📋 Creating Universe Preservation Manifest..."
-        cat > "$PRESERVATION_CHAMBER/universe-manifest.txt" << EOF
-        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
-        ═══════════════════════════════════════════════════════════════════
-
-        🌟 Hero: Ben Tennyson | Session: Alien Force Edition
-        ⏰ Preservation Date: $(date)
-        🆔 Session ID: ${{ github.run_id }}
-        🌍 Universe: $PLUMBER_NETWORK
-        👽 Alien Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}
-
-        📦 PRESERVED ALIEN TECHNOLOGY:
-        ✅ Hero Base (/home) - Personal data and configurations
-        ✅ Command Center (/root) - Root user environment
-        ✅ Plumber Network State (/var/lib/tailscale) - VPN quantum state
-        ✅ Database Fortress (/var/lib/mysql) - MariaDB alien databases  
-        ✅ Web Arsenal (/var/www) - Web server alien technology
-        ✅ Control Panel (/www) - aaPanel alien command interface
-        ✅ Configuration Matrix (/etc) - Critical system configurations
-        ✅ Alien Applications (/opt) - Custom installed alien tech
-
-        🚫 EXCLUDED FOR EFFICIENCY:
-        ❌ Docker Container Overlay (pre-installed technology)
-        ❌ System Packages (available in base universe)
-        ❌ Temporary Files (ephemeral data)
-        ❌ Virtual Filesystems (auto-generated)
-        ❌ Cache Files (reconstructible data)
-
-        🛡️ PRESERVATION METHOD: Selective Alien Technology Backup
-        ⚡ SPEED OPTIMIZED: Fast backup/restore cycles
-        🌌 UNIVERSE CONTINUITY: 100% data preservation
-        👽 ALIEN FORCE: Maximum efficiency protocols
-
-        It's Hero Time! 💥
-        EOF
-        
-        # Create temporal data core
-        echo "🔬 Compressing universe into temporal data core..."
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        CORE_NAME="omnitrix-universe-$TIMESTAMP.tar.gz"
-        
-        cd /tmp
-        sudo tar -czf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" universe_preservation/ 2>/dev/null || {
-          echo "⚠️ Standard compression failed, using alternative method..."
-          sudo tar -cf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" universe_preservation/
-        }
-        
-        # Set proper permissions
-        sudo chown runner:runner "$BACKUP_NEXUS/$BACKUP_ARTIFACT"
-        
-        # Validation and reporting
-        if [[ -f "$BACKUP_NEXUS/$BACKUP_ARTIFACT" ]]; then
-          CORE_SIZE=$(du -h "$BACKUP_NEXUS/$BACKUP_ARTIFACT" | cut -f1)
-          echo "═══════════════════════════════════════════════════════════"
-          echo "✅ TEMPORAL DATA CORE CREATED SUCCESSFULLY! 🌌"
-          echo "═══════════════════════════════════════════════════════════"
-          echo "💾 Core Size: $CORE_SIZE"
-          echo "⚡ Compression: Alien technology optimized"
-          echo "🔬 Integrity: Verified and secured"
-          echo "═══════════════════════════════════════════════════════════"
-          
-          # Show core contents preview
-          echo "📋 Temporal Data Core Contents:"
-          tar -tzf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" | head -15
-        else
-          echo "❌ CRITICAL: Temporal data core creation failed!"
-          echo "🛸 Universe preservation compromised!"
-          exit 1
-        fi
-        
-        # Cleanup preservation chamber
-        sudo rm -rf "$PRESERVATION_CHAMBER"
-        echo "🧹 Preservation chamber cleaned and secured!"
-
-    - name: "🚀 GALACTIC ARTIFACT TRANSMISSION"
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.BACKUP_ARTIFACT }}
-        path: ${{ env.BACKUP_NEXUS }}/${{ env.BACKUP_ARTIFACT }}
-        retention-days: 7
-        if-no-files-found: error
-
-    - name: "☁️ GALVAN PRIME CLOUD SYNCHRONIZATION"
-      if: always()  
-      run: |
-        set -euo pipefail
-        
-        echo "═══════════════════════════════════════════════════════════"
-        echo "☁️      GALVAN PRIME CLOUD SYNCHRONIZATION             🌌"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🛸 Uploading temporal data core to Galvan Prime..."
-        echo "⚡ Establishing quantum link to GitHub artifacts..."
-        
-        # Wait for artifact processing with exponential backoff
-        echo "⏰ Waiting for GitHub artifact processing..."
-        
-        SYNC_SUCCESS=false
-        for attempt in {1..8}; do
-          wait_time=$((attempt * 10))  # 10, 20, 30... seconds
+        echo "🛸           OMNITRIX OPERATIONAL SESSION              👽"
+        echo "═══════════════════════════════
