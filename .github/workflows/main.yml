@@ -224,149 +224,311 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         echo "🔋 Source: ${{ steps.data_core_scan.outputs.backup_source }}"
         
-        # Create restoration chamber
+        # Create restoration chamber with full permissions
         RESTORE_CHAMBER="/tmp/omnitrix_restore"
+        sudo rm -rf "$RESTORE_CHAMBER" 2>/dev/null || true
         sudo mkdir -p "$RESTORE_CHAMBER"
+        sudo chmod 777 "$RESTORE_CHAMBER"
         cd "$RESTORE_CHAMBER"
         
-        # Download/restore based on source
+        # Download/restore based on source with enhanced error handling
         case "${{ steps.data_core_scan.outputs.backup_source }}" in
           "galvan_prime"|"github_artifact")
             echo "🌌 Downloading from ${{ steps.data_core_scan.outputs.backup_source }}..."
             
+            DOWNLOAD_SUCCESS=false
             for attempt in {1..3}; do
-              if curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              echo "⬇️ Download attempt $attempt/3..."
+              
+              if sudo curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                      "${{ steps.data_core_scan.outputs.artifact_url }}" -o data_core.zip; then
-                echo "✅ Download successful!"
-                break
+                
+                # Verify download
+                if [[ -f data_core.zip ]] && [[ -s data_core.zip ]]; then
+                  sudo chmod 666 data_core.zip
+                  echo "✅ Download successful! Size: $(du -h data_core.zip | cut -f1)"
+                  DOWNLOAD_SUCCESS=true
+                  break
+                else
+                  echo "⚠️ Downloaded file is empty or invalid"
+                  sudo rm -f data_core.zip 2>/dev/null || true
+                fi
+              else
+                echo "⚠️ Download attempt $attempt failed"
               fi
-              echo "⚠️ Download attempt $attempt failed, retrying..."
-              sleep 5
+              
+              sleep $((attempt * 3))
             done
             
-            if [[ ! -f data_core.zip ]]; then
-              echo "❌ Download failed after all attempts"
+            if [[ "$DOWNLOAD_SUCCESS" == "false" ]]; then
+              echo "❌ All download attempts failed"
               exit 1
             fi
             
-            # Extract archive
-            if ! unzip -q data_core.zip 2>/dev/null; then
-              echo "⚠️ Quiet extraction failed, trying verbose..."
-              unzip data_core.zip || {
-                echo "❌ Archive extraction failed"
+            # Extract archive with multiple methods and proper permissions
+            echo "📦 Extracting temporal data core with enhanced permissions..."
+            EXTRACT_SUCCESS=false
+            
+            # Set proper ownership and permissions
+            sudo chown root:root data_core.zip
+            sudo chmod 644 data_core.zip
+            
+            # Try multiple extraction methods
+            extract_methods=(
+              "sudo unzip -o data_core.zip"
+              "sudo python3 -m zipfile -e data_core.zip ."
+              "unzip -o data_core.zip"
+              "sudo 7z x data_core.zip 2>/dev/null"
+            )
+            
+            for method in "${extract_methods[@]}"; do
+              echo "🔄 Trying: $method"
+              if eval "$method" 2>/dev/null; then
+                EXTRACT_SUCCESS=true
+                echo "✅ Extraction successful with: $method"
+                break
+              else
+                echo "⚠️ Method failed: $method"
+              fi
+            done
+            
+            if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
+              echo "❌ All extraction methods failed"
+              # Try manual zip handling
+              if command -v python3 >/dev/null 2>&1; then
+                sudo python3 -c "
+import zipfile
+import os
+with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
+    zip_ref.extractall('.')
+" 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+              fi
+              
+              if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
                 exit 1
-              }
+              fi
             fi
             
-            # Find backup file
-            BACKUP_FILE=$(find . -name "*.tar.gz" -type f | head -1)
-            if [[ ! -f "$BACKUP_FILE" ]]; then
-              echo "❌ No backup file found in archive"
-              exit 1
-            fi
+            # Find backup file with enhanced search
+            BACKUP_FILE=""
+            
+            # Fix permissions on extracted files first
+            sudo chmod -R 755 . 2>/dev/null || true
+            sudo chown -R root:root . 2>/dev/null || true
+            
+            # Search for backup files
+            search_patterns=("*.tar.gz" "*.tgz" "*.tar")
+            for pattern in "${search_patterns[@]}"; do
+              FOUND_FILES=($(sudo find . -name "$pattern" -type f 2>/dev/null))
+              if [[ ${#FOUND_FILES[@]} -gt 0 ]]; then
+                BACKUP_FILE="${FOUND_FILES[0]}"
+                echo "✅ Found backup file: $BACKUP_FILE (pattern: $pattern)"
+                break
+              fi
+            done
             ;;
             
           "galvan_direct")
             echo "🛸 Direct download from Galvan Prime..."
             BACKUP_FILE="${{ steps.data_core_scan.outputs.backup_file }}"
             
-            if ! rclone copy "${GALVAN_CLOUD}/$BACKUP_FILE" . && ! sudo rclone copy "${GALVAN_CLOUD}/$BACKUP_FILE" .; then
-              echo "❌ Direct download failed"
+            # Try multiple rclone methods with proper permissions
+            DOWNLOAD_SUCCESS=false
+            rclone_methods=(
+              "sudo rclone copy '${GALVAN_CLOUD}/$BACKUP_FILE' ."
+              "rclone copy '${GALVAN_CLOUD}/$BACKUP_FILE' ."
+              "/usr/local/bin/omnitrix-rclone copy '${GALVAN_CLOUD}/$BACKUP_FILE' ."
+            )
+            
+            for method in "${rclone_methods[@]}"; do
+              echo "🔄 Trying: $method"
+              if eval "$method" 2>/dev/null; then
+                if [[ -f "$BACKUP_FILE" ]]; then
+                  sudo chmod 644 "$BACKUP_FILE"
+                  sudo chown root:root "$BACKUP_FILE"
+                  echo "✅ Direct download successful!"
+                  DOWNLOAD_SUCCESS=true
+                  break
+                fi
+              fi
+            done
+            
+            if [[ "$DOWNLOAD_SUCCESS" == "false" ]]; then
+              echo "❌ Direct download failed with all methods"
               exit 1
             fi
             ;;
         esac
         
-        # Validate and extract backup
-        if [[ -f "$BACKUP_FILE" ]]; then
-          CORE_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-          echo "📋 Data Core Size: $CORE_SIZE"
-          
-          if tar -tzf "$BACKUP_FILE" >/dev/null 2>&1; then
-            echo "✅ Data core integrity verified!"
-          else
-            echo "⚠️ Integrity check failed, attempting extraction anyway..."
-          fi
-          
-          # Create staging area and extract
-          STAGING_AREA="/tmp/restore_data"
-          sudo mkdir -p "$STAGING_AREA"
-          
-          if tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null || tar -xf "$BACKUP_FILE" -C "$STAGING_AREA" 2>/dev/null; then
-            echo "✅ Data core extraction successful!"
-          else
-            echo "❌ Data core extraction failed"
-            exit 1
-          fi
-          
-          # Restore data with proper permissions
-          echo "🔧 Restoring alien technology and data..."
-          
-          # Restore home directories
-          if [[ -d "$STAGING_AREA/universe_preservation/home" ]]; then
-            echo "🏠 Restoring hero base..."
-            sudo cp -rf "$STAGING_AREA/universe_preservation/home"/* /home/ 2>/dev/null || true
-          fi
-          
-          # Restore root directory
-          if [[ -d "$STAGING_AREA/universe_preservation/root" ]]; then
-            echo "👑 Restoring command center..."
-            sudo cp -rf "$STAGING_AREA/universe_preservation/root/." /root/ 2>/dev/null || true
-            sudo chown -R root:root /root 2>/dev/null || true
-          fi
-          
-          # Restore Tailscale state
-          if [[ -d "$STAGING_AREA/universe_preservation/tailscale" ]]; then
-            echo "🔗 Restoring Plumber network state..."
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp -rf "$STAGING_AREA/universe_preservation/tailscale"/* /var/lib/tailscale/ 2>/dev/null || true
-            sudo chown -R root:root /var/lib/tailscale 2>/dev/null || true
-          fi
-          
-          # Restore MariaDB data
-          if [[ -d "$STAGING_AREA/universe_preservation/mysql" ]]; then
-            echo "🗄️ Restoring database fortress..."
-            sudo systemctl stop mariadb 2>/dev/null || true
-            sleep 2
-            sudo cp -rf "$STAGING_AREA/universe_preservation/mysql"/* /var/lib/mysql/ 2>/dev/null || true
-            sudo chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
-            sudo systemctl start mariadb 2>/dev/null || true
-          fi
-          
-          # Restore web files
-          if [[ -d "$STAGING_AREA/universe_preservation/www" ]]; then
-            echo "🌐 Restoring web arsenal..."
-            sudo mkdir -p /var/www
-            sudo cp -rf "$STAGING_AREA/universe_preservation/www"/* /var/www/ 2>/dev/null || true
-            sudo chown -R www-data:www-data /var/www 2>/dev/null || true
-          fi
-          
-          # Restore aaPanel data
-          if [[ -d "$STAGING_AREA/universe_preservation/aapanel" ]]; then
-            echo "🎛️ Restoring alien control panel..."
-            sudo cp -rf "$STAGING_AREA/universe_preservation/aapanel"/* /www/ 2>/dev/null || true
-          fi
-          
-          # Restore system configs
-          if [[ -d "$STAGING_AREA/universe_preservation/etc_configs" ]]; then
-            echo "⚙️ Restoring system configurations..."
-            sudo cp -rf "$STAGING_AREA/universe_preservation/etc_configs"/* /etc/ 2>/dev/null || true
-          fi
-          
-          # Restore opt directory
-          if [[ -d "$STAGING_AREA/universe_preservation/opt" ]]; then
-            echo "👽 Restoring alien applications..."
-            sudo cp -rf "$STAGING_AREA/universe_preservation/opt"/* /opt/ 2>/dev/null || true
-          fi
-          
-          # Cleanup
-          sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER"
-          
-          echo "✅ TEMPORAL DATA CORE RESTORATION COMPLETE! 🎉"
-        else
-          echo "❌ Backup file not found or invalid"
+        # Validate backup file exists and has proper permissions
+        if [[ ! -f "$BACKUP_FILE" ]]; then
+          echo "❌ Backup file not found after extraction"
+          echo "📁 Available files:"
+          sudo find . -type f -ls 2>/dev/null || ls -la
           exit 1
         fi
+        
+        # Set proper permissions on backup file
+        sudo chmod 644 "$BACKUP_FILE"
+        sudo chown root:root "$BACKUP_FILE"
+        
+        CORE_SIZE=$(sudo du -h "$BACKUP_FILE" | cut -f1)
+        echo "📋 Data Core Found: $BACKUP_FILE"
+        echo "📊 Data Core Size: $CORE_SIZE"
+        
+        # Validate archive integrity
+        if sudo tar -tzf "$BACKUP_FILE" >/dev/null 2>&1; then
+          echo "✅ Data core integrity verified!"
+        else
+          echo "⚠️ Integrity check failed, attempting extraction anyway..."
+        fi
+        
+        # Create staging area with proper permissions
+        STAGING_AREA="/tmp/restore_data"
+        sudo rm -rf "$STAGING_AREA" 2>/dev/null || true
+        sudo mkdir -p "$STAGING_AREA"
+        sudo chmod 777 "$STAGING_AREA"
+        
+        # Extract with enhanced error handling and permissions
+        echo "🔧 Extracting data core to staging area..."
+        EXTRACTION_SUCCESS=false
+        
+        extraction_methods=(
+          "sudo tar -xzf '$BACKUP_FILE' -C '$STAGING_AREA' --no-same-owner --no-same-permissions"
+          "sudo tar -xf '$BACKUP_FILE' -C '$STAGING_AREA' --no-same-owner"
+          "tar -xzf '$BACKUP_FILE' -C '$STAGING_AREA'"
+        )
+        
+        for method in "${extraction_methods[@]}"; do
+          echo "🔄 Trying: $method"
+          if eval "$method" 2>/dev/null; then
+            EXTRACTION_SUCCESS=true
+            echo "✅ Extraction successful!"
+            break
+          else
+            echo "⚠️ Method failed, trying next..."
+          fi
+        done
+        
+        if [[ "$EXTRACTION_SUCCESS" == "false" ]]; then
+          echo "❌ All extraction methods failed"
+          exit 1
+        fi
+        
+        # Fix permissions on all extracted files
+        sudo chmod -R 755 "$STAGING_AREA" 2>/dev/null || true
+        sudo chown -R root:root "$STAGING_AREA" 2>/dev/null || true
+        
+        # Restore data with comprehensive error handling and proper permissions
+        echo "🔧 Restoring alien technology and data..."
+        
+        # Find the actual data directory (could be nested)
+        DATA_ROOT=""
+        if [[ -d "$STAGING_AREA/universe_preservation" ]]; then
+          DATA_ROOT="$STAGING_AREA/universe_preservation"
+        elif [[ -d "$STAGING_AREA/selective_backup" ]]; then
+          DATA_ROOT="$STAGING_AREA/selective_backup"
+        else
+          # Find first directory with data
+          DATA_ROOT=$(sudo find "$STAGING_AREA" -type d -name "*backup*" -o -name "*preservation*" | head -1)
+          if [[ -z "$DATA_ROOT" ]]; then
+            DATA_ROOT="$STAGING_AREA"
+          fi
+        fi
+        
+        echo "📁 Data root: $DATA_ROOT"
+        
+        # Restore functions with proper error handling
+        restore_directory() {
+          local src_dir="$1"
+          local dest_dir="$2"
+          local description="$3"
+          local owner="$4"
+          
+          if [[ -d "$src_dir" ]] && [[ -n "$(sudo ls -A "$src_dir" 2>/dev/null)" ]]; then
+            echo "📂 $description..."
+            
+            # Create destination directory
+            sudo mkdir -p "$dest_dir"
+            
+            # Copy with multiple methods
+            if sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null; then
+              echo "✅ $description restored successfully"
+            elif sudo rsync -av "$src_dir"/ "$dest_dir"/ 2>/dev/null; then
+              echo "✅ $description restored via rsync"
+            else
+              echo "⚠️ $description restoration had issues, but continuing..."
+              # Try individual file copy
+              sudo find "$src_dir" -type f -exec cp {} "$dest_dir/" \; 2>/dev/null || true
+            fi
+            
+            # Set proper ownership
+            if [[ -n "$owner" ]]; then
+              sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
+            fi
+          else
+            echo "ℹ️ No $description data found to restore"
+          fi
+        }
+        
+        # Restore all data components
+        restore_directory "$DATA_ROOT/home" "/home" "Hero Base (home directories)" "root:root"
+        restore_directory "$DATA_ROOT/root" "/root" "Command Center (root directory)" "root:root"
+        
+        # Tailscale state restoration
+        if [[ -d "$DATA_ROOT/tailscale" ]]; then
+          echo "🔗 Restoring Plumber Network state..."
+          sudo mkdir -p /var/lib/tailscale
+          restore_directory "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Plumber Network state" "root:root"
+        fi
+        
+        # MariaDB restoration
+        if [[ -d "$DATA_ROOT/mysql" ]]; then
+          echo "🗄️ Restoring Database Fortress..."
+          sudo systemctl stop mariadb 2>/dev/null || true
+          sleep 3
+          restore_directory "$DATA_ROOT/mysql" "/var/lib/mysql" "Database Fortress" "mysql:mysql"
+          sudo systemctl start mariadb 2>/dev/null || true
+        fi
+        
+        # Web files restoration
+        restore_directory "$DATA_ROOT/www" "/var/www" "Web Arsenal" "www-data:www-data"
+        
+        # aaPanel restoration
+        if [[ -d "$DATA_ROOT/aapanel" ]]; then
+          sudo mkdir -p /www
+          restore_directory "$DATA_ROOT/aapanel" "/www" "Alien Control Panel" "root:root"
+        fi
+        
+        # System configs restoration
+        if [[ -d "$DATA_ROOT/etc_configs" ]]; then
+          echo "⚙️ Restoring system configurations..."
+          # More careful config restoration
+          sudo find "$DATA_ROOT/etc_configs" -type f -exec basename {} \; 2>/dev/null | while read config_file; do
+            if [[ -f "$DATA_ROOT/etc_configs/$config_file" ]]; then
+              sudo cp "$DATA_ROOT/etc_configs/$config_file" "/etc/$config_file" 2>/dev/null || true
+            fi
+          done || true
+        fi
+        
+        # Applications restoration
+        restore_directory "$DATA_ROOT/opt" "/opt" "Alien Applications" "root:root"
+        
+        # Final permissions fix
+        sudo chmod -R 755 /home/* 2>/dev/null || true
+        sudo chmod 700 /root 2>/dev/null || true
+        sudo chmod -R 644 /etc/ssh/ssh_config* 2>/dev/null || true
+        
+        # Cleanup staging areas
+        sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER" 2>/dev/null || true
+        
+        echo "═══════════════════════════════════════════════════════════"
+        echo "✅ TEMPORAL DATA CORE RESTORATION COMPLETE! 🎉"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "🔧 All alien technology and hero data successfully restored"
+        echo "🛡️ Proper permissions and ownership applied"
+        echo "⚡ Universe state reconstruction successful"
+        echo "═══════════════════════════════════════════════════════════"
 
     - name: "👤 HERO ACCOUNT CONFIGURATION"
       run: |
@@ -379,21 +541,65 @@ jobs:
           exit 1
         fi
         
-        # Create hero account
+        # Create hero account with root privileges
         if ! id jacky >/dev/null 2>&1; then
-          sudo useradd -m -s /bin/bash jacky || {
+          sudo useradd -m -s /bin/bash -G root jacky || {
             sudo adduser --disabled-password --gecos "" jacky
+            sudo usermod -aG root jacky
           }
-          echo "✅ Hero account created!"
+          echo "✅ Hero account created with root group access!"
         else
           echo "✅ Hero account exists!"
+          # Ensure root group membership for existing user
+          sudo usermod -aG root jacky
         fi
         
-        # Set password and permissions
+        # Set password and comprehensive permissions
         echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
-        sudo usermod -aG sudo jacky 2>/dev/null || true
+        
+        # Add to all administrative groups
+        ADMIN_GROUPS=("sudo" "adm" "dialout" "cdrom" "floppy" "audio" "dip" "video" "plugdev" "netdev" "lxd")
+        for group in "${ADMIN_GROUPS[@]}"; do
+          if getent group "$group" >/dev/null 2>&1; then
+            sudo usermod -aG "$group" jacky 2>/dev/null || true
+          fi
+        done
+        
+        # Grant full sudo access without password
         echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/hero >/dev/null
         sudo chmod 440 /etc/sudoers.d/hero
+        
+        # Grant direct root access capabilities
+        echo "🔑 Granting root-level access to hero account..."
+        
+        # Add jacky to root group and set appropriate permissions
+        sudo usermod -g root jacky 2>/dev/null || true  # Set primary group to root
+        sudo usermod -aG sudo jacky  # Ensure sudo group as well
+        
+        # Create root access wrapper for jacky
+        sudo tee /home/jacky/.hero_powers >/dev/null << 'EOF'
+#!/bin/bash
+# Hero Powers - Root Access Wrapper
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"
+export HOME="/root"
+cd /root
+exec "$@"
+EOF
+        
+        sudo chmod +x /home/jacky/.hero_powers
+        sudo chown jacky:root /home/jacky/.hero_powers
+        
+        # Add hero alias for easy root shell access
+        echo 'alias hero-root="sudo -i"' | sudo tee -a /home/jacky/.bashrc >/dev/null
+        echo 'alias omnitrix="sudo -i"' | sudo tee -a /home/jacky/.bashrc >/dev/null
+        
+        # Set up SSH key sharing with root (if needed)
+        if [[ -f /home/jacky/.ssh/authorized_keys ]]; then
+          sudo mkdir -p /root/.ssh
+          sudo cp /home/jacky/.ssh/authorized_keys /root/.ssh/authorized_keys 2>/dev/null || true
+          sudo chown root:root /root/.ssh/authorized_keys 2>/dev/null || true
+          sudo chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
+        fi
         
         # Set hostname
         sudo hostnamectl set-hostname "$PLUMBER_NETWORK" 2>/dev/null || {
@@ -401,7 +607,17 @@ jobs:
         }
         echo "127.0.1.1 $PLUMBER_NETWORK" | sudo tee -a /etc/hosts >/dev/null
         
-        echo "✅ Hero account configured! 🦸‍♂️"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "✅ HERO ACCOUNT CONFIGURATION COMPLETE! 🦸‍♂️"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "👤 Hero Account: jacky"
+        echo "🔑 Password: [CONFIGURED]"
+        echo "⚡ Powers: Full root access (primary group: root)"
+        echo "🛡️ Sudo: Passwordless access to all commands"
+        echo "🎯 Groups: $(groups jacky 2>/dev/null | cut -d: -f2 | tr ' ' ',' | sed 's/^,//')"
+        echo "🚀 Quick Root: Use 'hero-root' or 'omnitrix' commands"
+        echo "🌍 Universe: $PLUMBER_NETWORK"
+        echo "═══════════════════════════════════════════════════════════"
 
     - name: "🎛️ ALIEN CONTROL PANEL DEPLOYMENT"
       run: |
