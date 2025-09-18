@@ -145,7 +145,7 @@ jobs:
         
         # Create secure configuration directory
         sudo mkdir -p ~/.config/rclone
-        chmod 700 ~/.config/rclone
+        sudo chmod 700 ~/.config/rclone
         
         # Deploy Galvan Prime credentials with fallback detection
         echo "🔐 Decoding Galvan Prime credentials..."
@@ -159,7 +159,7 @@ jobs:
           echo "✅ Plain text credentials configured successfully!"
         fi
         
-        chmod 600 ~/.config/rclone/rclone.conf
+        sudo chmod 600 ~/.config/rclone/rclone.conf
         
         # Test Galvan Prime connectivity
         echo "🧪 Testing Galvan Prime connectivity..."
