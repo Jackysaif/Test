@@ -149,9 +149,9 @@ jobs:
         
         # Deploy Galvan Prime credentials with fallback detection
         echo "🔐 Decoding Galvan Prime credentials..."
-        if echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d &>/dev/null; then
+        if echo "${{ secrets.RCLONE_CONFIG }}" | sudo base64 -d &>/dev/null; then
           # Base64 encoded configuration
-          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | sudo base64 -d > ~/.config/rclone/rclone.conf
           echo "✅ Base64 encoded credentials decoded successfully!"
         else
           # Plain text configuration  
