@@ -234,15 +234,22 @@ jobs:
             perform_backup
           fi
 
+      - name: Set backup file path environment variable 📥 Prep Artifact Upload!
+        run: |
+          set -euo pipefail
+          echo "🔧 Setting backup path... Upgrade transforming! 🔧"
+          BACKUP_FILE=$(cat /tmp/backup_file_path.txt || echo "/tmp/vps-backup-default.tar.gz")
+          echo "BACKUP_PATH=$BACKUP_FILE" >> $GITHUB_ENV
+
       - name: Upload backup as GitHub artifact 📤 Artifact Beam!
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: ${{ (cat /tmp/backup_file_path.txt) }}
+          path: ${{ env.BACKUP_PATH }}
           retention-days: 7  # Short retention to avoid accumulation
-        # Note: No run block, but imagine: echo "🚀 Uploading to GitHub... Skurd attaching!"
+        # Note: Imagine: echo "🚀 Uploading to GitHub... Skurd attaching!"
 
       - name: Upload backup to MEGA and generate link ☁️ MEGA Warp!
         if: always()
