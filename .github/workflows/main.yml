@@ -79,8 +79,8 @@ jobs:
         set -euo pipefail
         echo "🔐 Setting up rclone configuration..."
         
-        if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-          echo "❌ ERROR: RCLONE_CONFIG secret is missing!" >&2
+        if [[ -z "${{ MEGA_RCLONE || '' }}" ]]; then
+          echo "❌ ERROR: MEGA_RCLONE secret is missing!" >&2
           echo "🎨 Shin-chan needs his MEGA crayons!"
           exit 1
         fi
