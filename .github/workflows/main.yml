@@ -523,116 +523,24 @@ jobs:
 
     - name: "🎛️ ALIEN CONTROL PANEL DEPLOYMENT"
       run: |
-        set -euo pipefail
-        
-        echo "🎛️ Deploying Alien Control Panel (aaPanel) - Galvan Tech Integration..."
-        
-        # Check if control panel already exists
-        if command -v bt &>/dev/null && [ -d /www/server ]; then
-          echo "✅ Alien Control Panel already deployed (restored from backup)!"
-          PANEL_EXISTS=true
-        else
-          echo "🚀 Initiating fresh control panel deployment..."
-          PANEL_EXISTS=false
-        fi
-        
-        if [[ "$PANEL_EXISTS" == "false" ]]; then
-          # Download latest Galvan installer
-          echo "📥 Downloading Galvan installer..."
-          INSTALLER_URLS=(
-            "http://www.aapanel.com/script/install_6.0_en.sh"
-            "http://download.bt.cn/install/install_6.0_en.sh"
-            "https://raw.githubusercontent.com/aaPanel/aaPanel/main/install/install_6.0_en.sh"
-          )
-          
-          INSTALLER_SUCCESS=false
-          for url in "${INSTALLER_URLS[@]}"; do
-            if curl -fsSL -o /tmp/aapanel_install.sh "$url"; then
-              echo "✅ Installer downloaded from: $url"
-              INSTALLER_SUCCESS=true
-              break
-            else
-              echo "⚠️ Failed to download from: $url"
-            fi
-          done
-          
-          if [[ "$INSTALLER_SUCCESS" == "false" ]]; then
-            echo "❌ All installer URLs failed!"
-            echo "💡 Control panel will be available for manual installation"
+          set -euo pipefail
+          if command -v bt >/dev/null 2>&1; then
+            echo "✅ Aapanel already installed (from backup)."
           else
-            chmod +x /tmp/aapanel_install.sh
-            
-            # Create automated installation script
-            echo "🤖 Creating automated installation protocol..."
-            cat > /tmp/auto_install_aapanel.exp << 'EOF'
-            #!/usr/bin/expect -f
-            set timeout 600
-            spawn bash /tmp/aapanel_install.sh
-            expect {
-            "*Do you want to install*" { send "y\r"; exp_continue }
-            "*install now*" { send "y\r"; exp_continue }
-            "*force install*" { send "yes\r"; exp_continue }
-            "*confirm*" { send "y\r"; exp_continue }
-            eof
-            }
-            EOF
-            chmod +x /tmp/auto_install_aapanel.exp
-            
-            # Execute installation with timeout protection
-            echo "⚡ Executing Galvan installation protocol..."
-            timeout 900 /tmp/auto_install_aapanel.exp || {
-              echo "⚠️ Automated installation timeout, trying alternative method..."
-              timeout 600 bash -c "printf 'y\ny\nyes\ny\n' | sudo bash /tmp/aapanel_install.sh" || {
-                echo "⚠️ Alternative installation failed, control panel may need manual setup"
-              }
+            echo "📥 Installing Aapanel (fresh install)..."
+            curl -fsSL -o /tmp/install.sh "http://www.aapanel.com/script/install-ubuntu_6.0_en.sh"
+            chmod +x /tmp/install.sh
+            timeout 900 bash -c "printf 'y\nyes\n' | sudo bash /tmp/install.sh" || {
+              echo "⚠️ Aapanel installation timed out, continuing..."
             }
           fi
-        fi
-        
-        # Configure control panel credentials
-        echo "🔧 Configuring control panel access credentials..."
-        sleep 10  # Allow full initialization
-        
-        # Multiple credential setting attempts
-        CRED_SUCCESS=false
-        
-        # Method 1: bt command
-        if command -v bt &>/dev/null; then
-          echo "🎯 Using bt command for credential configuration..."
-          if echo "Ben10" | sudo bt 6 2>/dev/null && echo "omnitrix" | sudo bt 5 2>/dev/null; then
-            CRED_SUCCESS=true
-            echo "✅ Credentials set via bt command!"
+          if command -v bt >/dev/null 2>&1; then
+            echo "🎛️ Setting Aapanel credentials..."
+            sleep 5
+            echo "Jacky" | sudo bt 6 || true
+            echo "spidey" | sudo bt 5 || true
           fi
-        fi
-        
-        # Method 2: Direct Python tools
-        if [[ "$CRED_SUCCESS" == "false" ]] && [ -f /www/server/panel/tools.py ]; then
-          echo "🐍 Using Python tools for credential configuration..."
-          cd /www/server/panel
-          if sudo python3 tools.py username Ben10 2>/dev/null && sudo python3 tools.py password omnitrix 2>/dev/null; then
-            CRED_SUCCESS=true
-            echo "✅ Credentials set via Python tools!"
-          fi
-        fi
-        
-        # Method 3: PyEnv method
-        if [[ "$CRED_SUCCESS" == "false" ]] && [ -f /www/server/panel/pyenv/bin/python ]; then
-          echo "🔬 Using PyEnv for credential configuration..."
-          if sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py username Ben10 2>/dev/null && \
-             sudo /www/server/panel/pyenv/bin/python /www/server/panel/tools.py password omnitrix 2>/dev/null; then
-            CRED_SUCCESS=true
-            echo "✅ Credentials set via PyEnv!"
-          fi
-        fi
-        
-        if [[ "$CRED_SUCCESS" == "true" ]]; then
-          echo "🎉 ALIEN CONTROL PANEL DEPLOYED SUCCESSFULLY! 🎛️"
-          echo "🔐 Access: Username=Ben10, Password=omnitrix"
-        else
-          echo "⚠️ Credential configuration incomplete - manual setup may be required"
-          echo "💡 Default access will be available via web interface"
-        fi
-
+          
     - name: "🗄️ DATABASE FORTRESS INITIALIZATION"  
       run: |
         set -euo pipefail
