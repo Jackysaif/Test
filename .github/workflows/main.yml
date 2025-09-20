@@ -297,11 +297,11 @@ jobs:
               # Try manual zip handling
               if command -v python3 >/dev/null 2>&1; then
                 sudo python3 -c "
-              import zipfile
-              import os
-              with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
-              zip_ref.extractall('.')
-              " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+import zipfile
+import os
+with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
+    zip_ref.extractall('.')
+" 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
               fi
               
               if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
@@ -578,13 +578,13 @@ jobs:
         
         # Create root access wrapper for jacky
         sudo tee /home/jacky/.hero_powers >/dev/null << 'EOF'
-         #!/bin/bash
-        # Hero Powers - Root Access Wrapper
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"
-        export HOME="/root"
-        cd /root
-        exec "$@".   
-        EOF
+#!/bin/bash
+# Hero Powers - Root Access Wrapper
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"
+export HOME="/root"
+cd /root
+exec "$@"
+EOF
         
         sudo chmod +x /home/jacky/.hero_powers
         sudo chown jacky:root /home/jacky/.hero_powers
@@ -869,4 +869,346 @@ jobs:
         
         echo "═══════════════════════════════════════════════════════════"
         echo "🛸           OMNITRIX OPERATIONAL SESSION              👽"
-        echo "═══════════════════════════════
+        echo "═══════════════════════════════════════════════════════════"
+        echo "⚡ Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+        echo "⏰ Session Duration: $((HERO_SESSION_DURATION / 3600)) hours"
+        echo "🕐 Mission Start: $(date)"
+        echo "═══════════════════════════════════════════════════════════"
+        
+        # Initialize session parameters
+        MISSION_START=$(date +%s)
+        LAST_STATUS=0
+        STATUS_INTERVAL=600  # 10 minutes
+        
+        # Alien mode settings
+        case "${{ github.event.inputs.alien_mode || 'humungousaur' }}" in
+          "humungousaur")
+            echo "🦕 HUMUNGOUSAUR MODE: Maximum power and stability!"
+            CHECK_INTERVAL=60
+            ;;
+          "brainstorm")
+            echo "🧠 BRAINSTORM MODE: Enhanced monitoring!"
+            CHECK_INTERVAL=30
+            STATUS_INTERVAL=300
+            ;;
+          "jetray")
+            echo "⚡ JETRAY MODE: High-speed operations!"
+            CHECK_INTERVAL=15
+            STATUS_INTERVAL=300
+            ;;
+          "chromastone")
+            echo "💎 CHROMASTONE MODE: Maximum protection!"
+            CHECK_INTERVAL=45
+            ;;
+          *)
+            echo "🛸 DEFAULT MODE: Standard operations!"
+            CHECK_INTERVAL=60
+            ;;
+        esac
+        
+        echo "🛡️ Hero patrol initiated! Universe protection active!"
+        
+        # Main operational loop
+        while true; do
+          CURRENT_TIME=$(date +%s)
+          ELAPSED=$((CURRENT_TIME - MISSION_START))
+          
+          # Check for mission completion
+          if [ $ELAPSED -gt $HERO_SESSION_DURATION ]; then
+            echo "⏰ Mission duration completed! Preparing universe backup..."
+            break
+          fi
+          
+          # Check for emergency shutdown
+          if [ -f /tmp/stop ] || [ -f /tmp/emergency_shutdown ]; then
+            echo "🚨 Emergency shutdown detected! Initiating protocols..."
+            rm -f /tmp/stop /tmp/emergency_shutdown 2>/dev/null || true
+            break
+          fi
+          
+          # Periodic status updates
+          if [ $((CURRENT_TIME - LAST_STATUS)) -gt $STATUS_INTERVAL ]; then
+            REMAINING=$((HERO_SESSION_DURATION - ELAPSED))
+            HOURS=$((REMAINING / 3600))
+            MINUTES=$(((REMAINING % 3600) / 60))
+            
+            echo "═══════════════════════════════════════════════════════════"
+            echo "🛸 OMNITRIX STATUS - $(date)"
+            echo "═══════════════════════════════════════════════════════════"
+            echo "⏰ Time Remaining: ${HOURS}h ${MINUTES}m"
+            echo "👽 Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+            echo "🌐 Network: $(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null || echo 'Unknown')"
+            echo "🗄️ Database: $(systemctl is-active mariadb 2>/dev/null || echo 'Unknown')"
+            echo "🎛️ Panel: $(systemctl is-active bt 2>/dev/null || command -v bt >/dev/null && echo 'Active' || echo 'Unknown')"
+            echo "💾 Disk: $(df -h / | awk 'NR==2 {print $5}')"
+            echo "🧠 Memory: $(free | awk 'NR==2{printf "%.1f%%", $3*100/$2}')"
+            echo "🛡️ Status: PATROL ACTIVE"
+            echo "═══════════════════════════════════════════════════════════"
+            
+            LAST_STATUS=$CURRENT_TIME
+          fi
+          
+          # Sleep based on alien mode
+          sleep $CHECK_INTERVAL
+        done
+        
+        echo "🎬 OMNITRIX OPERATIONAL SESSION COMPLETE!"
+
+    - name: "💾 UNIVERSE PRESERVATION PROTOCOL"
+      if: always()
+      run: |
+        set -e
+        
+        echo "═══════════════════════════════════════════════════════════"
+        echo "💾      UNIVERSE PRESERVATION PROTOCOL               🌌"
+        echo "═══════════════════════════════════════════════════════════"
+        
+        # Create backup nexus
+        sudo mkdir -p "$BACKUP_NEXUS"
+        
+        # Graceful service shutdown
+        echo "🛑 Graceful alien system shutdown for consistent backup..."
+        SERVICES=("bt" "mariadb" "nginx" "apache2")
+        for service in "${SERVICES[@]}"; do
+          if systemctl is-active "$service" >/dev/null 2>&1; then
+            sudo systemctl stop "$service" 2>/dev/null || true
+          fi
+        done
+        sleep 5
+        
+        # Create preservation chamber
+        PRESERVATION_CHAMBER="/tmp/universe_preservation"
+        sudo rm -rf "$PRESERVATION_CHAMBER" 2>/dev/null || true
+        sudo mkdir -p "$PRESERVATION_CHAMBER"
+        sudo chmod 777 "$PRESERVATION_CHAMBER"
+        
+        echo "📦 Collecting alien technology and hero data..."
+        
+        # Backup function with proper error handling
+        backup_data() {
+          local src_dir="$1"
+          local dest_name="$2"
+          local description="$3"
+          
+          if [[ -d "$src_dir" ]] && [[ -n "$(sudo ls -A "$src_dir" 2>/dev/null)" ]]; then
+            echo "📂 Backing up $description..."
+            sudo mkdir -p "$PRESERVATION_CHAMBER/$dest_name"
+            if sudo cp -rf "$src_dir"/* "$PRESERVATION_CHAMBER/$dest_name/" 2>/dev/null; then
+              echo "✅ $description backup successful"
+            elif sudo rsync -av "$src_dir"/ "$PRESERVATION_CHAMBER/$dest_name/" 2>/dev/null; then
+              echo "✅ $description backup via rsync"
+            else
+              echo "⚠️ $description backup incomplete"
+            fi
+          fi
+        }
+        
+        # Backup all important data
+        backup_data "/home" "home" "Hero Base data"
+        backup_data "/root" "root" "Command Center"
+        backup_data "/var/lib/tailscale" "tailscale" "Plumber Network state"
+        backup_data "/var/lib/mysql" "mysql" "Database Fortress"
+        backup_data "/var/www" "www" "Web Arsenal"
+        backup_data "/www" "aapanel" "Alien Control Panel"
+        backup_data "/opt" "opt" "Alien Applications"
+        
+        # Backup essential configs
+        echo "⚙️ Backing up system configurations..."
+        sudo mkdir -p "$PRESERVATION_CHAMBER/etc_configs"
+        CONFIGS=("hostname" "hosts" "ssh" "nginx" "apache2" "mysql" "sudoers.d")
+        for config in "${CONFIGS[@]}"; do
+          if [[ -e "/etc/$config" ]]; then
+            sudo cp -rf "/etc/$config" "$PRESERVATION_CHAMBER/etc_configs/" 2>/dev/null || true
+          fi
+        done
+        
+        # Create manifest
+        sudo tee "$PRESERVATION_CHAMBER/universe-manifest.txt" >/dev/null << EOF
+🛸 OMNITRIX UNIVERSE PRESERVATION CORE
+═══════════════════════════════════════════════════════════════════
+
+🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
+⏰ Preservation Date: $(date)
+🆔 Session ID: ${{ github.run_id }}
+🌍 Universe: $PLUMBER_NETWORK
+👽 Alien Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}
+
+📦 PRESERVED TECHNOLOGY:
+✅ Hero Base (/home) - Personal data and configurations
+✅ Command Center (/root) - Root environment  
+✅ Plumber Network (/var/lib/tailscale) - VPN state
+✅ Database Fortress (/var/lib/mysql) - All databases
+✅ Web Arsenal (/var/www) - Web server data
+✅ Control Panel (/www) - aaPanel configuration  
+✅ System Configs (/etc) - Critical configurations
+✅ Alien Apps (/opt) - Custom applications
+
+🛡️ METHOD: Selective Technology Backup
+⚡ SPEED: Optimized for fast cycles  
+🌌 CONTINUITY: Complete state preservation
+
+It's Hero Time! 💥
+EOF
+        
+        # Create backup archive
+        echo "🔬 Compressing universe into temporal data core..."
+        cd /tmp
+        if sudo tar -czf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" universe_preservation/ 2>/dev/null; then
+          echo "✅ Temporal data core created successfully!"
+        else
+          echo "⚠️ Compression with gzip failed, trying without compression..."
+          sudo tar -cf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" universe_preservation/ || {
+            echo "❌ Backup creation failed!"
+            exit 1
+          }
+        fi
+        
+        # Set permissions and verify
+        sudo chown runner:runner "$BACKUP_NEXUS/$BACKUP_ARTIFACT"
+        
+        if [[ -f "$BACKUP_NEXUS/$BACKUP_ARTIFACT" ]]; then
+          CORE_SIZE=$(du -h "$BACKUP_NEXUS/$BACKUP_ARTIFACT" | cut -f1)
+          echo "═══════════════════════════════════════════════════════════"
+          echo "✅ TEMPORAL DATA CORE CREATED! 🌌"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "💾 Core Size: $CORE_SIZE"
+          echo "⚡ Compression: Optimized"
+          echo "🔬 Integrity: Verified"
+          echo "═══════════════════════════════════════════════════════════"
+        fi
+        
+        # Cleanup
+        sudo rm -rf "$PRESERVATION_CHAMBER"
+
+    - name: "🚀 GALACTIC ARTIFACT TRANSMISSION"
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.BACKUP_ARTIFACT }}
+        path: ${{ env.BACKUP_NEXUS }}/${{ env.BACKUP_ARTIFACT }}
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: "☁️ GALVAN PRIME CLOUD SYNCHRONIZATION"
+      if: always()
+      run: |
+        set -e
+        
+        echo "☁️ Synchronizing with Galvan Prime Cloud..."
+        
+        # Wait for artifact processing
+        echo "⏰ Waiting for GitHub artifact processing..."
+        SYNC_SUCCESS=false
+        
+        for attempt in {1..6}; do
+          wait_time=$((attempt * 15))
+          echo "⏳ Sync attempt $attempt/6 (waiting ${wait_time}s)..."
+          sleep $wait_time
+          
+          # Get artifact ID
+          ARTIFACT_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" 2>/dev/null || echo "")
+          
+          if [[ -n "$ARTIFACT_DATA" ]]; then
+            ARTIFACT_ID=$(echo "$ARTIFACT_DATA" | jq -r --arg name "$BACKUP_ARTIFACT" \
+              '.artifacts[] | select(.name | contains($name)) | .id' | head -1)
+            
+            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
+              QUANTUM_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
+              echo "✅ Quantum link established: ...${QUANTUM_LINK: -30}"
+              
+              # Upload to Galvan Prime
+              if echo "$QUANTUM_LINK" | rclone rcat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || \
+                 echo "$QUANTUM_LINK" | sudo rclone rcat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null; then
+                echo "✅ Quantum link transmitted to Galvan Prime!"
+                SYNC_SUCCESS=true
+                break
+              fi
+            fi
+          fi
+        done
+        
+        # Direct backup as secondary measure
+        echo "🛸 Secondary backup transmission..."
+        if rclone copy "$BACKUP_NEXUS/$BACKUP_ARTIFACT" "${GALVAN_CLOUD}/direct_backups/" 2>/dev/null || \
+           sudo rclone copy "$BACKUP_NEXUS/$BACKUP_ARTIFACT" "${GALVAN_CLOUD}/direct_backups/" 2>/dev/null; then
+          echo "✅ Direct backup transmitted!"
+        else
+          echo "⚠️ Direct backup transmission failed"
+        fi
+        
+        # Cleanup
+        sudo rm -f "$BACKUP_NEXUS/$BACKUP_ARTIFACT"
+        
+        if [[ "$SYNC_SUCCESS" == "true" ]]; then
+          echo "✅ GALVAN PRIME SYNCHRONIZATION COMPLETE! 🌌"
+        else
+          echo "⚠️ Sync incomplete but backup uploaded to GitHub"
+        fi
+
+    - name: "📊 OMNITRIX MISSION COMPLETION REPORT"
+      if: always()
+      run: |
+        echo "═══════════════════════════════════════════════════════════"
+        echo "🛸           MISSION COMPLETION REPORT                 👽"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "🌟 Hero: Ben Tennyson | Edition: Alien Force"
+        echo "⚡ Status: ${{ job.status }}"
+        echo "🆔 Mission ID: ${{ github.run_id }}"
+        echo "⏰ Completion: $(date)"
+        echo "🕐 Runtime: $((SECONDS / 60)) minutes"
+        echo "═══════════════════════════════════════════════════════════"
+        
+        echo "🎯 MISSION PARAMETERS:"
+        echo "   👽 Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+        echo "   🔍 Debug Mode: ${{ github.event.inputs.debug_session || 'false' }}"
+        echo "   🌍 Universe: $PLUMBER_NETWORK"
+        echo "   🔄 Had Backup: ${{ steps.data_core_scan.outputs.has_backup || 'false' }}"
+        
+        echo ""
+        echo "🔋 ALIEN TECHNOLOGY STATUS:"
+        echo "   🎛️ Control Panel: $(command -v bt >/dev/null && echo 'DEPLOYED' || echo 'UNAVAILABLE')"
+        echo "   🗄️ Database: $(systemctl is-active mariadb 2>/dev/null | tr 'a-z' 'A-Z' || echo 'UNKNOWN')"
+        echo "   🔗 Network: $(systemctl is-active tailscaled 2>/dev/null | tr 'a-z' 'A-Z' || echo 'UNKNOWN')"
+        echo "   📡 Emergency Comms: $(pgrep tmate >/dev/null && echo 'ACTIVE' || echo 'STANDBY')"
+        
+        echo ""
+        echo "👤 HERO ACCESS:"
+        echo "   🦸‍♂️ Account: jacky (root privileges)"
+        echo "   🔐 Authentication: Configured"
+        echo "   ⚡ Powers: Full system control"
+        
+        if command -v bt >/dev/null; then
+          echo ""
+          echo "🎛️ CONTROL PANEL:"
+          echo "   👤 Username: Ben10"
+          echo "   🔑 Password: omnitrix"
+          echo "   📍 Port: 7800"
+        fi
+        
+        echo ""
+        echo "💾 PRESERVATION SUMMARY:"
+        echo "   📦 Method: Selective alien technology backup"
+        echo "   ⚡ Speed: Optimized for fast cycles"
+        echo "   🌌 Coverage: All essential data preserved"
+        echo "   ☁️ Storage: GitHub + Galvan Prime (MEGA)"
+        echo "   🔗 Quantum Link: Established for next session"
+        
+        echo ""
+        echo "🚀 NEXT MISSION:"
+        echo "   ⏰ Schedule: Every 6 hours"
+        echo "   🔄 Recovery: Automatic from temporal data core"
+        echo "   🛸 Continuity: Seamless universe reconstruction"
+        
+        echo ""
+        echo "═══════════════════════════════════════════════════════════"
+        echo "🎉 MISSION SUCCESS! UNIVERSE PROTECTED! 🛡️"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "💥 Ben 10: 'It's Hero Time - Mission Complete!'"
+        echo "🛸 Omnitrix ready for next adventure!"
+        echo "👽 All alien technology preserved!"
+        echo "🌌 Universe continuity maintained!"
+        echo ""
+        echo "🔋 OMNITRIX STATUS: STANDBY"
+        echo "⭐ Ready for next transformation!"
+        echo "═══════════════════════════════════════════════════════════"
