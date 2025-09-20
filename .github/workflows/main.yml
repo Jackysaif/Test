@@ -7,22 +7,6 @@ name: "🛸 OMNITRIX VPS - Ben 10 Alien Force Edition 👽"
 
 on:
   workflow_dispatch:
-    inputs:
-      alien_mode:
-        description: '👽 Select Alien Form'
-        required: false
-        default: 'humungousaur'
-        type: choice
-        options:
-          - humungousaur
-          - brainstorm
-          - jetray
-          - chromastone
-      debug_session:
-        description: '🔍 Enable Debug Mode'
-        required: false
-        default: 'false'
-        type: boolean
   schedule:
     - cron: '0 */6 * * *'
 
@@ -53,7 +37,7 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         echo "🛸            OMNITRIX SYSTEM ACTIVATION               👽"
         echo "═══════════════════════════════════════════════════════════"
-        echo "🔋 Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+        echo "🔋 Alien Form: Jetray (High-Speed Operations)"
         echo "⏰ Mission Start: $(date)"
         echo "═══════════════════════════════════════════════════════════"
         
@@ -300,8 +284,8 @@ jobs:
             import zipfile
             import os
             with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
-           zip_ref.extractall('.')
-          " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+            zip_ref.extractall('.')
+            " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
               fi
               
               if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
@@ -438,7 +422,7 @@ jobs:
         
         echo "📁 Data root: $DATA_ROOT"
         
-        # Restore functions with proper error handling
+        # Restore functions with proper error handling and timeouts
         restore_directory() {
           local src_dir="$1"
           local dest_dir="$2"
@@ -451,20 +435,22 @@ jobs:
             # Create destination directory
             sudo mkdir -p "$dest_dir"
             
-            # Copy with multiple methods
-            if sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null; then
+            # Copy with timeout and multiple methods
+            if timeout 300 sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null; then
               echo "✅ $description restored successfully"
-            elif sudo rsync -av "$src_dir"/ "$dest_dir"/ 2>/dev/null; then
+            elif timeout 300 sudo rsync -av --timeout=60 "$src_dir"/ "$dest_dir"/ 2>/dev/null; then
               echo "✅ $description restored via rsync"
+            elif timeout 180 sudo find "$src_dir" -type f -exec cp {} "$dest_dir/" \; 2>/dev/null; then
+              echo "✅ $description restored via individual file copy"
             else
-              echo "⚠️ $description restoration had issues, but continuing..."
-              # Try individual file copy
-              sudo find "$src_dir" -type f -exec cp {} "$dest_dir/" \; 2>/dev/null || true
+              echo "⚠️ $description restoration timed out or failed, but continuing..."
+              # Quick fallback - just copy what we can
+              timeout 60 sudo cp -r "$src_dir"/* "$dest_dir/" 2>/dev/null || true
             fi
             
-            # Set proper ownership
+            # Set proper ownership with timeout
             if [[ -n "$owner" ]]; then
-              sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
+              timeout 60 sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
             fi
           else
             echo "ℹ️ No $description data found to restore"
@@ -847,22 +833,6 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         echo "✅ PLUMBER NETWORK INTEGRATION COMPLETE!"
 
-    - name: "👽 DEBUG SESSION"
-      if: github.event.inputs.debug_session == 'true'
-      run: |
-        echo "🧠 BRAINSTORM DEBUG MODE ACTIVATED!"
-        echo "⏰ Debug session: 15 minutes"
-        
-        echo "📊 System Analysis:"
-        df -h | head -5
-        free -h
-        sudo tailscale status 2>/dev/null || echo "Tailscale status unavailable"
-        
-        echo "🔍 15-minute debug window active..."
-        sleep 900
-        
-        echo "✅ Debug session complete!"
-
     - name: "🛸 OMNITRIX OPERATIONAL SESSION"
       run: |
         set -e
@@ -870,7 +840,7 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         echo "🛸           OMNITRIX OPERATIONAL SESSION              👽"
         echo "═══════════════════════════════════════════════════════════"
-        echo "⚡ Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+        echo "⚡ Alien Form: Jetray (High-Speed Operations)"
         echo "⏰ Session Duration: $((HERO_SESSION_DURATION / 3600)) hours"
         echo "🕐 Mission Start: $(date)"
         echo "═══════════════════════════════════════════════════════════"
@@ -878,33 +848,11 @@ jobs:
         # Initialize session parameters
         MISSION_START=$(date +%s)
         LAST_STATUS=0
-        STATUS_INTERVAL=600  # 10 minutes
+        STATUS_INTERVAL=300  # 5 minutes for Jetray mode
         
-        # Alien mode settings
-        case "${{ github.event.inputs.alien_mode || 'humungousaur' }}" in
-          "humungousaur")
-            echo "🦕 HUMUNGOUSAUR MODE: Maximum power and stability!"
-            CHECK_INTERVAL=60
-            ;;
-          "brainstorm")
-            echo "🧠 BRAINSTORM MODE: Enhanced monitoring!"
-            CHECK_INTERVAL=30
-            STATUS_INTERVAL=300
-            ;;
-          "jetray")
-            echo "⚡ JETRAY MODE: High-speed operations!"
-            CHECK_INTERVAL=15
-            STATUS_INTERVAL=300
-            ;;
-          "chromastone")
-            echo "💎 CHROMASTONE MODE: Maximum protection!"
-            CHECK_INTERVAL=45
-            ;;
-          *)
-            echo "🛸 DEFAULT MODE: Standard operations!"
-            CHECK_INTERVAL=60
-            ;;
-        esac
+        # Jetray mode - High-speed operations
+        echo "⚡ JETRAY MODE: High-speed operations activated!"
+        CHECK_INTERVAL=15  # 15-second checks for maximum responsiveness
         
         echo "🛡️ Hero patrol initiated! Universe protection active!"
         
@@ -936,7 +884,7 @@ jobs:
             echo "🛸 OMNITRIX STATUS - $(date)"
             echo "═══════════════════════════════════════════════════════════"
             echo "⏰ Time Remaining: ${HOURS}h ${MINUTES}m"
-            echo "👽 Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
+            echo "👽 Mode: Jetray (High-Speed)"
             echo "🌐 Network: $(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null || echo 'Unknown')"
             echo "🗄️ Database: $(systemctl is-active mariadb 2>/dev/null || echo 'Unknown')"
             echo "🎛️ Panel: $(systemctl is-active bt 2>/dev/null || command -v bt >/dev/null && echo 'Active' || echo 'Unknown')"
@@ -1024,14 +972,14 @@ jobs:
         
         # Create manifest
         sudo tee "$PRESERVATION_CHAMBER/universe-manifest.txt" >/dev/null << EOF
-        🛸 OMNITRIX UNIVERSE PRESERVATION COR
+        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
         ═══════════════════════════════════════════════════════════════════
 
         🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
         ⏰ Preservation Date: $(date)
         🆔 Session ID: ${{ github.run_id }}
         🌍 Universe: $PLUMBER_NETWORK
-        👽 Alien Mode: ${{ github.event.inputs.alien_mode || 'humungousaur' }}
+        👽 Alien Mode: Jetray (High-Speed Operations)
 
         📦 PRESERVED TECHNOLOGY:
         ✅ Hero Base (/home) - Personal data and configurations
@@ -1047,8 +995,8 @@ jobs:
         ⚡ SPEED: Optimized for fast cycles  
         🌌 CONTINUITY: Complete state preservation
 
-        It's Hero Time! 💥
-        EOF
+         It's Hero Time! 💥
+         EOF
         
         # Create backup archive
         echo "🔬 Compressing universe into temporal data core..."
@@ -1117,7 +1065,7 @@ jobs:
               QUANTUM_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
               echo "✅ Quantum link established: ...${QUANTUM_LINK: -30}"
               
-              # Upload to Galvan Prime
+              # Store only the artifact link in Galvan Prime (not the full backup)
               if echo "$QUANTUM_LINK" | rclone rcat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null || \
                  echo "$QUANTUM_LINK" | sudo rclone rcat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null; then
                 echo "✅ Quantum link transmitted to Galvan Prime!"
@@ -1128,22 +1076,15 @@ jobs:
           fi
         done
         
-        # Direct backup as secondary measure
-        echo "🛸 Secondary backup transmission..."
-        if rclone copy "$BACKUP_NEXUS/$BACKUP_ARTIFACT" "${GALVAN_CLOUD}/direct_backups/" 2>/dev/null || \
-           sudo rclone copy "$BACKUP_NEXUS/$BACKUP_ARTIFACT" "${GALVAN_CLOUD}/direct_backups/" 2>/dev/null; then
-          echo "✅ Direct backup transmitted!"
-        else
-          echo "⚠️ Direct backup transmission failed"
-        fi
-        
-        # Cleanup
+        # Cleanup local backup file
         sudo rm -f "$BACKUP_NEXUS/$BACKUP_ARTIFACT"
         
         if [[ "$SYNC_SUCCESS" == "true" ]]; then
           echo "✅ GALVAN PRIME SYNCHRONIZATION COMPLETE! 🌌"
+          echo "📁 GitHub Artifact: Full backup stored"
+          echo "☁️ MEGA Storage: Artifact download link stored"
         else
-          echo "⚠️ Sync incomplete but backup uploaded to GitHub"
+          echo "⚠️ Link sync incomplete but backup uploaded to GitHub"
         fi
 
     - name: "📊 OMNITRIX MISSION COMPLETION REPORT"
@@ -1160,8 +1101,7 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         
         echo "🎯 MISSION PARAMETERS:"
-        echo "   👽 Alien Form: ${{ github.event.inputs.alien_mode || 'humungousaur' }}"
-        echo "   🔍 Debug Mode: ${{ github.event.inputs.debug_session || 'false' }}"
+        echo "   👽 Alien Form: Jetray (High-Speed Operations)"
         echo "   🌍 Universe: $PLUMBER_NETWORK"
         echo "   🔄 Had Backup: ${{ steps.data_core_scan.outputs.has_backup || 'false' }}"
         
