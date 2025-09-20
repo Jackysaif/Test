@@ -284,8 +284,8 @@ jobs:
             import zipfile
             import os
             with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
-            zip_ref.extractall('.')
-            " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+           zip_ref.extractall('.')
+           " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
               fi
               
               if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
@@ -457,9 +457,61 @@ jobs:
           fi
         }
         
-        # Restore all data components
-        restore_directory "$DATA_ROOT/home" "/home" "Hero Base (home directories)" "root:root"
-        restore_directory "$DATA_ROOT/root" "/root" "Command Center (root directory)" "root:root"
+        # Restore all data components with enhanced timeout handling
+        echo "🔧 Starting enhanced restoration process..."
+        
+        # Restore home directories with specific user focus
+        if [[ -d "$DATA_ROOT/home" ]] && [[ -n "$(sudo ls -A "$DATA_ROOT/home" 2>/dev/null)" ]]; then
+          echo "🏠 Restoring hero base (home directories)..."
+          
+          # Create home directory structure first
+          sudo mkdir -p /home
+          
+          # Restore jacky's home directory specifically
+          if [[ -d "$DATA_ROOT/home/jacky" ]]; then
+            echo "👤 Restoring jacky's home directory..."
+            sudo mkdir -p /home/jacky
+            timeout 180 sudo cp -rf "$DATA_ROOT/home/jacky/." /home/jacky/ 2>/dev/null || {
+              echo "⚠️ Jacky home restoration timed out, trying selective copy..."
+              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.bashrc /home/jacky/ 2>/dev/null || true
+              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.ssh /home/jacky/ 2>/dev/null || true
+              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.config /home/jacky/ 2>/dev/null || true
+            }
+            sudo chown -R jacky:jacky /home/jacky 2>/dev/null || true
+            echo "✅ Jacky's home directory restored"
+          fi
+          
+          # Restore other home directories with timeout
+          for user_home in "$DATA_ROOT/home"/*; do
+            if [[ -d "$user_home" ]]; then
+              user_name=$(basename "$user_home")
+              if [[ "$user_name" != "jacky" ]]; then
+                echo "👥 Restoring $user_name home directory..."
+                timeout 120 sudo cp -rf "$user_home" /home/ 2>/dev/null || {
+                  echo "⚠️ $user_name home restoration timed out, skipping..."
+                }
+              fi
+            fi
+          done
+          echo "✅ Home directories restoration completed"
+        else
+          echo "ℹ️ No home directory data found to restore"
+        fi
+        
+        # Restore root directory with timeout
+        if [[ -d "$DATA_ROOT/root" ]] && [[ -n "$(sudo ls -A "$DATA_ROOT/root" 2>/dev/null)" ]]; then
+          echo "👑 Restoring command center (root directory)..."
+          timeout 180 sudo cp -rf "$DATA_ROOT/root/." /root/ 2>/dev/null || {
+            echo "⚠️ Root directory restoration timed out, trying selective copy..."
+            timeout 60 sudo cp -r "$DATA_ROOT/root"/.bashrc /root/ 2>/dev/null || true
+            timeout 60 sudo cp -r "$DATA_ROOT/root"/.ssh /root/ 2>/dev/null || true
+            timeout 60 sudo cp -r "$DATA_ROOT/root"/.config /root/ 2>/dev/null || true
+          }
+          sudo chown -R root:root /root 2>/dev/null || true
+          echo "✅ Root directory restored"
+        else
+          echo "ℹ️ No root directory data found to restore"  
+        fi
         
         # Tailscale state restoration
         if [[ -d "$DATA_ROOT/tailscale" ]]; then
@@ -995,8 +1047,8 @@ jobs:
         ⚡ SPEED: Optimized for fast cycles  
         🌌 CONTINUITY: Complete state preservation
 
-         It's Hero Time! 💥
-         EOF
+        It's Hero Time! 💥
+        EOF
         
         # Create backup archive
         echo "🔬 Compressing universe into temporal data core..."
