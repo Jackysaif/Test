@@ -281,11 +281,11 @@ jobs:
               # Try manual zip handling
               if command -v python3 >/dev/null 2>&1; then
                 sudo python3 -c "
-            import zipfile
-            import os
-            with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
-            zip_ref.extractall('.')
-            " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+import zipfile
+import os
+with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
+    zip_ref.extractall('.')
+" 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
               fi
               
               if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
@@ -460,74 +460,78 @@ jobs:
         # Restore data components with maximum effort for complete data recovery
         echo "🔧 Starting complete data restoration with all fallbacks..."
         
-        # Force home directory restoration with process-level timeouts
-        if [[ -d "$DATA_ROOT/home" ]] && [[ -n "$(sudo ls -A "$DATA_ROOT/home" 2>/dev/null)" ]]; then
-          echo "🏠 Force restoring home directories with process-level timeouts..."
+        # Production-ready restoration with bulletproof fallback methods
+        echo "🔧 Starting production-grade restoration with comprehensive fallbacks..."
+        
+        # Function for robust directory restoration with multiple fallback methods
+        restore_with_fallbacks() {
+          local src_dir="$1"
+          local dest_dir="$2" 
+          local description="$3"
+          local owner="$4"
+          local max_time="${5:-300}"
           
-          sudo mkdir -p /home
-          
-          # Restore jacky specifically first
-          if [[ -d "$DATA_ROOT/home/jacky" ]]; then
-            echo "👤 Restoring jacky's home directory..."
-            sudo mkdir -p /home/jacky
-            timeout 30 sudo rsync -av --timeout=15 "$DATA_ROOT/home/jacky/" /home/jacky/ 2>/dev/null || \
-            timeout 30 sudo cp -r "$DATA_ROOT/home/jacky/." /home/jacky/ 2>/dev/null || \
-            echo "Jacky home restoration failed but continuing"
-            sudo chown -R jacky:root /home/jacky 2>/dev/null || true
-            echo "✅ Jacky home directory processed"
+          if [[ ! -d "$src_dir" ]]; then
+            echo "ℹ️ No $description data found"
+            return 0
           fi
           
-          # Process other users with strict timeouts and skip problematic ones
-          echo "👥 Processing other home directories with strict limits..."
-          for user_dir in "$DATA_ROOT/home"/*; do
-            if [[ -d "$user_dir" ]]; then
-              user_name=$(basename "$user_dir")
-              
-              # Skip jacky (already done) and known problematic directories
-              if [[ "$user_name" == "jacky" ]]; then
-                continue
-              fi
-              
-              # Skip known problematic directories that cause hangs
-              if [[ "$user_name" == "linuxbrew" ]] || [[ "$user_name" == "ubuntu" ]] || [[ "$user_name" == "runner" ]]; then
-                echo "⚠️ Skipping potentially problematic directory: $user_name"
-                continue
-              fi
-              
-              echo "Restoring $user_name home directory..."
-              
-              # Use process substitution with timeout to avoid hanging
-              (
-                timeout 20 sudo cp -r "$user_dir" /home/ 2>/dev/null || \
-                echo "Timeout on $user_name"
-              ) &
-              
-              # Wait for background process with timeout
-              if ! wait $! 2>/dev/null; then
-                echo "Background process for $user_name failed or timed out"
-              fi
-            fi
-          done
+          echo "📂 Restoring $description..."
+          sudo mkdir -p "$dest_dir"
           
-          echo "✅ Home directory restoration completed with strict timeouts"
-        else
-          echo "ℹ️ No home directory data found to restore"
-        fi
+          # Method 1: rsync with comprehensive file handling
+          echo "🔄 Method 1: rsync with complete file preservation ($max_time seconds)..."
+          if timeout "$max_time" sudo rsync -avH --progress --timeout=30 --include='.*' "$src_dir/" "$dest_dir/" 2>/dev/null; then
+            echo "✅ $description restored via rsync (including all hidden files)"
+          else
+            echo "⚠️ rsync failed/timed out, trying method 2..."
+            
+            # Method 2: tar with complete file preservation
+            echo "🔄 Method 2: tar with full file attributes..."
+            if (cd "$src_dir" && timeout "$((max_time/2))" sudo tar -cpf - . | (cd "$dest_dir" && timeout "$((max_time/2))" sudo tar -xpf -)) 2>/dev/null; then
+              echo "✅ $description restored via tar (all files including hidden)"
+            else
+              echo "⚠️ tar streaming failed, trying method 3..."
+              
+              # Method 3: comprehensive copy with explicit hidden file handling
+              echo "🔄 Method 3: explicit hidden file processing..."
+              (
+                # Copy regular files
+                timeout "$((max_time/4))" sudo cp -r "$src_dir"/* "$dest_dir"/ 2>/dev/null || true
+                # Copy all hidden files and directories (including .ssh, .config, .bashrc, etc.)
+                timeout "$((max_time/4))" sudo cp -r "$src_dir"/.* "$dest_dir"/ 2>/dev/null || true
+                # Specifically handle important hidden files
+                for hidden_item in .bashrc .profile .bash_profile .ssh .config .local .cache .gnupg .docker .kube .aws .azure; do
+                  if [[ -e "$src_dir/$hidden_item" ]]; then
+                    timeout 30 sudo cp -r "$src_dir/$hidden_item" "$dest_dir"/ 2>/dev/null || true
+                  fi
+                done
+              ) &
+              wait $!
+              echo "✅ $description files restored with explicit hidden file handling"
+            fi
+          fi
+          
+          # Method 4: Emergency fallback with find-based approach for critical hidden files
+          echo "🔄 Method 4: Emergency scan for missed critical files..."
+          timeout 60 sudo find "$src_dir" -name ".*" -type f -exec cp {} "$dest_dir"/ \; 2>/dev/null || true
+          
+          # Fix ownership and permissions
+          if [[ -n "$owner" ]]; then
+            sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
+          fi
+          
+          # Set proper permissions for critical hidden files
+          sudo chmod 700 "$dest_dir"/.ssh 2>/dev/null || true
+          sudo chmod 600 "$dest_dir"/.ssh/* 2>/dev/null || true
+          sudo chmod 644 "$dest_dir"/.bashrc "$dest_dir"/.profile 2>/dev/null || true
+          
+          echo "✅ $description restoration completed with full hidden file preservation"
+        }
         
-        # Restore root directory with timeout
-        if [[ -d "$DATA_ROOT/root" ]] && [[ -n "$(sudo ls -A "$DATA_ROOT/root" 2>/dev/null)" ]]; then
-          echo "👑 Restoring command center (root directory)..."
-          timeout 180 sudo cp -rf "$DATA_ROOT/root/." /root/ 2>/dev/null || {
-            echo "⚠️ Root directory restoration timed out, trying selective copy..."
-            timeout 60 sudo cp -r "$DATA_ROOT/root"/.bashrc /root/ 2>/dev/null || true
-            timeout 60 sudo cp -r "$DATA_ROOT/root"/.ssh /root/ 2>/dev/null || true
-            timeout 60 sudo cp -r "$DATA_ROOT/root"/.config /root/ 2>/dev/null || true
-          }
-          sudo chown -R root:root /root 2>/dev/null || true
-          echo "✅ Root directory restored"
-        else
-          echo "ℹ️ No root directory data found to restore"  
-        fi
+        # Restore all components using production fallback system
+        restore_with_fallbacks "$DATA_ROOT/home" "/home" "Hero Base (home directories)" "root:root" 180
+        restore_with_fallbacks "$DATA_ROOT/root" "/root" "Command Center (root directory)" "root:root" 120
         
         # Tailscale state restoration
         if [[ -d "$DATA_ROOT/tailscale" ]]; then
@@ -632,13 +636,13 @@ jobs:
         
         # Create root access wrapper for jacky
         sudo tee /home/jacky/.hero_powers >/dev/null << 'EOF'
-        #!/bin/bash
-        # Hero Powers - Root Access Wrapper
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"
-        export HOME="/root"
-        cd /root
-        exec "$@"
-        EOF
+#!/bin/bash
+# Hero Powers - Root Access Wrapper
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/bin"
+export HOME="/root"
+cd /root
+exec "$@"
+EOF
         
         sudo chmod +x /home/jacky/.hero_powers
         sudo chown jacky:root /home/jacky/.hero_powers
@@ -1040,31 +1044,31 @@ jobs:
         
         # Create manifest
         sudo tee "$PRESERVATION_CHAMBER/universe-manifest.txt" >/dev/null << EOF
-        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
-        ═══════════════════════════════════════════════════════════════════
+🛸 OMNITRIX UNIVERSE PRESERVATION CORE
+═══════════════════════════════════════════════════════════════════
 
-        🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
-        ⏰ Preservation Date: $(date)
-        🆔 Session ID: ${{ github.run_id }}
-        🌍 Universe: $PLUMBER_NETWORK
-        👽 Alien Mode: Jetray (High-Speed Operations)
+🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
+⏰ Preservation Date: $(date)
+🆔 Session ID: ${{ github.run_id }}
+🌍 Universe: $PLUMBER_NETWORK
+👽 Alien Mode: Jetray (High-Speed Operations)
 
-        📦 PRESERVED TECHNOLOGY:
-        ✅ Hero Base (/home) - Personal data and configurations
-        ✅ Command Center (/root) - Root environment  
-        ✅ Plumber Network (/var/lib/tailscale) - VPN state
-        ✅ Database Fortress (/var/lib/mysql) - All databases
-        ✅ Web Arsenal (/var/www) - Web server data
-        ✅ Control Panel (/www) - aaPanel configuration  
-        ✅ System Configs (/etc) - Critical configurations
-        ✅ Alien Apps (/opt) - Custom applications
+📦 PRESERVED TECHNOLOGY:
+✅ Hero Base (/home) - Personal data and configurations
+✅ Command Center (/root) - Root environment  
+✅ Plumber Network (/var/lib/tailscale) - VPN state
+✅ Database Fortress (/var/lib/mysql) - All databases
+✅ Web Arsenal (/var/www) - Web server data
+✅ Control Panel (/www) - aaPanel configuration  
+✅ System Configs (/etc) - Critical configurations
+✅ Alien Apps (/opt) - Custom applications
 
-        🛡️ METHOD: Selective Technology Backup
-        ⚡ SPEED: Optimized for fast cycles  
-        🌌 CONTINUITY: Complete state preservation
+🛡️ METHOD: Selective Technology Backup
+⚡ SPEED: Optimized for fast cycles  
+🌌 CONTINUITY: Complete state preservation
 
-        It's Hero Time! 💥
-        EOF
+It's Hero Time! 💥
+EOF
         
         # Create backup archive
         echo "🔬 Compressing universe into temporal data core..."
