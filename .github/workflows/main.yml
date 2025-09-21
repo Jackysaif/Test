@@ -1040,31 +1040,31 @@ jobs:
         
         # Create manifest
         sudo tee "$PRESERVATION_CHAMBER/universe-manifest.txt" >/dev/null << EOF
-       🛸 OMNITRIX UNIVERSE PRESERVATION CORE
-       ═══════════════════════════════════════════════════════════════════
+        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
+        ═══════════════════════════════════════════════════════════════════
 
-       🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
-       ⏰ Preservation Date: $(date)
-       🆔 Session ID: ${{ github.run_id }}
-       🌍 Universe: $PLUMBER_NETWORK
-       👽 Alien Mode: Jetray (High-Speed Operations)
+        🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
+        ⏰ Preservation Date: $(date)
+        🆔 Session ID: ${{ github.run_id }}
+        🌍 Universe: $PLUMBER_NETWORK
+        👽 Alien Mode: Jetray (High-Speed Operations)
 
-       📦 PRESERVED TECHNOLOGY:
-       ✅ Hero Base (/home) - Personal data and configurations
-       ✅ Command Center (/root) - Root environment  
-       ✅ Plumber Network (/var/lib/tailscale) - VPN state
-       ✅ Database Fortress (/var/lib/mysql) - All databases
-       ✅ Web Arsenal (/var/www) - Web server data
-       ✅ Control Panel (/www) - aaPanel configuration  
-       ✅ System Configs (/etc) - Critical configurations
-       ✅ Alien Apps (/opt) - Custom applications
+        📦 PRESERVED TECHNOLOGY:
+        ✅ Hero Base (/home) - Personal data and configurations
+        ✅ Command Center (/root) - Root environment  
+        ✅ Plumber Network (/var/lib/tailscale) - VPN state
+        ✅ Database Fortress (/var/lib/mysql) - All databases
+        ✅ Web Arsenal (/var/www) - Web server data
+        ✅ Control Panel (/www) - aaPanel configuration  
+        ✅ System Configs (/etc) - Critical configurations
+        ✅ Alien Apps (/opt) - Custom applications
 
-       🛡️ METHOD: Selective Technology Backup
-       ⚡ SPEED: Optimized for fast cycles  
-       🌌 CONTINUITY: Complete state preservation
+        🛡️ METHOD: Selective Technology Backup
+        ⚡ SPEED: Optimized for fast cycles  
+        🌌 CONTINUITY: Complete state preservation
 
-       It's Hero Time! 💥
-       EOF
+        It's Hero Time! 💥
+        EOF
         
         # Create backup archive
         echo "🔬 Compressing universe into temporal data core..."
