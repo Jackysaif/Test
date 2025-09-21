@@ -208,8 +208,8 @@ jobs:
         echo "═══════════════════════════════════════════════════════════"
         echo "🔋 Source: ${{ steps.data_core_scan.outputs.backup_source }}"
         
-        # Create restoration chamber with full permissions
-        RESTORE_CHAMBER="/tmp/omnitrix_restore"
+        # Create restoration chamber with more storage space
+        RESTORE_CHAMBER="/mnt/omnitrix_restore"
         sudo rm -rf "$RESTORE_CHAMBER" 2>/dev/null || true
         sudo mkdir -p "$RESTORE_CHAMBER"
         sudo chmod 777 "$RESTORE_CHAMBER"
@@ -367,8 +367,8 @@ jobs:
           echo "⚠️ Integrity check failed, attempting extraction anyway..."
         fi
         
-        # Create staging area with proper permissions
-        STAGING_AREA="/tmp/restore_data"
+        # Create staging area with more storage space
+        STAGING_AREA="/mnt/restore_data"
         sudo rm -rf "$STAGING_AREA" 2>/dev/null || true
         sudo mkdir -p "$STAGING_AREA"
         sudo chmod 777 "$STAGING_AREA"
@@ -996,8 +996,8 @@ jobs:
         done
         sleep 5
         
-        # Create preservation chamber
-        PRESERVATION_CHAMBER="/tmp/universe_preservation"
+        # Create preservation chamber with ample storage space
+        PRESERVATION_CHAMBER="/mnt/universe_preservation"
         sudo rm -rf "$PRESERVATION_CHAMBER" 2>/dev/null || true
         sudo mkdir -p "$PRESERVATION_CHAMBER"
         sudo chmod 777 "$PRESERVATION_CHAMBER"
@@ -1070,9 +1070,9 @@ jobs:
         It's Hero Time! 💥
         EOF
         
-        # Create backup archive
+        # Create backup archive with proper storage location
         echo "🔬 Compressing universe into temporal data core..."
-        cd /tmp
+        cd /mnt
         if sudo tar -czf "$BACKUP_NEXUS/$BACKUP_ARTIFACT" universe_preservation/ 2>/dev/null; then
           echo "✅ Temporal data core created successfully!"
         else
