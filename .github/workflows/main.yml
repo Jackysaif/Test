@@ -284,8 +284,8 @@ jobs:
             import zipfile
             import os
             with zipfile.ZipFile('data_core.zip', 'r') as zip_ref:
-           zip_ref.extractall('.')
-           " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
+            zip_ref.extractall('.')
+            " 2>/dev/null && EXTRACT_SUCCESS=true || echo "⚠️ Python extraction also failed"
               fi
               
               if [[ "$EXTRACT_SUCCESS" == "false" ]]; then
@@ -457,43 +457,59 @@ jobs:
           fi
         }
         
-        # Restore all data components with enhanced timeout handling
-        echo "🔧 Starting enhanced restoration process..."
+        # Restore data components with maximum effort for complete data recovery
+        echo "🔧 Starting complete data restoration with all fallbacks..."
         
-        # Restore home directories with specific user focus
+        # Force home directory restoration with process-level timeouts
         if [[ -d "$DATA_ROOT/home" ]] && [[ -n "$(sudo ls -A "$DATA_ROOT/home" 2>/dev/null)" ]]; then
-          echo "🏠 Restoring hero base (home directories)..."
+          echo "🏠 Force restoring home directories with process-level timeouts..."
           
-          # Create home directory structure first
           sudo mkdir -p /home
           
-          # Restore jacky's home directory specifically
+          # Restore jacky specifically first
           if [[ -d "$DATA_ROOT/home/jacky" ]]; then
             echo "👤 Restoring jacky's home directory..."
             sudo mkdir -p /home/jacky
-            timeout 180 sudo cp -rf "$DATA_ROOT/home/jacky/." /home/jacky/ 2>/dev/null || {
-              echo "⚠️ Jacky home restoration timed out, trying selective copy..."
-              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.bashrc /home/jacky/ 2>/dev/null || true
-              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.ssh /home/jacky/ 2>/dev/null || true
-              timeout 60 sudo cp -r "$DATA_ROOT/home/jacky"/.config /home/jacky/ 2>/dev/null || true
-            }
-            sudo chown -R jacky:jacky /home/jacky 2>/dev/null || true
-            echo "✅ Jacky's home directory restored"
+            timeout 30 sudo rsync -av --timeout=15 "$DATA_ROOT/home/jacky/" /home/jacky/ 2>/dev/null || \
+            timeout 30 sudo cp -r "$DATA_ROOT/home/jacky/." /home/jacky/ 2>/dev/null || \
+            echo "Jacky home restoration failed but continuing"
+            sudo chown -R jacky:root /home/jacky 2>/dev/null || true
+            echo "✅ Jacky home directory processed"
           fi
           
-          # Restore other home directories with timeout
-          for user_home in "$DATA_ROOT/home"/*; do
-            if [[ -d "$user_home" ]]; then
-              user_name=$(basename "$user_home")
-              if [[ "$user_name" != "jacky" ]]; then
-                echo "👥 Restoring $user_name home directory..."
-                timeout 120 sudo cp -rf "$user_home" /home/ 2>/dev/null || {
-                  echo "⚠️ $user_name home restoration timed out, skipping..."
-                }
+          # Process other users with strict timeouts and skip problematic ones
+          echo "👥 Processing other home directories with strict limits..."
+          for user_dir in "$DATA_ROOT/home"/*; do
+            if [[ -d "$user_dir" ]]; then
+              user_name=$(basename "$user_dir")
+              
+              # Skip jacky (already done) and known problematic directories
+              if [[ "$user_name" == "jacky" ]]; then
+                continue
+              fi
+              
+              # Skip known problematic directories that cause hangs
+              if [[ "$user_name" == "linuxbrew" ]] || [[ "$user_name" == "ubuntu" ]] || [[ "$user_name" == "runner" ]]; then
+                echo "⚠️ Skipping potentially problematic directory: $user_name"
+                continue
+              fi
+              
+              echo "Restoring $user_name home directory..."
+              
+              # Use process substitution with timeout to avoid hanging
+              (
+                timeout 20 sudo cp -r "$user_dir" /home/ 2>/dev/null || \
+                echo "Timeout on $user_name"
+              ) &
+              
+              # Wait for background process with timeout
+              if ! wait $! 2>/dev/null; then
+                echo "Background process for $user_name failed or timed out"
               fi
             fi
           done
-          echo "✅ Home directories restoration completed"
+          
+          echo "✅ Home directory restoration completed with strict timeouts"
         else
           echo "ℹ️ No home directory data found to restore"
         fi
@@ -1024,31 +1040,31 @@ jobs:
         
         # Create manifest
         sudo tee "$PRESERVATION_CHAMBER/universe-manifest.txt" >/dev/null << EOF
-        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
-        ═══════════════════════════════════════════════════════════════════
+       🛸 OMNITRIX UNIVERSE PRESERVATION CORE
+       ═══════════════════════════════════════════════════════════════════
 
-        🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
-        ⏰ Preservation Date: $(date)
-        🆔 Session ID: ${{ github.run_id }}
-        🌍 Universe: $PLUMBER_NETWORK
-        👽 Alien Mode: Jetray (High-Speed Operations)
+       🌟 Hero: Ben Tennyson | Session: Alien Force Edition  
+       ⏰ Preservation Date: $(date)
+       🆔 Session ID: ${{ github.run_id }}
+       🌍 Universe: $PLUMBER_NETWORK
+       👽 Alien Mode: Jetray (High-Speed Operations)
 
-        📦 PRESERVED TECHNOLOGY:
-        ✅ Hero Base (/home) - Personal data and configurations
-        ✅ Command Center (/root) - Root environment  
-        ✅ Plumber Network (/var/lib/tailscale) - VPN state
-        ✅ Database Fortress (/var/lib/mysql) - All databases
-        ✅ Web Arsenal (/var/www) - Web server data
-        ✅ Control Panel (/www) - aaPanel configuration  
-        ✅ System Configs (/etc) - Critical configurations
-        ✅ Alien Apps (/opt) - Custom applications
+       📦 PRESERVED TECHNOLOGY:
+       ✅ Hero Base (/home) - Personal data and configurations
+       ✅ Command Center (/root) - Root environment  
+       ✅ Plumber Network (/var/lib/tailscale) - VPN state
+       ✅ Database Fortress (/var/lib/mysql) - All databases
+       ✅ Web Arsenal (/var/www) - Web server data
+       ✅ Control Panel (/www) - aaPanel configuration  
+       ✅ System Configs (/etc) - Critical configurations
+       ✅ Alien Apps (/opt) - Custom applications
 
-        🛡️ METHOD: Selective Technology Backup
-        ⚡ SPEED: Optimized for fast cycles  
-        🌌 CONTINUITY: Complete state preservation
+       🛡️ METHOD: Selective Technology Backup
+       ⚡ SPEED: Optimized for fast cycles  
+       🌌 CONTINUITY: Complete state preservation
 
-        It's Hero Time! 💥
-        EOF
+       It's Hero Time! 💥
+       EOF
         
         # Create backup archive
         echo "🔬 Compressing universe into temporal data core..."
