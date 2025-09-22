@@ -532,60 +532,164 @@ jobs:
         # Restore all components using production fallback system
         restore_with_fallbacks "$DATA_ROOT/home" "/home" "Hero Base (home directories)" "root:root" 180
         restore_with_fallbacks "$DATA_ROOT/root" "/root" "Command Center (root directory)" "root:root" 120
+    - name: "📥 TEMPORAL DATA CORE RESTORATION"
+      if: steps.data_core_scan.outputs.has_backup == 'true'
+      run: |
+        set -e
         
-        # Tailscale state restoration
-        if [[ -d "$DATA_ROOT/tailscale" ]]; then
-          echo "🔗 Restoring Plumber Network state..."
-          sudo mkdir -p /var/lib/tailscale
-          restore_directory "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Plumber Network state" "root:root"
-        fi
-        
-        # MariaDB restoration
-        if [[ -d "$DATA_ROOT/mysql" ]]; then
-          echo "🗄️ Restoring Database Fortress..."
-          sudo systemctl stop mariadb 2>/dev/null || true
-          sleep 3
-          restore_directory "$DATA_ROOT/mysql" "/var/lib/mysql" "Database Fortress" "mysql:mysql"
-          sudo systemctl start mariadb 2>/dev/null || true
-        fi
-        
-        # Web files restoration
-        restore_directory "$DATA_ROOT/www" "/var/www" "Web Arsenal" "www-data:www-data"
-        
-        # aaPanel restoration
-        if [[ -d "$DATA_ROOT/aapanel" ]]; then
-          sudo mkdir -p /www
-          restore_directory "$DATA_ROOT/aapanel" "/www" "Alien Control Panel" "root:root"
-        fi
-        
-        # System configs restoration
-        if [[ -d "$DATA_ROOT/etc_configs" ]]; then
-          echo "⚙️ Restoring system configurations..."
-          # More careful config restoration
-          sudo find "$DATA_ROOT/etc_configs" -type f -exec basename {} \; 2>/dev/null | while read config_file; do
-            if [[ -f "$DATA_ROOT/etc_configs/$config_file" ]]; then
-              sudo cp "$DATA_ROOT/etc_configs/$config_file" "/etc/$config_file" 2>/dev/null || true
+        echo "═══════════════════════════════════════════════════════════"
+        echo "📥        TEMPORAL DATA CORE RESTORATION               👽"
+        echo "═══════════════════════════════════════════════════════════"
+        echo "🔋 Source: ${{ steps.data_core_scan.outputs.backup_source }}"
+
+        # Create a dedicated, spacious area for restoration
+        RESTORE_CHAMBER="/mnt/omnitrix_restore"
+        sudo mkdir -p "$RESTORE_CHAMBER" && cd "$RESTORE_CHAMBER"
+
+        # Download based on source
+        case "${{ steps.data_core_scan.outputs.backup_source }}" in
+          "galvan_prime"|"github_artifact")
+            echo "🌌 Downloading from ${{ steps.data_core_scan.outputs.backup_source }}..."
+            
+            # Use a simple retry loop for the download
+            DOWNLOAD_SUCCESS=false
+            for attempt in {1..3}; do
+              echo "⬇️ Download attempt $attempt/3..."
+              if sudo curl -L --retry 3 --retry-delay 5 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                     "${{ steps.data_core_scan.outputs.artifact_url }}" -o data_core.zip; then
+                if [[ -s data_core.zip ]]; then # Check if file is not empty
+                  DOWNLOAD_SUCCESS=true
+                  echo "✅ Download successful! Size: $(du -h data_core.zip | cut -f1)"
+                  break
+                else
+                  echo "⚠️ Downloaded file is empty. Retrying..."
+                  sudo rm -f data_core.zip
+                fi
+              else
+                echo "⚠️ Download attempt $attempt failed."
+                sleep 5
+              fi
+            done
+
+            if [[ "$DOWNLOAD_SUCCESS" == "false" ]]; then
+              echo "❌ All download attempts failed. Cannot proceed."
+              exit 1
             fi
-          done || true
+
+            echo "📦 Extracting artifact zip file..."
+            if ! sudo unzip -oq data_core.zip; then
+              echo "❌ Failed to extract data_core.zip"
+              exit 1
+            fi
+            
+            # Find the actual backup tarball within the extracted files
+            BACKUP_FILE=$(sudo find . -name "*.tar.gz" -type f | head -n 1)
+            ;;
+            
+          "galvan_direct")
+            echo "🛸 Direct download from Galvan Prime..."
+            BACKUP_FILE="${{ steps.data_core_scan.outputs.backup_file }}"
+            if ! sudo rclone copy -P "${GALVAN_CLOUD}/$BACKUP_FILE" .; then
+              echo "❌ Direct download from Galvan Prime failed."
+              exit 1
+            fi
+            ;;
+        esac
+
+        if [[ -z "$BACKUP_FILE" || ! -f "$BACKUP_FILE" ]]; then
+          echo "❌ Backup file (.tar.gz) not found after download/extraction."
+          echo "📁 Available files:"
+          ls -la
+          exit 1
         fi
         
-        # Applications restoration
-        restore_directory "$DATA_ROOT/opt" "/opt" "Alien Applications" "root:root"
+        CORE_SIZE=$(sudo du -h "$BACKUP_FILE" | cut -f1)
+        echo "📋 Data Core Found: $BACKUP_FILE | Size: $CORE_SIZE"
         
-        # Final permissions fix
-        sudo chmod -R 755 /home/* 2>/dev/null || true
-        sudo chmod 700 /root 2>/dev/null || true
-        sudo chmod -R 644 /etc/ssh/ssh_config* 2>/dev/null || true
+        # Verify archive integrity before extraction
+        if ! sudo tar -tzf "$BACKUP_FILE" >/dev/null; then
+          echo "⚠️ CRITICAL: Data core integrity check failed! The backup may be corrupt."
+          exit 1
+        fi
+        echo "✅ Data core integrity verified!"
+        
+        # Create staging area and extract the tarball
+        STAGING_AREA="/mnt/restore_data"
+        sudo mkdir -p "$STAGING_AREA"
+        echo "🔧 Extracting data core to staging area..."
+        if ! sudo tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA"; then
+            echo "❌ Failed to extract the main backup file '$BACKUP_FILE'."
+            exit 1
+        fi
+        
+        # Find the actual data directory (could be nested, e.g., inside 'universe_preservation')
+        DATA_ROOT=$(sudo find "$STAGING_AREA" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        if [[ -z "$DATA_ROOT" ]]; then
+          DATA_ROOT="$STAGING_AREA"
+        fi
+        echo "📁 Identified data root for restoration: $DATA_ROOT"
+        
+        # --- ROBUST RESTORATION LOGIC ---
+        # A simplified, powerful function to restore directories.
+        # It uses `rsync -a` which correctly handles all files, including hidden "dotfiles",
+        # and sets ownership in one go. A `tar` pipe is used as a reliable fallback.
+        restore_directory_robust() {
+          local src_dir="$1"
+          local dest_dir="$2"
+          local description="$3"
+          local owner_group="$4"
+          
+          if [[ ! -d "$src_dir" ]]; then
+            echo "ℹ️ No data found for $description. Skipping."
+            return
+          fi
+          
+          echo "📂 Restoring $description..."
+          sudo mkdir -p "$dest_dir"
+          
+          # Method 1: rsync (preferred)
+          if sudo rsync -a --chown="$owner_group" "$src_dir/" "$dest_dir/"; then
+            echo "✅ $description restored successfully via rsync."
+          else
+            echo "⚠️ rsync failed. Trying fallback method (tar pipe)..."
+            # Method 2: tar pipe (excellent fallback)
+            if (cd "$src_dir" && sudo tar -c --owner=$(echo $owner_group | cut -d: -f1) --group=$(echo $owner_group | cut -d: -f2) -f - .) | (cd "$dest_dir" && sudo tar -xp -f -); then
+              echo "✅ $description restored successfully via tar."
+            else
+              echo "❌ CRITICAL: Failed to restore $description with all methods."
+            fi
+          fi
+        }
+        
+        echo "🔧 Starting complete data restoration..."
+        
+        # Restore all key components using the robust function
+        restore_directory_robust "$DATA_ROOT/home"      "/home"            "Hero Base (home)"         "root:root"
+        restore_directory_robust "$DATA_ROOT/root"      "/root"            "Command Center (root)"    "root:root"
+        restore_directory_robust "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Plumber Network State"    "root:root"
+        restore_directory_robust "$DATA_ROOT/mysql"     "/var/lib/mysql"   "Database Fortress"        "mysql:mysql"
+        restore_directory_robust "$DATA_ROOT/www"       "/var/www"         "Web Arsenal"              "www-data:www-data"
+        restore_directory_robust "$DATA_ROOT/aapanel"   "/www"             "Alien Control Panel"      "root:root"
+        restore_directory_robust "$DATA_ROOT/opt"       "/opt"             "Alien Applications"       "root:root"
+        
+        # Restore system configs carefully
+        if [[ -d "$DATA_ROOT/etc_configs" ]]; then
+          echo "⚙️ Restoring select system configurations..."
+          sudo cp -rfp "$DATA_ROOT/etc_configs"/* /etc/ 2>/dev/null || true
+        fi
+        
+        # Final important permissions adjustments
+        echo "🛡️ Applying final security permissions..."
+        sudo chmod 700 /root
+        sudo find /home -name ".ssh" -type d -exec chmod 700 {} \; 2>/dev/null || true
+        sudo find /home -name "authorized_keys" -type f -exec chmod 600 {} \; 2>/dev/null || true
         
         # Cleanup staging areas
-        sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER" 2>/dev/null || true
+        sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER"
         
         echo "═══════════════════════════════════════════════════════════"
         echo "✅ TEMPORAL DATA CORE RESTORATION COMPLETE! 🎉"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🔧 All alien technology and hero data successfully restored"
-        echo "🛡️ Proper permissions and ownership applied"
-        echo "⚡ Universe state reconstruction successful"
+        echo "⚡ Universe state reconstruction successful!"
         echo "═══════════════════════════════════════════════════════════"
 
     - name: "👤 HERO ACCOUNT CONFIGURATION"
