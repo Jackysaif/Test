@@ -42,8 +42,8 @@ jobs:
         sudo mkdir -p "$BACKUP_STORAGE"/{backups,temp,restore,operations}
         sudo chmod 777 "$BACKUP_STORAGE" -R
         
-        # Mount tmpfs for high-speed operations
-        sudo mount -t tmpfs -o size=2G tmpfs "$BACKUP_STORAGE/operations"
+        # Mount tmpfs for high-speed operations (reduced size since no intermediate extraction)
+        sudo mount -t tmpfs -o size=1G tmpfs "$BACKUP_STORAGE/operations"
         
         echo "✅ Storage systems initialized!"
         echo "📁 Backup Storage: $BACKUP_STORAGE"
@@ -219,43 +219,56 @@ jobs:
         
         echo "📋 Found backup: $BACKUP_FILE"
         
-        # Extract backup
-        echo "🔧 Extracting backup data..."
-        EXTRACT_DIR="$BACKUP_STORAGE/operations/extracted"
-        mkdir -p "$EXTRACT_DIR"
-        tar -xzf "$BACKUP_FILE" -C "$EXTRACT_DIR" --strip-components=1 2>/dev/null || \
-        tar -xf "$BACKUP_FILE" -C "$EXTRACT_DIR" --strip-components=1
+        # Direct extraction to final destinations
+        echo "🔧 Directly extracting backup data to final destinations..."
         
-        # Restore data
-        echo "🔄 Restoring universe data..."
-        
-        restore_data() {
-          local src="$1"
-          local dest="$2"
+        # Function to directly extract specific paths from tar
+        extract_to_destination() {
+          local tar_path="$1"
+          local dest_path="$2"
           local desc="$3"
           
-          if [[ -d "$src" ]] && [[ -n "$(ls -A "$src" 2>/dev/null)" ]]; then
-            echo "📂 Restoring $desc..."
-            sudo mkdir -p "$dest"
-            sudo cp -rf "$src"/* "$dest"/ 2>/dev/null || \
-            sudo rsync -av "$src"/ "$dest"/ 2>/dev/null || true
-            echo "✅ $desc restored"
+          echo "📂 Extracting $desc directly to $dest_path..."
+          
+          # Create destination directory
+          sudo mkdir -p "$dest_path"
+          
+          # Check if path exists in tar and extract directly
+          if tar -tzf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/$tar_path/" || \
+             tar -tf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/$tar_path/"; then
+            
+            # Extract directly to destination, stripping backup/ prefix
+            tar -xzf "$BACKUP_FILE" -C "$dest_path" --strip-components=2 \
+                --wildcards "backup/$tar_path/*" 2>/dev/null || \
+            tar -xf "$BACKUP_FILE" -C "$dest_path" --strip-components=2 \
+                --wildcards "backup/$tar_path/*" 2>/dev/null || true
+            
+            echo "✅ $desc extracted directly"
+          else
+            echo "ℹ️ No $desc data found in backup"
           fi
         }
         
-        # Restore system data
-        restore_data "$EXTRACT_DIR/home" "/home" "Hero Base"
-        restore_data "$EXTRACT_DIR/root" "/root" "Command Center"
-        restore_data "$EXTRACT_DIR/tailscale" "/var/lib/tailscale" "Plumber Network"
-        restore_data "$EXTRACT_DIR/mysql" "/var/lib/mysql" "Database Fortress"
-        restore_data "$EXTRACT_DIR/www" "/var/www" "Web Arsenal"
-        restore_data "$EXTRACT_DIR/aapanel" "/www" "Control Panel"
-        restore_data "$EXTRACT_DIR/opt" "/opt" "Applications"
+        # Extract system data directly to final locations
+        extract_to_destination "home" "/home" "Hero Base"
+        extract_to_destination "root" "/root" "Command Center"  
+        extract_to_destination "tailscale" "/var/lib/tailscale" "Plumber Network"
+        extract_to_destination "mysql" "/var/lib/mysql" "Database Fortress"
+        extract_to_destination "www" "/var/www" "Web Arsenal"
+        extract_to_destination "aapanel" "/www" "Control Panel"
+        extract_to_destination "opt" "/opt" "Applications"
         
-        # Restore configs
-        if [[ -d "$EXTRACT_DIR/configs" ]]; then
-          echo "⚙️ Restoring configurations..."
-          sudo find "$EXTRACT_DIR/configs" -type f -exec cp {} /etc/ \; 2>/dev/null || true
+        # Extract configs directly to /etc
+        echo "⚙️ Extracting configurations directly to /etc..."
+        if tar -tzf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/configs/" || \
+           tar -tf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/configs/"; then
+          
+          tar -xzf "$BACKUP_FILE" -C /etc --strip-components=2 \
+              --wildcards "backup/configs/*" 2>/dev/null || \
+          tar -xf "$BACKUP_FILE" -C /etc --strip-components=2 \
+              --wildcards "backup/configs/*" 2>/dev/null || true
+          
+          echo "✅ Configurations extracted directly"
         fi
         
         # Fix permissions
