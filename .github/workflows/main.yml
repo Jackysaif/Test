@@ -522,7 +522,7 @@ jobs:
         echo "✅ User data backup complete!"
 
     - name: "📤 UPLOAD BACKUP ARTIFACT"
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: userdata-backup
         path: /tmp/${{ env.BACKUP_ARTIFACT }}
