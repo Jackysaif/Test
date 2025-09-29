@@ -11,8 +11,8 @@ on:
     - cron: '0 */6 * * *'
 
 env:
-  BACKUP_STORAGE: /mnt/omnitrix
-  BACKUP_ARTIFACT: omnitrix-universe-core.tar.gz
+  BACKUP_NEXUS: /mnt/omnitrix/backups
+  BACKUP_ARTIFACT: userdata-backup.tar.gz
   GALVAN_CLOUD: mega:omnitrix-vault
   HERO_SESSION_DURATION: 19800
   PLUMBER_NETWORK: Plumbers-HQ
@@ -30,1112 +30,500 @@ jobs:
     - name: "🛸 Scanning Universe Repository"
       uses: actions/checkout@v4
       
-    - name: "💾 Initialize Omnitrix Storage Systems"
+    - name: "⚡ DEPLOYING ALIEN TECHNOLOGY SUITE"
       run: |
         set -e
+        echo "🛸 OMNITRIX SYSTEM ACTIVATION 👽"
+        echo "⏰ Mission Start: $(date)"
         
-        echo "═══════════════════════════════════════════════════════════"
-        echo "💾         INITIALIZING OMNITRIX STORAGE              🛸"
-        echo "═══════════════════════════════════════════════════════════"
+        # Update package registry
+        sudo apt-get update -qq || sudo apt-get update --fix-missing -qq || true
         
-        # Create /mnt storage structure with proper error handling
-        for dir in backups temp restore operations; do
-          if ! sudo mkdir -p "$BACKUP_STORAGE/$dir"; then
-            echo "❌ Failed to create directory: $BACKUP_STORAGE/$dir"
-            exit 1
-          fi
-        done
-        
-        # Set proper permissions with validation
-        if ! sudo chmod 755 "$BACKUP_STORAGE" -R; then
-          echo "❌ Failed to set permissions on $BACKUP_STORAGE"
-          exit 1
-        fi
-        
-        # Mount tmpfs with error handling and size validation
-        AVAILABLE_MEM=$(free -m | awk '/^Mem:/{print $7}')
-        TMPFS_SIZE="1G"
-        if [ "$AVAILABLE_MEM" -lt 2048 ]; then
-          TMPFS_SIZE="512M"
-          echo "⚠️ Limited memory detected, using 512M tmpfs"
-        fi
-        
-        if ! sudo mount -t tmpfs -o size=$TMPFS_SIZE tmpfs "$BACKUP_STORAGE/operations"; then
-          echo "❌ Failed to mount tmpfs, using regular storage"
-          sudo mkdir -p "$BACKUP_STORAGE/operations"
-        else
-          echo "✅ tmpfs mounted successfully ($TMPFS_SIZE)"
-        fi
-        
-        # Validate storage setup
-        for dir in backups temp restore operations; do
-          if [ ! -d "$BACKUP_STORAGE/$dir" ] || [ ! -w "$BACKUP_STORAGE/$dir" ]; then
-            echo "❌ Storage validation failed for: $BACKUP_STORAGE/$dir"
-            exit 1
-          fi
-        done
-        
-        echo "✅ Storage systems initialized and validated!"
-        echo "📁 Backup Storage: $BACKUP_STORAGE"
-        echo "⚡ Operations: $(df -h "$BACKUP_STORAGE/operations" | tail -1 | awk '{print $2}') available"
-        
-    - name: "⚡ Deploy Alien Technology Suite"
-      run: |
-        set -e
-        
-        echo "⚡ Deploying alien technology suite..."
-        
-        # Update system
-        sudo apt-get update -qq
-        
-        # Install essential packages
-        PACKAGES="curl wget jq tar gzip unzip openssh-server nano vim git net-tools"
-        PACKAGES="$PACKAGES software-properties-common apt-transport-https ca-certificates"
-        PACKAGES="$PACKAGES gnupg psmisc screen expect tmate mariadb-server mariadb-client"
-        PACKAGES="$PACKAGES rsync htop iotop ncdu tree"
-        
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES
-        
-        # Install rclone
+        # Install rclone and essential tools
         if ! command -v rclone >/dev/null 2>&1; then
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+          curl -fsSL https://rclone.org/install.sh | sudo bash || {
+            cd /tmp
+            wget -q https://downloads.rclone.org/rclone-current-linux-amd64.zip
+            sudo apt-get install -y unzip
+            unzip -q rclone-current-linux-amd64.zip
+            sudo cp rclone-*/rclone /usr/bin/ && sudo chmod +x /usr/bin/rclone
+          }
         fi
         
-        echo "✅ Alien technology deployed!"
+        # Install essential tools
+        TOOLS="curl wget jq tar gzip unzip openssh-server nano vim git net-tools"
+        TOOLS="$TOOLS software-properties-common apt-transport-https ca-certificates"
+        TOOLS="$TOOLS gnupg psmisc screen expect tmate mariadb-server mariadb-client"
+        
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TOOLS || true
 
-    - name: "☁️ Configure Galvan Prime Connection"
+    - name: "☁️ GALVAN PRIME CLOUD CONFIGURATION"
       run: |
         set -e
-        
-        echo "☁️ Configuring Galvan Prime connection..."
+        echo "☁️ Establishing connection to Galvan Prime Cloud..."
         
         if [[ -z "${{ secrets.RCLONE_CONFIG || '' }}" ]]; then
-          echo "❌ RCLONE_CONFIG secret missing!"
-          echo "Please configure RCLONE_CONFIG secret with base64 encoded rclone configuration"
+          echo "❌ CRITICAL: RCLONE_CONFIG secret missing!"
           exit 1
         fi
         
-        # Setup rclone config directories with proper permissions
-        for config_dir in ~/.config/rclone /root/.config/rclone; do
-          if [[ "$config_dir" == "/root/.config/rclone" ]]; then
-            sudo mkdir -p "$config_dir"
-          else
-            mkdir -p "$config_dir"
-          fi
-        done
+        # Create config directories and deploy configuration
+        mkdir -p ~/.config/rclone
+        sudo mkdir -p /root/.config/rclone
         
-        # Decode and validate rclone config
-        CONFIG_CONTENT="${{ secrets.RCLONE_CONFIG }}"
-        
-        # Try base64 decoding first (preferred method)
-        if echo "$CONFIG_CONTENT" | base64 -d >/dev/null 2>&1; then
-          echo "📝 Decoding base64 rclone configuration..."
-          if ! echo "$CONFIG_CONTENT" | base64 -d > ~/.config/rclone/rclone.conf; then
-            echo "❌ Failed to write user rclone config"
-            exit 1
-          fi
-          if ! echo "$CONFIG_CONTENT" | base64 -d | sudo tee /root/.config/rclone/rclone.conf >/dev/null; then
-            echo "❌ Failed to write root rclone config"
-            exit 1
-          fi
+        if echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d >/dev/null 2>&1; then
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d | sudo tee /root/.config/rclone/rclone.conf >/dev/null
         else
-          echo "📝 Using raw rclone configuration..."
-          if ! echo "$CONFIG_CONTENT" > ~/.config/rclone/rclone.conf; then
-            echo "❌ Failed to write user rclone config"
-            exit 1
-          fi
-          if ! echo "$CONFIG_CONTENT" | sudo tee /root/.config/rclone/rclone.conf >/dev/null; then
-            echo "❌ Failed to write root rclone config"
-            exit 1
-          fi
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          echo "${{ secrets.RCLONE_CONFIG }}" | sudo tee /root/.config/rclone/rclone.conf >/dev/null
         fi
         
-        # Set secure permissions
         chmod 600 ~/.config/rclone/rclone.conf
         sudo chmod 600 /root/.config/rclone/rclone.conf
-        
-        # Validate config file exists and is readable
-        if [[ ! -f ~/.config/rclone/rclone.conf ]] || [[ ! -s ~/.config/rclone/rclone.conf ]]; then
-          echo "❌ rclone config file is missing or empty"
-          exit 1
-        fi
-        
-        # Test rclone installation and basic functionality
-        if ! command -v rclone >/dev/null 2>&1; then
-          echo "❌ rclone command not found"
-          exit 1
-        fi
-        
-        # Test connection with timeout and retry
-        echo "🔍 Testing Galvan Prime connection..."
-        CONNECTION_SUCCESS=false
-        for attempt in {1..3}; do
-          if timeout 30 rclone lsd "$GALVAN_CLOUD" >/dev/null 2>&1; then
-            echo "✅ Galvan Prime connection established! (attempt $attempt)"
-            CONNECTION_SUCCESS=true
-            break
-          else
-            echo "⚠️ Connection attempt $attempt failed, retrying..."
-            sleep 5
-          fi
-        done
-        
-        if [[ "$CONNECTION_SUCCESS" != "true" ]]; then
-          echo "❌ All connection attempts failed. Please check:"
-          echo "   - MEGA credentials in RCLONE_CONFIG"
-          echo "   - Network connectivity"
-          echo "   - MEGA service status"
-          echo "Continuing with limited functionality..."
-        fi
 
-    - name: "🔍 Scan for Temporal Data Cores"
-      id: scan_cores
+    - name: "🔍 SCANNING FOR USER DATA BACKUPS"
+      id: data_backup_scan
       run: |
         set -e
+        echo "🔍 Scanning for user data backups..."
         
-        echo "🔍 Scanning for temporal data cores..."
+        # Install backup scripts
+        sudo mkdir -p /usr/local/bin
         
-        RECOVERY_METHOD=""
-        ARTIFACT_URL=""
+        # Create backup.sh script
+        cat > /tmp/backup.sh << 'EOF'
+#!/bin/bash
+# User Data Backup Script - Only backs up user data with persistence
+
+BACKUP_DIR="/mnt/omnitrix/backups"
+BACKUP_FILE="userdata-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+LATEST_LINK="latest-userdata-backup.tar.gz"
+CLOUD_STORAGE="mega:omnitrix-vault"
+
+sudo mkdir -p "$BACKUP_DIR"
+
+# Define directories to backup (only user data)
+USER_DIRS=("/home" "/root" "/var/www/html")
+
+# Application data directories
+APP_DIRS=(
+  "/etc/mysql"         # MySQL configuration
+  "/etc/php"           # PHP configuration
+  "/etc/apache2"       # Apache configuration
+  "/etc/nginx"         # Nginx configuration (if used)
+  "/var/lib/mysql"     # MySQL data
+  "/var/lib/php"       # PHP sessions and data
+  "/etc/letsencrypt"   # SSL certificates
+  "/usr/local/aapanel" # aaPanel data (if installed)
+)
+
+# Optional directories (only backed up if they exist)
+OPTIONAL_DIRS=("/var/lib/tailscale" "/etc/ssh")
+
+echo "🛸 USER DATA BACKUP STARTING 👽"
+echo "⏰ Backup Start: $(date)"
+
+# Create temporary directory for backup
+TEMP_DIR=$(mktemp -d)
+mkdir -p "$TEMP_DIR/selective_backup"
+
+# Backup function
+backup_directory() {
+  local src_dir="$1"
+  local dest_dir="$2"
+  local description="$3"
+  
+  if [[ -d "$src_dir" ]]; then
+    echo "📂 Backing up $description..."
+    mkdir -p "$dest_dir"
+    sudo cp -rf "$src_dir" "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir" "$dest_dir/" 2>/dev/null || true
+  fi
+}
+
+# Backup required user directories
+for dir in "${USER_DIRS[@]}"; do
+  dir_name=$(basename "$dir")
+  backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+done
+
+# Backup application data directories if they exist
+for dir in "${APP_DIRS[@]}"; do
+  if [[ -d "$dir" ]]; then
+    dir_name=$(basename "$dir")
+    backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+  fi
+done
+
+# Backup optional directories if they exist
+for dir in "${OPTIONAL_DIRS[@]}"; do
+  if [[ -d "$dir" ]]; then
+    dir_name=$(basename "$dir")
+    backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+  fi
+done
+
+# Special handling for MySQL databases
+if command -v mysqldump >/dev/null 2>&1; then
+  echo "📂 Backing up MySQL databases..."
+  mkdir -p "$TEMP_DIR/selective_backup/mysql_dumps"
+  
+  # Create MySQL dump with all databases
+  sudo mysqldump --all-databases --single-transaction --quick --lock-tables=false > "$TEMP_DIR/selective_backup/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL dump failed, but continuing..."
+fi
+
+# Create the backup archive
+echo "📦 Creating backup archive..."
+sudo tar -czf "$BACKUP_DIR/$BACKUP_FILE" -C "$TEMP_DIR" selective_backup
+sudo ln -sf "$BACKUP_DIR/$BACKUP_FILE" "$BACKUP_DIR/$LATEST_LINK"
+
+# Upload to cloud storage
+if command -v rclone >/dev/null 2>&1; then
+  echo "☁️ Uploading to cloud storage..."
+  rclone copy "$BACKUP_DIR/$BACKUP_FILE" "$CLOUD_STORAGE/" 2>/dev/null || true
+  echo "$BACKUP_DIR/$BACKUP_FILE" | rclone rcat "$CLOUD_STORAGE/temporal_backup_link.txt" 2>/dev/null || true
+fi
+
+# Clean up and set permissions
+sudo rm -rf "$TEMP_DIR"
+sudo chmod 600 "$BACKUP_DIR/$BACKUP_FILE"
+
+echo "✅ USER DATA BACKUP COMPLETE!"
+echo "📁 Backup Location: $BACKUP_DIR/$BACKUP_FILE"
+echo "📊 Backup Size: $(du -h "$BACKUP_DIR/$BACKUP_FILE" | cut -f1)"
+EOF
+
+        # Create restore.sh script
+        cat > /tmp/restore.sh << 'EOF'
+#!/bin/bash
+# User Data Restore Script - Only restores user data with persistence
+
+BACKUP_DIR="/mnt/omnitrix/backups"
+LATEST_LINK="latest-userdata-backup.tar.gz"
+CLOUD_STORAGE="mega:omnitrix-vault"
+
+echo "🛸 USER DATA RESTORATION STARTING 👽"
+echo "⏰ Restore Start: $(date)"
+
+# Create temporary directory for restoration
+RESTORE_CHAMBER="/tmp/userdata_restore"
+sudo rm -rf "$RESTORE_CHAMBER" 2>/dev/null || true
+sudo mkdir -p "$RESTORE_CHAMBER"
+sudo chmod 777 "$RESTORE_CHAMBER"
+cd "$RESTORE_CHAMBER"
+
+# Find backup file (local or cloud)
+BACKUP_FILE=""
+
+# Check local backup first
+if [[ -f "$BACKUP_DIR/$LATEST_LINK" ]]; then
+  BACKUP_FILE="$BACKUP_DIR/$LATEST_LINK"
+elif [[ -d "$BACKUP_DIR" ]]; then
+  LATEST_BACKUP=$(find "$BACKUP_DIR" -name "userdata-backup-*.tar.gz" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d' ' -f2-)
+  if [[ -n "$LATEST_BACKUP" ]]; then
+    BACKUP_FILE="$LATEST_BACKUP"
+  fi
+fi
+
+# If no local backup, try cloud storage
+if [[ -z "$BACKUP_FILE" ]] && command -v rclone >/dev/null 2>&1; then
+  if rclone ls "$CLOUD_STORAGE/temporal_backup_link.txt" >/dev/null 2>&1; then
+    BACKUP_LINK=$(rclone cat "$CLOUD_STORAGE/temporal_backup_link.txt" 2>/dev/null)
+    if [[ -n "$BACKUP_LINK" ]]; then
+      CLOUD_BACKUP=$(basename "$BACKUP_LINK")
+      rclone copy "$CLOUD_STORAGE/$CLOUD_BACKUP" . 2>/dev/null && BACKUP_FILE="./$CLOUD_BACKUP"
+    fi
+  fi
+  
+  if [[ -z "$BACKUP_FILE" ]]; then
+    CLOUD_BACKUPS=$(rclone lsf "$CLOUD_STORAGE/" 2>/dev/null | grep -E "userdata-backup-.*\.tar\.gz" || echo "")
+    if [[ -n "$CLOUD_BACKUPS" ]]; then
+      LATEST_CLOUD=$(echo "$CLOUD_BACKUPS" | sort -r | head -1)
+      rclone copy "$CLOUD_STORAGE/$LATEST_CLOUD" . 2>/dev/null && BACKUP_FILE="./$LATEST_CLOUD"
+    fi
+  fi
+fi
+
+# Exit if no backup found
+if [[ -z "$BACKUP_FILE" ]]; then
+  echo "❌ No backup file found. Cannot restore user data."
+  exit 1
+fi
+
+# Extract backup
+STAGING_AREA="/tmp/restore_data"
+sudo rm -rf "$STAGING_AREA" 2>/dev/null || true
+sudo mkdir -p "$STAGING_AREA"
+sudo chmod 777 "$STAGING_AREA"
+
+if ! tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA"; then
+  echo "❌ Failed to extract backup."
+  exit 1
+fi
+
+# Find data directory
+DATA_ROOT=""
+if [[ -d "$STAGING_AREA/selective_backup" ]]; then
+  DATA_ROOT="$STAGING_AREA/selective_backup"
+else
+  DATA_ROOT=$(find "$STAGING_AREA" -type d -name "*backup*" -o -name "*selective*" | head -1)
+  if [[ -z "$DATA_ROOT" ]]; then
+    DATA_ROOT="$STAGING_AREA"
+  fi
+fi
+
+# Restore function
+restore_directory() {
+  local src_dir="$1"
+  local dest_dir="$2"
+  local description="$3"
+  local owner="$4"
+  
+  if [[ -d "$src_dir" ]] && [[ -n "$(ls -A "$src_dir" 2>/dev/null)" ]]; then
+    echo "📂 Restoring $description..."
+    sudo mkdir -p "$dest_dir"
+    sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir"/ "$dest_dir"/ 2>/dev/null || true
+    if [[ -n "$owner" ]]; then
+      sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
+    fi
+  fi
+}
+
+# Restore user data
+[[ -d "$DATA_ROOT/home" ]] && restore_directory "$DATA_ROOT/home" "/home" "User home directories" "root:root"
+[[ -d "$DATA_ROOT/root" ]] && restore_directory "$DATA_ROOT/root" "/root" "Root user data" "root:root"
+[[ -d "$DATA_ROOT/html" ]] && restore_directory "$DATA_ROOT/html" "/var/www/html" "Web content" "www-data:www-data"
+
+# Restore application data
+[[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/etc/mysql" "MySQL configuration" "mysql:mysql"
+[[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/etc/php" "PHP configuration" "root:root"
+[[ -d "$DATA_ROOT/apache2" ]] && restore_directory "$DATA_ROOT/apache2" "/etc/apache2" "Apache configuration" "root:www-data"
+[[ -d "$DATA_ROOT/nginx" ]] && restore_directory "$DATA_ROOT/nginx" "/etc/nginx" "Nginx configuration" "root:www-data"
+[[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/var/lib/mysql" "MySQL data" "mysql:mysql"
+[[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/var/lib/php" "PHP data" "root:root"
+[[ -d "$DATA_ROOT/letsencrypt" ]] && restore_directory "$DATA_ROOT/letsencrypt" "/etc/letsencrypt" "SSL certificates" "root:root"
+[[ -d "$DATA_ROOT/aapanel" ]] && restore_directory "$DATA_ROOT/aapanel" "/usr/local/aapanel" "aaPanel data" "root:root"
+
+# Restore MySQL dumps if they exist
+if [[ -d "$DATA_ROOT/mysql_dumps" ]]; then
+  echo "📂 Restoring MySQL databases..."
+  if [[ -f "$DATA_ROOT/mysql_dumps/all_databases.sql" ]]; then
+    # Start MySQL service if not running
+    sudo service mysql start 2>/dev/null || sudo systemctl start mysql 2>/dev/null || sudo systemctl start mariadb 2>/dev/null || true
+    
+    # Restore databases
+    sudo mysql < "$DATA_ROOT/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL restore failed, but continuing..."
+  fi
+fi
+
+# Restore optional directories
+[[ -d "$DATA_ROOT/tailscale" ]] && restore_directory "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Network configuration" "root:root"
+[[ -d "$DATA_ROOT/ssh" ]] && restore_directory "$DATA_ROOT/ssh" "/etc/ssh" "SSH configuration" "root:root"
+
+# Fix permissions
+sudo chmod -R 755 /home/* 2>/dev/null || true
+sudo chmod 700 /root 2>/dev/null || true
+sudo chmod 644 /etc/ssh/ssh_config* 2>/dev/null || true
+sudo chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
+sudo chmod 644 /etc/mysql/my.cnf 2>/dev/null || true
+sudo chmod 644 /etc/php/*/*/php.ini 2>/dev/null || true
+sudo chmod 644 /etc/apache2/apache2.conf 2>/dev/null || true
+sudo chmod 644 /etc/nginx/nginx.conf 2>/dev/null || true
+
+# Restart services if needed
+sudo service mysql restart 2>/dev/null || sudo systemctl restart mysql 2>/dev/null || sudo systemctl restart mariadb 2>/dev/null || true
+sudo service apache2 restart 2>/dev/null || sudo systemctl restart apache2 2>/dev/null || true
+sudo service nginx restart 2>/dev/null || sudo systemctl restart nginx 2>/dev/null || true
+sudo service php* restart 2>/dev/null || sudo systemctl restart php* 2>/dev/null || true
+
+# Cleanup
+sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER" 2>/dev/null || true
+
+echo "✅ USER DATA RESTORATION COMPLETE!"
+EOF
+
+        # Create persistence.sh script
+        cat > /tmp/persistence.sh << 'EOF'
+#!/bin/bash
+# Persistence Mechanism for User Data Backups
+
+BACKUP_DIR="/mnt/omnitrix/backups"
+CLOUD_STORAGE="mega:omnitrix-vault"
+PERSISTENCE_FILE="backup_persistence.json"
+
+sudo mkdir -p "$BACKUP_DIR"
+
+# Create persistence file if it doesn't exist
+if [[ ! -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Creating persistence file..."
+  cat > "$BACKUP_DIR/$PERSISTENCE_FILE" << EOF
+{
+  "last_backup": "",
+  "backup_history": [],
+  "restore_history": [],
+  "session_count": 0
+}
+EOF
+  sudo chmod 644 "$BACKUP_DIR/$PERSISTENCE_FILE"
+fi
+
+# Sync persistence file with cloud
+if command -v rclone >/dev/null 2>&1; then
+  # Try to retrieve from cloud first
+  if [[ ! -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
+    rclone copy "$CLOUD_STORAGE/$PERSISTENCE_FILE" "$BACKUP_DIR/" 2>/dev/null || true
+  fi
+  
+  # Upload current persistence file
+  rclone copy "$BACKUP_DIR/$PERSISTENCE_FILE" "$CLOUD_STORAGE/" 2>/dev/null || true
+fi
+
+# Update session count
+if [[ -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
+  SESSION_COUNT=$(grep -o '"session_count": [0-9]*' "$BACKUP_DIR/$PERSISTENCE_FILE" | awk '{print $2}')
+  SESSION_COUNT=$((SESSION_COUNT + 1))
+  sed -i "s/\"session_count\": [0-9]*/\"session_count\": $SESSION_COUNT/" "$BACKUP_DIR/$PERSISTENCE_FILE"
+  
+  # Check if we need to run a backup
+  LAST_BACKUP=$(grep -o '"last_backup": "[^"]*"' "$BACKUP_DIR/$PERSISTENCE_FILE" | cut -d'"' -f4)
+  if [[ -z "$LAST_BACKUP" ]] || [[ ! -f "$LAST_BACKUP" ]] || [[ $(find "$LAST_BACKUP" -mtime +1 -print 2>/dev/null) ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running scheduled backup..."
+    bash /usr/local/bin/backup.sh
+  fi
+fi
+EOF
+
+        # Install the scripts
+        sudo mv /tmp/backup.sh /usr/local/bin/backup.sh
+        sudo mv /tmp/restore.sh /usr/local/bin/restore.sh
+        sudo mv /tmp/persistence.sh /usr/local/bin/persistence.sh
         
-        # Check for artifact link in MEGA
-        if rclone cat "$GALVAN_CLOUD/artifact_link.txt" >/dev/null 2>&1; then
-          ARTIFACT_URL=$(rclone cat "$GALVAN_CLOUD/artifact_link.txt")
-          if [[ -n "$ARTIFACT_URL" ]]; then
-            echo "✅ Found artifact link in Galvan Prime!"
-            RECOVERY_METHOD="artifact_link"
+        sudo chmod +x /usr/local/bin/backup.sh
+        sudo chmod +x /usr/local/bin/restore.sh
+        sudo chmod +x /usr/local/bin/persistence.sh
+        
+        # Create backup directory
+        sudo mkdir -p "$BACKUP_NEXUS"
+        
+        # Check for existing backups
+        RECOVERY_SUCCESS=false
+        
+        # Check cloud storage for backups
+        if rclone ls "${GALVAN_CLOUD}/temporal_backup_link.txt" >/dev/null 2>&1; then
+          BACKUP_LINK=$(rclone cat "${GALVAN_CLOUD}/temporal_backup_link.txt" 2>/dev/null)
+          if [[ -n "$BACKUP_LINK" ]]; then
+            echo "has_backup=true" >> $GITHUB_OUTPUT
+            echo "backup_source=galvan_prime" >> $GITHUB_OUTPUT
+            echo "artifact_url=$BACKUP_LINK" >> $GITHUB_OUTPUT
+            RECOVERY_SUCCESS=true
           fi
         fi
         
-        # Check GitHub artifacts if no link found
-        if [[ -z "$RECOVERY_METHOD" ]]; then
-          echo "🔍 Scanning GitHub artifacts..."
-          
-          ARTIFACTS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" 2>/dev/null || echo "")
-          
-          if [[ -n "$ARTIFACTS_RESPONSE" ]]; then
-            WORKFLOW_ID=$(echo "$ARTIFACTS_RESPONSE" | jq -r '.workflows[] | select(.name | test("OMNITRIX"; "i")) | .id' | head -1)
-            
-            if [[ -n "$WORKFLOW_ID" && "$WORKFLOW_ID" != "null" ]]; then
-              RUNS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/runs?status=success&per_page=3" 2>/dev/null || echo "")
-              
-              if [[ -n "$RUNS_RESPONSE" ]]; then
-                RECENT_RUN=$(echo "$RUNS_RESPONSE" | jq -r --argjson current "${{ github.run_id }}" \
-                  '.workflow_runs[] | select(.id != $current) | .id' | head -1)
-                
-                if [[ -n "$RECENT_RUN" && "$RECENT_RUN" != "null" ]]; then
-                  ARTIFACTS_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                    "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RECENT_RUN/artifacts" 2>/dev/null || echo "")
-                  
-                  if [[ -n "$ARTIFACTS_DATA" ]]; then
-                    ARTIFACT_ID=$(echo "$ARTIFACTS_DATA" | jq -r '.artifacts[] | select(.name | test("omnitrix"; "i")) | .id' | head -1)
-                    
-                    if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" ]]; then
-                      ARTIFACT_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
-                      echo "✅ Found GitHub artifact backup!"
-                      RECOVERY_METHOD="github_artifact"
-                    fi
-                  fi
-                fi
-              fi
+        # Check direct cloud backups
+        if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
+          BACKUP_LIST=$(rclone lsf "${GALVAN_CLOUD}/" 2>/dev/null || echo "")
+          if [[ -n "$BACKUP_LIST" ]]; then
+            LATEST_BACKUP=$(echo "$BACKUP_LIST" | grep -E "userdata-backup-.*\.tar\.gz" | sort -r | head -1)
+            if [[ -n "$LATEST_BACKUP" ]]; then
+              echo "has_backup=true" >> $GITHUB_OUTPUT
+              echo "backup_source=galvan_direct" >> $GITHUB_OUTPUT
+              echo "backup_file=$LATEST_BACKUP" >> $GITHUB_OUTPUT
+              RECOVERY_SUCCESS=true
             fi
           fi
         fi
         
-        # Set outputs
-        if [[ -n "$RECOVERY_METHOD" ]]; then
-          echo "has_backup=true" >> $GITHUB_OUTPUT
-          echo "method=$RECOVERY_METHOD" >> $GITHUB_OUTPUT
-          echo "url=$ARTIFACT_URL" >> $GITHUB_OUTPUT
-          echo "✅ Temporal data core located!"
-        else
+        if [[ "$RECOVERY_SUCCESS" == "false" ]]; then
           echo "has_backup=false" >> $GITHUB_OUTPUT
-          echo "method=none" >> $GITHUB_OUTPUT
-          echo "ℹ️ No temporal data cores found - fresh universe mode"
+          echo "backup_source=none" >> $GITHUB_OUTPUT
         fi
 
-    - name: "📥 Restore Temporal Data Core"
-      if: steps.scan_cores.outputs.has_backup == 'true'
+    - name: "📥 USER DATA RESTORATION"
+      if: steps.data_backup_scan.outputs.has_backup == 'true'
       run: |
         set -e
+        echo "📥 USER DATA RESTORATION 👽"
+        echo "🔋 Source: ${{ steps.data_backup_scan.outputs.backup_source }}"
         
-        echo "═══════════════════════════════════════════════════════════"
-        echo "📥           RESTORING TEMPORAL DATA CORE             🌌"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🔋 Method: ${{ steps.scan_cores.outputs.method }}"
+        # Run the restore script
+        sudo /usr/local/bin/restore.sh
         
-        RESTORE_DIR="$BACKUP_STORAGE/restore"
-        ARTIFACT_URL="${{ steps.scan_cores.outputs.url }}"
-        
-        # Download artifact with enhanced error handling
-        echo "⬇️ Downloading temporal data core..."
-        cd "$RESTORE_DIR"
-        
-        DOWNLOAD_SUCCESS=false
-        for attempt in {1..5}; do
-          echo "Attempt $attempt/5: Downloading from GitHub artifacts..."
-          
-          # Clean up any partial downloads
-          rm -f universe_core.zip universe_core.zip.tmp
-          
-          # Download with progress and timeout
-          if curl -L --fail --connect-timeout 30 --max-time 600 \
-               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-               -H "Accept: application/vnd.github.v3+json" \
-               "$ARTIFACT_URL" -o universe_core.zip.tmp; then
-            
-            # Verify download completed and file is valid
-            if [[ -s universe_core.zip.tmp ]]; then
-              mv universe_core.zip.tmp universe_core.zip
-              FILE_SIZE=$(du -h universe_core.zip | cut -f1)
-              echo "✅ Download successful ($FILE_SIZE)"
-              
-              # Verify it's actually a zip file
-              if file universe_core.zip | grep -q "Zip archive"; then
-                echo "✅ Archive format validated"
-                DOWNLOAD_SUCCESS=true
-                break
-              else
-                echo "❌ Downloaded file is not a valid zip archive"
-                rm -f universe_core.zip
-              fi
-            else
-              echo "❌ Downloaded file is empty"
-              rm -f universe_core.zip.tmp
-            fi
-          else
-            echo "❌ Download failed (curl exit code: $?)"
-            rm -f universe_core.zip.tmp
-          fi
-          
-          if [[ $attempt -lt 5 ]]; then
-            WAIT_TIME=$((attempt * 10))
-            echo "⚠️ Attempt $attempt failed, waiting ${WAIT_TIME}s before retry..."
-            sleep $WAIT_TIME
-          fi
-        done
-        
-        if [[ "$DOWNLOAD_SUCCESS" != "true" ]]; then
-          echo "❌ All download attempts failed. Please check:"
-          echo "   - GitHub token permissions"
-          echo "   - Artifact availability and expiration"
-          echo "   - Network connectivity"
-          exit 1
-        fi
-        
-        # Extract archive with multiple fallback methods
-        echo "📦 Extracting universe core..."
-        EXTRACTION_SUCCESS=false
-        
-        # Method 1: Standard unzip
-        if unzip -t universe_core.zip >/dev/null 2>&1; then
-          echo "Method 1: Using standard unzip..."
-          if unzip -q universe_core.zip; then
-            echo "✅ Standard unzip successful"
-            EXTRACTION_SUCCESS=true
-          fi
-        fi
-        
-        # Method 2: Python zipfile (if unzip failed)
-        if [[ "$EXTRACTION_SUCCESS" != "true" ]]; then
-          echo "Method 2: Using Python zipfile..."
-          if python3 -c "import zipfile; zipfile.ZipFile('universe_core.zip').extractall('.')"; then
-            echo "✅ Python extraction successful"
-            EXTRACTION_SUCCESS=true
-          fi
-        fi
-        
-        # Method 3: 7zip fallback (if available)
-        if [[ "$EXTRACTION_SUCCESS" != "true" ]] && command -v 7z >/dev/null 2>&1; then
-          echo "Method 3: Using 7zip..."
-          if 7z x universe_core.zip; then
-            echo "✅ 7zip extraction successful"
-            EXTRACTION_SUCCESS=true
-          fi
-        fi
-        
-        if [[ "$EXTRACTION_SUCCESS" != "true" ]]; then
-          echo "❌ All extraction methods failed"
-          echo "Archive may be corrupted or in unsupported format"
-          exit 1
-        fi
-        
-        # Find and validate backup file
-        echo "🔍 Searching for backup files..."
-        BACKUP_FILES=($(find . -name "*.tar.gz" -o -name "*.tar" -o -name "*.tgz" | head -5))
-        
-        if [[ ${#BACKUP_FILES[@]} -eq 0 ]]; then
-          echo "❌ No backup files found in archive"
-          echo "Contents of extracted archive:"
-          ls -la
-          exit 1
-        fi
-        
-        # Use the first valid backup file
-        BACKUP_FILE=""
-        for file in "${BACKUP_FILES[@]}"; do
-          if [[ -f "$file" ]] && [[ -s "$file" ]]; then
-            # Test if it's a valid tar archive
-            if tar -tf "$file" >/dev/null 2>&1; then
-              BACKUP_FILE="$file"
-              break
-            else
-              echo "⚠️ Invalid tar archive: $file"
-            fi
-          fi
-        done
-        
-        if [[ -z "$BACKUP_FILE" ]]; then
-          echo "❌ No valid backup files found"
-          exit 1
-        fi
-        
-        BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-        echo "📋 Found valid backup: $BACKUP_FILE ($BACKUP_SIZE)"
-        
-        # Direct extraction to final destinations
-        echo "🔧 Directly extracting backup data to final destinations..."
-        
-        # Function to directly extract specific paths from tar
-        extract_to_destination() {
-          local tar_path="$1"
-          local dest_path="$2"
-          local desc="$3"
-          
-          echo "📂 Extracting $desc directly to $dest_path..."
-          
-          # Create destination directory
-          sudo mkdir -p "$dest_path"
-          
-          # Check if path exists in tar and extract directly
-          if tar -tzf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/$tar_path/" || \
-             tar -tf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/$tar_path/"; then
-            
-            # Extract directly to destination, stripping backup/ prefix
-            tar -xzf "$BACKUP_FILE" -C "$dest_path" --strip-components=2 \
-                --wildcards "backup/$tar_path/*" 2>/dev/null || \
-            tar -xf "$BACKUP_FILE" -C "$dest_path" --strip-components=2 \
-                --wildcards "backup/$tar_path/*" 2>/dev/null || true
-            
-            echo "✅ $desc extracted directly"
-          else
-            echo "ℹ️ No $desc data found in backup"
-          fi
-        }
-        
-        # Extract system data directly to final locations
-        extract_to_destination "home" "/home" "Hero Base"
-        extract_to_destination "root" "/root" "Command Center"  
-        extract_to_destination "tailscale" "/var/lib/tailscale" "Plumber Network"
-        extract_to_destination "mysql" "/var/lib/mysql" "Database Fortress"
-        extract_to_destination "www" "/var/www" "Web Arsenal"
-        extract_to_destination "aapanel" "/www" "Control Panel"
-        extract_to_destination "opt" "/opt" "Applications"
-        
-        # Extract configs directly to /etc
-        echo "⚙️ Extracting configurations directly to /etc..."
-        if tar -tzf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/configs/" || \
-           tar -tf "$BACKUP_FILE" 2>/dev/null | grep -q "^backup/configs/"; then
-          
-          tar -xzf "$BACKUP_FILE" -C /etc --strip-components=2 \
-              --wildcards "backup/configs/*" 2>/dev/null || \
-          tar -xf "$BACKUP_FILE" -C /etc --strip-components=2 \
-              --wildcards "backup/configs/*" 2>/dev/null || true
-          
-          echo "✅ Configurations extracted directly"
-        fi
-        
-        # Fix permissions
-        sudo chown -R mysql:mysql /var/lib/mysql 2>/dev/null || true
-        sudo chown -R www-data:www-data /var/www 2>/dev/null || true
-        sudo chmod 700 /root 2>/dev/null || true
-        
-        echo "✅ Temporal data core restoration complete!"
+        echo "✅ USER DATA RESTORATION COMPLETE!"
 
-    - name: "👤 Configure Hero Account"
+    - name: "👤 HERO ACCOUNT CONFIGURATION"
       run: |
         set -e
-        
-        echo "👤 Configuring Hero Account (Ben Tennyson Protocol)..."
+        echo "👤 Configuring Hero Account..."
         
         if [[ -z "${{ secrets.USER_PASSWORD || '' }}" ]]; then
-          echo "❌ USER_PASSWORD secret missing!"
+          echo "❌ CRITICAL: USER_PASSWORD secret missing!"
           exit 1
         fi
         
-        # Create hero account
+        # Create hero account with root privileges
         if ! id jacky >/dev/null 2>&1; then
-          sudo useradd -m -s /bin/bash -G sudo,root jacky
-          echo "✅ Hero account created!"
+          sudo useradd -m -s /bin/bash -G root jacky || {
+            sudo adduser --disabled-password --gecos "" jacky
+            sudo usermod -aG root jacky
+          }
+        else
+          sudo usermod -aG root jacky
         fi
         
         # Set password and permissions
         echo "jacky:${{ secrets.USER_PASSWORD }}" | sudo chpasswd
         
-        # Add to admin groups
-        for group in sudo adm dialout cdrom audio dip video plugdev netdev; do
-          sudo usermod -aG "$group" jacky 2>/dev/null || true
+        # Add to administrative groups
+        ADMIN_GROUPS=("sudo" "adm" "dialout" "cdrom" "floppy" "audio" "dip" "video" "plugdev" "netdev" "lxd")
+        for group in "${ADMIN_GROUPS[@]}"; do
+          if getent group "$group" >/dev/null 2>&1; then
+            sudo usermod -aG "$group" jacky 2>/dev/null || true
+          fi
         done
         
-        # Configure sudo access
+        # Grant sudo access
         echo "jacky ALL=(ALL:ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/hero >/dev/null
         sudo chmod 440 /etc/sudoers.d/hero
         
         # Set hostname
-        sudo hostnamectl set-hostname "$PLUMBER_NETWORK" 2>/dev/null || true
-        
-        echo "✅ Hero account configured!"
-
-    - name: "🎛️ Deploy Alien Control Panel"
-      run: |
-        set -e
-        
-        echo "🎛️ Deploying Alien Control Panel (aaPanel)..."
-        
-        if command -v bt >/dev/null 2>&1; then
-          echo "✅ Control panel already installed!"
-        else
-          echo "🚀 Installing control panel..."
-          cd /tmp
-          
-          if curl -fsSL "http://www.aapanel.com/script/install_6.0_en.sh" -o install.sh; then
-            chmod +x install.sh
-            timeout 600 bash -c 'echo -e "y\nyes\ny" | sudo bash install.sh' || true
-            sleep 10
-          fi
-        fi
-        
-        # Configure credentials
-        if command -v bt >/dev/null 2>&1; then
-          sudo timeout 30 bt 6 <<< "Ben10" 2>/dev/null || true
-          sudo timeout 30 bt 5 <<< "omnitrix" 2>/dev/null || true
-          echo "✅ Control panel configured (Ben10/omnitrix)"
-        fi
-
-    - name: "🗄️ Initialize Database Fortress"
-      run: |
-        set -e
-        
-        echo "🗄️ Initializing Database Fortress (MariaDB)..."
-        
-        # Start MariaDB
-        sudo systemctl enable mariadb
-        sudo systemctl start mariadb || {
-          sudo mysql_install_db --user=mysql --basedir=/usr --datadir=/var/lib/mysql
-          sudo systemctl start mariadb
+        sudo hostnamectl set-hostname "$PLUMBER_NETWORK" 2>/dev/null || {
+          echo "$PLUMBER_NETWORK" | sudo tee /etc/hostname >/dev/null
         }
+        echo "127.0.1.1 $PLUMBER_NETWORK" | sudo tee -a /etc/hosts >/dev/null
         
-        sleep 3
-        
-        # Configure database
-        if sudo systemctl is-active mariadb >/dev/null; then
-          if [[ -n "${{ secrets.DB_ROOT_PASSWORD || '' }}" ]]; then
-            sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ secrets.DB_ROOT_PASSWORD }}';" 2>/dev/null || \
-            sudo mysqladmin -u root password '${{ secrets.DB_ROOT_PASSWORD }}' 2>/dev/null || true
-          fi
-          
-          # Create databases
-          sudo mysql -e "CREATE DATABASE IF NOT EXISTS omnitrix_data;" 2>/dev/null || true
-          echo "✅ Database fortress online!"
-        fi
+        echo "✅ HERO ACCOUNT CONFIGURATION COMPLETE!"
 
-    - name: "🔗 Establish Plumber Network"
+    - name: "🔄 PERSISTENCE MECHANISM SETUP"
       run: |
         set -e
+        echo "🔄 PERSISTENCE MECHANISM SETUP 👽"
         
-        echo "🔗 Establishing Plumber Network (Tailscale)..."
+        # Run the persistence script
+        sudo /usr/local/bin/persistence.sh
         
-        if [[ -z "${{ secrets.TAILSCALE_AUTHKEY || '' }}" ]]; then
-          echo "❌ TAILSCALE_AUTHKEY missing!"
-          exit 1
-        fi
+        # Set up cron job for regular backups
+        (crontab -l 2>/dev/null || echo "") | grep -v "backup.sh" | { cat; echo "0 */12 * * * /usr/local/bin/backup.sh > /var/log/backup.log 2>&1"; } | crontab -
         
-        # Install Tailscale
-        if ! command -v tailscale >/dev/null 2>&1; then
-          curl -fsSL https://tailscale.com/install.sh | sh
-        fi
-        
-        # Start service
-        sudo systemctl enable --now tailscaled
-        sleep 3
-        
-        # Connect to network
-        for attempt in {1..3}; do
-          if sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" \
-               --hostname="$PLUMBER_NETWORK" --reset --accept-routes; then
-            echo "✅ Plumber network connected!"
-            break
-          fi
-          sleep 10
-        done
-        
-        # Start emergency access
-        if command -v tmate >/dev/null 2>&1; then
-          tmate -S /tmp/emergency.sock new-session -d 2>/dev/null || true
-        fi
+        echo "✅ Persistence mechanism setup complete!"
+        echo "⏰ Scheduled backups configured to run every 12 hours"
 
-    - name: "⚡ Activate Power Systems"
+    - name: "📦 BACKUP USER DATA"
       run: |
         set -e
+        echo "📦 BACKING UP USER DATA 👽"
         
-        echo "⚡ Activating alien power systems..."
+        # Run the backup script
+        sudo /usr/local/bin/backup.sh
         
-        # Start services
-        sudo systemctl daemon-reload
+        # Prepare backup for artifact upload
+        sudo cp "$BACKUP_NEXUS/latest-userdata-backup.tar.gz" "/tmp/$BACKUP_ARTIFACT"
+        sudo chmod 644 "/tmp/$BACKUP_ARTIFACT"
         
-        for service in ssh mariadb; do
-          sudo systemctl enable "$service"
-          sudo systemctl start "$service" || sudo systemctl restart "$service"
-        done
-        
-        # Start aaPanel
-        if command -v bt >/dev/null 2>&1; then
-          sudo bt start 2>/dev/null || true
-        fi
-        
-        echo "✅ Power systems activated!"
+        echo "✅ User data backup complete!"
 
-    - name: "🛸 Omnitrix Operational Session"
-      run: |
-        set -e
-        
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🛸           OMNITRIX OPERATIONAL SESSION              👽"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        MISSION_START=$(date +%s)
-        STATUS_INTERVAL=300
-        CHECK_INTERVAL=15
-        
-        # Get network info
-        PLUMBER_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Acquiring...")
-        EMERGENCY_SSH=$(tmate -S /tmp/emergency.sock display -p '#{tmate_ssh}' 2>/dev/null || echo "Initializing...")
-        
-        echo "🌐 Plumber Network IP: $PLUMBER_IP"
-        echo "🔐 Hero SSH: ssh jacky@$PLUMBER_IP"
-        echo "🚨 Emergency SSH: $EMERGENCY_SSH"
-        if command -v bt >/dev/null; then
-          echo "🎛️ Control Panel: http://$PLUMBER_IP:7800 (Ben10/omnitrix)"
-        fi
-        echo "═══════════════════════════════════════════════════════════"
-        
-        LAST_STATUS=0
-        
-        # Main operational loop
-        while true; do
-          CURRENT_TIME=$(date +%s)
-          ELAPSED=$((CURRENT_TIME - MISSION_START))
-          
-          # Check for completion
-          if [ $ELAPSED -gt $HERO_SESSION_DURATION ]; then
-            echo "⏰ Mission duration completed!"
-            break
-          fi
-          
-          # Check for emergency shutdown
-          if [ -f /tmp/stop ]; then
-            echo "🚨 Emergency shutdown detected!"
-            rm -f /tmp/stop
-            break
-          fi
-          
-          # Status updates
-          if [ $((CURRENT_TIME - LAST_STATUS)) -gt $STATUS_INTERVAL ]; then
-            REMAINING=$((HERO_SESSION_DURATION - ELAPSED))
-            HOURS=$((REMAINING / 3600))
-            MINUTES=$(((REMAINING % 3600) / 60))
-            
-            echo "🛸 STATUS - $(date) | Time: ${HOURS}h ${MINUTES}m | Mode: Jetray"
-            LAST_STATUS=$CURRENT_TIME
-          fi
-          
-          sleep $CHECK_INTERVAL
-        done
-        
-        echo "🎬 Omnitrix session complete!"
-
-    - name: "💾 Universe Preservation Protocol"
-      if: always()
-      run: |
-        set -e
-        
-        echo "═══════════════════════════════════════════════════════════"
-        echo "💾      UNIVERSE PRESERVATION PROTOCOL               🌌"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        # Stop services for consistent backup
-        echo "🛑 Stopping services for backup..."
-        for service in bt mariadb nginx apache2; do
-          sudo systemctl stop "$service" 2>/dev/null || true
-        done
-        sleep 3
-        
-        # Create backup in operations storage
-        BACKUP_DIR="$BACKUP_STORAGE/operations/backup"
-        mkdir -p "$BACKUP_DIR"
-        
-        echo "📦 Collecting universe data..."
-        
-        # Backup function
-        backup_data() {
-          local src="$1"
-          local dest="$2"
-          local desc="$3"
-          
-          if [[ -d "$src" ]] && [[ -n "$(sudo ls -A "$src" 2>/dev/null)" ]]; then
-            echo "📂 Backing up $desc..."
-            sudo mkdir -p "$BACKUP_DIR/$dest"
-            sudo cp -rf "$src"/* "$BACKUP_DIR/$dest"/ 2>/dev/null || \
-            sudo rsync -av "$src"/ "$BACKUP_DIR/$dest"/ 2>/dev/null || true
-            echo "✅ $desc backed up"
-          fi
-        }
-        
-        # Backup all data
-        backup_data "/home" "home" "Hero Base"
-        backup_data "/root" "root" "Command Center"
-        backup_data "/var/lib/tailscale" "tailscale" "Plumber Network"
-        backup_data "/var/lib/mysql" "mysql" "Database Fortress"
-        backup_data "/var/www" "www" "Web Arsenal"
-        backup_data "/www" "aapanel" "Control Panel"
-        backup_data "/opt" "opt" "Applications"
-        
-        # Backup configs
-        echo "⚙️ Backing up configurations..."
-        sudo mkdir -p "$BACKUP_DIR/configs"
-        for config in hostname hosts ssh sudoers.d; do
-          if [[ -e "/etc/$config" ]]; then
-            sudo cp -rf "/etc/$config" "$BACKUP_DIR/configs/" 2>/dev/null || true
-          fi
-        done
-        
-        # Create manifest
-        cat > "$BACKUP_DIR/manifest.txt" << EOF
-        🛸 OMNITRIX UNIVERSE PRESERVATION CORE
-        ═══════════════════════════════════════════════════════════════════
-        🌟 Hero: Ben Tennyson | Edition: Alien Force
-        ⏰ Backup Date: $(date)
-        🆔 Session ID: ${{ github.run_id }}
-        🌍 Universe: $PLUMBER_NETWORK
-        👽 Mode: Jetray (High-Speed Operations)
-
-        📦 PRESERVED DATA:
-        ✅ Hero Base (/home) - User data and configurations
-        ✅ Command Center (/root) - Root environment
-        ✅ Plumber Network (/var/lib/tailscale) - VPN state
-        ✅ Database Fortress (/var/lib/mysql) - All databases
-        ✅ Web Arsenal (/var/www) - Web server data
-        ✅ Control Panel (/www) - aaPanel configuration
-        ✅ Applications (/opt) - Custom applications
-        ✅ System Configs (/etc) - Critical configurations
-
-        🛡️ METHOD: Complete Universe Backup
-        ⚡ STORAGE: GitHub Artifacts + MEGA Link
-        🌌 CONTINUITY: Full state preservation
-   
-        It's Hero Time! 💥
-        EOF
-        
-        # Create compressed backup with enhanced error handling
-        echo "🔬 Creating temporal data core..."
-        cd "$BACKUP_STORAGE/operations"
-        
-        # Validate backup directory exists and has content
-        if [[ ! -d "backup" ]]; then
-          echo "❌ Backup directory not found"
-          exit 1
-        fi
-        
-        BACKUP_CONTENT_SIZE=$(du -sh backup/ | cut -f1)
-        echo "📁 Backup content size: $BACKUP_CONTENT_SIZE"
-        
-        # Create backup with multiple compression attempts
-        BACKUP_PATH="$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT"
-        BACKUP_SUCCESS=false
-        
-        # Method 1: gzip compression (preferred)
-        echo "Method 1: Creating gzip compressed backup..."
-        if tar -czf "$BACKUP_PATH" backup/ 2>/dev/null; then
-          echo "✅ Gzip compression successful"
-          BACKUP_SUCCESS=true
-        else
-          echo "⚠️ Gzip compression failed, trying uncompressed..."
-          
-          # Method 2: Uncompressed tar (fallback)
-          echo "Method 2: Creating uncompressed backup..."
-          if tar -cf "$BACKUP_PATH" backup/ 2>/dev/null; then
-            echo "✅ Uncompressed backup successful"
-            BACKUP_SUCCESS=true
-          else
-            echo "❌ Both compression methods failed"
-          fi
-        fi
-        
-        if [[ "$BACKUP_SUCCESS" != "true" ]]; then
-          echo "❌ Backup creation failed completely"
-          echo "Available disk space:"
-          df -h "$BACKUP_STORAGE"
-          exit 1
-        fi
-        
-        # Verify backup file exists and validate its integrity
-        if [[ ! -f "$BACKUP_PATH" ]]; then
-          echo "❌ Backup file was not created: $BACKUP_PATH"
-          exit 1
-        fi
-        
-        if [[ ! -s "$BACKUP_PATH" ]]; then
-          echo "❌ Backup file is empty: $BACKUP_PATH"
-          exit 1
-        fi
-        
-        # Test backup integrity
-        echo "🔍 Validating backup integrity..."
-        if tar -tf "$BACKUP_PATH" >/dev/null 2>&1; then
-          BACKUP_SIZE=$(du -h "$BACKUP_PATH" | cut -f1)
-          FILE_COUNT=$(tar -tf "$BACKUP_PATH" | wc -l)
-          echo "✅ Temporal data core created and validated!"
-          echo "   Size: $BACKUP_SIZE"
-          echo "   Files: $FILE_COUNT"
-          echo "   Path: $BACKUP_PATH"
-        else
-          echo "❌ Backup integrity check failed"
-          rm -f "$BACKUP_PATH"
-          exit 1
-        fi
-
-    - name: "🚀 Upload to GitHub Artifacts"
-      if: always()
-      id: upload_artifact
-      uses: actions/upload-artifact@v4
+    - name: "📤 UPLOAD BACKUP ARTIFACT"
+      uses: actions/upload-artifact@v3
       with:
-        name: ${{ env.BACKUP_ARTIFACT }}
-        path: ${{ env.BACKUP_STORAGE }}/backups/${{ env.BACKUP_ARTIFACT }}
+        name: userdata-backup
+        path: /tmp/${{ env.BACKUP_ARTIFACT }}
         retention-days: 7
-        if-no-files-found: error
-        compression-level: 6
-      continue-on-error: false
-    
-    - name: "✅ Verify Artifact Upload"
-      if: always()
-      run: |
-        set -e
-        
-        echo "🔍 Verifying artifact upload..."
-        
-        # Check if backup file exists before upload verification
-        BACKUP_FILE="$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT"
-        if [[ ! -f "$BACKUP_FILE" ]]; then
-          echo "❌ Backup file missing: $BACKUP_FILE"
-          echo "Cannot proceed with upload verification"
-          exit 1
-        fi
-        
-        echo "✅ Backup file exists: $(du -h "$BACKUP_FILE" | cut -f1)"
-        
-        # Wait a moment for GitHub to process the upload
-        sleep 10
-        
-        # Verify upload success via GitHub API
-        for attempt in {1..5}; do
-          echo "Verification attempt $attempt/5..."
-          
-          ARTIFACTS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" 2>/dev/null || echo "")
-          
-          if [[ -n "$ARTIFACTS_RESPONSE" ]]; then
-            ARTIFACT_FOUND=$(echo "$ARTIFACTS_RESPONSE" | jq -r --arg name "$BACKUP_ARTIFACT" \
-              '.artifacts[] | select(.name == $name) | .id' | head -1)
-            
-            if [[ -n "$ARTIFACT_FOUND" && "$ARTIFACT_FOUND" != "null" ]]; then
-              echo "✅ Artifact upload verified! ID: $ARTIFACT_FOUND"
-              break
-            fi
-          fi
-          
-          if [[ $attempt -eq 5 ]]; then
-            echo "❌ Artifact upload verification failed after 5 attempts"
-            echo "This may cause issues with backup restoration"
-            # Don't exit here as the upload might still be processing
-          else
-            sleep 15
-          fi
-        done
-
-    - name: "☁️ Sync Artifact Link to Galvan Prime"
-      if: always()
-      run: |
-        # Don't exit on error for this step as MEGA sync is not critical
-        set +e
-        
-        echo "☁️ Syncing artifact link to Galvan Prime..."
-        
-        # Check if rclone is properly configured
-        if ! command -v rclone >/dev/null 2>&1; then
-          echo "❌ rclone not found, skipping MEGA sync"
-          exit 0
-        fi
-        
-        if ! rclone lsd "$GALVAN_CLOUD" >/dev/null 2>&1; then
-          echo "❌ MEGA connection failed, skipping sync"
-          echo "Backup is still available in GitHub Artifacts"
-          exit 0
-        fi
-        
-        # Wait for artifact processing with progress indication
-        echo "⏳ Waiting for GitHub artifact processing..."
-        for i in {1..6}; do
-          echo "   Waiting... ${i}/6 (${i}0s)"
-          sleep 10
-        done
-        
-        SYNC_SUCCESS=false
-        for attempt in {1..8}; do
-          echo "⏳ Sync attempt $attempt/8..."
-          
-          # Get artifact info with better error handling
-          ARTIFACTS_DATA=$(curl -s --fail -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" 2>/dev/null || echo "")
-          
-          if [[ -n "$ARTIFACTS_DATA" ]] && [[ "$ARTIFACTS_DATA" != "null" ]]; then
-            # Parse artifact ID more safely
-            ARTIFACT_ID=$(echo "$ARTIFACTS_DATA" | jq -r --arg name "$BACKUP_ARTIFACT" \
-              '.artifacts[]? | select(.name == $name) | .id' 2>/dev/null | head -1)
-            
-            if [[ -n "$ARTIFACT_ID" && "$ARTIFACT_ID" != "null" && "$ARTIFACT_ID" =~ ^[0-9]+$ ]]; then
-              ARTIFACT_LINK="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
-              
-              echo "🔗 Found artifact: $ARTIFACT_ID"
-              echo "🔗 Link: $ARTIFACT_LINK"
-              
-              # Create metadata with timestamp and validation info
-              METADATA=$(cat << EOF
-              $ARTIFACT_LINK
-              # OMNITRIX Backup Metadata
-              # Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-              # Run ID: ${{ github.run_id }}
-              # Artifact ID: $ARTIFACT_ID
-              # Repository: ${{ github.repository }}
-              EOF
-              )
-              
-              # Store link in MEGA with retry logic
-              for mega_attempt in {1..3}; do
-                if echo "$METADATA" | timeout 60 rclone rcat "$GALVAN_CLOUD/artifact_link.txt" 2>/dev/null; then
-                  echo "✅ Artifact link synced to Galvan Prime! (attempt $mega_attempt)"
-                  
-                  # Verify the upload
-                  if timeout 30 rclone cat "$GALVAN_CLOUD/artifact_link.txt" | head -1 | grep -q "$ARTIFACT_ID"; then
-                    echo "✅ MEGA sync verified successfully!"
-                    SYNC_SUCCESS=true
-                    break 2
-                  else
-                    echo "⚠️ MEGA sync verification failed"
-                  fi
-                else
-                  echo "⚠️ MEGA upload attempt $mega_attempt failed"
-                  sleep 5
-                fi
-              done
-            else
-              echo "⚠️ Invalid or missing artifact ID: '$ARTIFACT_ID'"
-            fi
-          else
-            echo "⚠️ No artifacts data received from GitHub API"
-          fi
-          
-          if [[ $attempt -lt 8 ]]; then
-            WAIT_TIME=$((attempt * 5))
-            echo "⏳ Waiting ${WAIT_TIME}s before next attempt..."
-            sleep $WAIT_TIME
-          fi
-        done
-        
-        if [[ "$SYNC_SUCCESS" != "true" ]]; then
-          echo "❌ MEGA sync failed after all attempts"
-          echo "📝 Backup is still available in GitHub Artifacts for 7 days"
-          echo "📝 Manual sync may be required for long-term storage"
-        fi
-        
-        # Always exit successfully as MEGA sync is not critical
-        if [[ "$SYNC_SUCCESS" == "true" ]]; then
-          touch /tmp/mega_sync_success
-        fi
-        exit 0
-
-    - name: "🔍 Final System Validation"
-      if: always()
-      run: |
-        set +e  # Don't fail on validation issues
-        
-        echo "🔍 Performing final system validation..."
-        
-        VALIDATION_SCORE=0
-        MAX_SCORE=10
-        
-        # Test 1: Backup file exists and is valid
-        if [[ -f "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" ]] && [[ -s "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" ]]; then
-          if tar -tf "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" >/dev/null 2>&1; then
-            echo "✅ Backup file validation: PASS"
-            VALIDATION_SCORE=$((VALIDATION_SCORE + 3))
-          else
-            echo "❌ Backup file validation: FAIL (corrupted)"
-          fi
-        else
-          echo "❌ Backup file validation: FAIL (missing)"
-        fi
-        
-        # Test 2: Storage system integrity
-        STORAGE_OK=true
-        for dir in backups temp restore operations; do
-          if [[ ! -d "$BACKUP_STORAGE/$dir" ]] || [[ ! -w "$BACKUP_STORAGE/$dir" ]]; then
-            STORAGE_OK=false
-            break
-          fi
-        done
-        if [[ "$STORAGE_OK" == "true" ]]; then
-          echo "✅ Storage system validation: PASS"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 2))
-        else
-          echo "❌ Storage system validation: FAIL"
-        fi
-        
-        # Test 3: Service status
-        SERVICES_OK=0
-        for service in ssh mariadb tailscaled; do
-          if systemctl is-active "$service" >/dev/null 2>&1; then
-            SERVICES_OK=$((SERVICES_OK + 1))
-          fi
-        done
-        if [[ $SERVICES_OK -ge 2 ]]; then
-          echo "✅ Service validation: PASS ($SERVICES_OK/3 services active)"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 2))
-        else
-          echo "⚠️ Service validation: PARTIAL ($SERVICES_OK/3 services active)"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 1))
-        fi
-        
-        # Test 4: Network connectivity
-        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-          echo "✅ Network validation: PASS"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 1))
-        else
-          echo "❌ Network validation: FAIL"
-        fi
-        
-        # Test 5: User account setup
-        if id jacky >/dev/null 2>&1 && sudo -l -U jacky | grep -q "NOPASSWD"; then
-          echo "✅ User account validation: PASS"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 1))
-        else
-          echo "❌ User account validation: FAIL"
-        fi
-        
-        # Test 6: Control panel
-        if command -v bt >/dev/null 2>&1; then
-          echo "✅ Control panel validation: PASS"
-          VALIDATION_SCORE=$((VALIDATION_SCORE + 1))
-        else
-          echo "⚠️ Control panel validation: PARTIAL"
-        fi
-        
-        # Calculate final score
-        PERCENTAGE=$((VALIDATION_SCORE * 100 / MAX_SCORE))
-        
-        echo ""
-        echo "🏆 VALIDATION RESULTS:"
-        echo "   Score: $VALIDATION_SCORE/$MAX_SCORE ($PERCENTAGE%)"
-        
-        if [[ $PERCENTAGE -ge 80 ]]; then
-          echo "   Status: ✅ EXCELLENT - System fully operational"
-        elif [[ $PERCENTAGE -ge 60 ]]; then
-          echo "   Status: ⚠️ GOOD - Minor issues detected"
-        else
-          echo "   Status: ❌ NEEDS ATTENTION - Multiple issues found"
-        fi
-        
-        echo "   Recommendation: $([ $PERCENTAGE -ge 80 ] && echo 'Ready for production use' || echo 'Review logs and fix issues')"
-
-    - name: "📊 Mission Completion Report"
-      if: always()
-      run: |
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🛸           MISSION COMPLETION REPORT                 👽"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🌟 Hero: Ben Tennyson | Edition: Alien Force"
-        echo "⚡ Status: ${{ job.status }}"
-        echo "🆔 Mission ID: ${{ github.run_id }}"
-        echo "⏰ Completion: $(date)"
-        echo "🕐 Runtime: $((SECONDS / 60)) minutes"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        echo "🔋 SYSTEM STATUS:"
-        echo "   🎛️ Control Panel: $(command -v bt >/dev/null && echo 'ACTIVE' || echo 'INACTIVE')"
-        echo "   🗄️ Database: $(systemctl is-active mariadb 2>/dev/null || echo 'UNKNOWN')"
-        echo "   🔗 Network: $(systemctl is-active tailscaled 2>/dev/null || echo 'UNKNOWN')"
-        echo "   📡 Emergency: $(pgrep tmate >/dev/null && echo 'ACTIVE' || echo 'STANDBY')"
-        
-        echo ""
-        echo "👤 HERO ACCESS:"
-        echo "   🦸‍♂️ Account: jacky (full privileges)"
-        echo "   🔐 Authentication: Configured"
-        echo "   ⚡ Powers: Complete system control"
-        
-        echo ""
-        echo "💾 BACKUP STATUS:"
-        echo "   📦 Method: GitHub Artifacts + MEGA Link"
-        echo "   ⚡ Speed: Optimized with /mnt tmpfs"
-        echo "   🌌 Coverage: Complete universe preservation"
-        echo "   🔗 Link Storage: Galvan Prime (MEGA)"
-        
-        echo ""
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🎉 MISSION SUCCESS! UNIVERSE PROTECTED! 🛡️"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "💥 Ben 10: 'It's Hero Time - Mission Complete!'"
-        echo "🛸 Omnitrix ready for next transformation!"
-        echo "👽 All alien technology preserved!"
-        echo "🌌 Universe continuity maintained!"
-        echo ""
-        echo "🔋 OMNITRIX STATUS: STANDBY"
-        echo "⭐ Ready for next adventure!"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        # Final system health check
-        echo ""
-        echo "🏥 FINAL SYSTEM HEALTH CHECK:"
-        echo "   📦 Backup Status: $([ -f "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" ] && echo 'CREATED ✅' || echo 'MISSING ❌')"
-        echo "   🚀 Artifact Upload: $(echo '${{ steps.upload_artifact.outcome }}' | tr '[:lower:]' '[:upper:]')"
-        echo "   ☁️ MEGA Sync: $([ -f /tmp/mega_sync_success ] && echo 'SUCCESS ✅' || echo 'SKIPPED ⚠️')"
-        echo "   💾 Storage Usage: $(df -h $BACKUP_STORAGE | tail -1 | awk '{print $5}') used"
-        echo "   🕐 Total Runtime: $((SECONDS / 60)) minutes $((SECONDS % 60)) seconds"
-        
-        # Performance metrics
-        if [ -f "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" ]; then
-          FINAL_BACKUP_SIZE=$(du -h "$BACKUP_STORAGE/backups/$BACKUP_ARTIFACT" | cut -f1)
-          echo "   📊 Final Backup Size: $FINAL_BACKUP_SIZE"
-        fi
-        
-        echo ""
-        echo "🎯 MISSION METRICS:"
-        echo "   🛡️ Reliability: Enhanced with 5x retry mechanisms"
-        echo "   ⚡ Performance: 40-60% faster than previous version"
-        echo "   🔧 Error Handling: Production-grade with graceful fallbacks"
-        echo "   📈 Success Rate: 98%+ (up from 85%)"
-        
-        echo ""
-        echo "🚨 TROUBLESHOOTING GUIDE:"
-        echo "   If backup fails: Check GitHub token permissions"
-        echo "   If MEGA fails: Backup still available in GitHub Artifacts"
-        echo "   If restore fails: Verify artifact availability and network"
-        echo "   Emergency: Use tmate SSH or Tailscale direct access"
-        
-        echo ""
-        echo "📚 DOCUMENTATION:"
-        echo "   Setup Guide: SECRETS-SETUP.md"
-        echo "   Optimization Details: OPTIMIZATION-SUMMARY.md"
-        echo "   Backup Fixes: BACKUP-FIXES-SUMMARY.md"
-        echo "   Project Overview: PROJECT-SUMMARY.md"
