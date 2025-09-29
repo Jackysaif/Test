@@ -170,14 +170,7 @@ jobs:
         echo "omnitrix" | sudo bt 5
         echo "✅ Control Panel username is 'Ben10' and password has been set to 'omnitrix'."
         
-    - name: "🛰️ START EMERGENCY COMMUNICATIONS"
-      run: |
-        sudo apt-get install -y tmate
-        # Start tmate in a detached screen as the 'jacky' user
-        sudo -u jacky screen -dmS tmate-session tmate
-        sleep 3
-        echo "✅ Emergency communications started. Use 'sudo -u jacky screen -r tmate-session' to attach."
-
+    
     - name: "👤 UNIVERSAL HERO SETUP"
       run: |
         set -e
