@@ -56,266 +56,262 @@ jobs:
         
         # Create backup.sh script
         cat > /tmp/backup.sh << 'EOF'
-#!/bin/bash
-# User Data Backup Script - Only backs up user data with persistence
-
-BACKUP_DIR="/mnt/omnitrix/backups"
-BACKUP_FILE="userdata-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-LATEST_LINK="latest-userdata-backup.tar.gz"
-
-sudo mkdir -p "$BACKUP_DIR"
-
-# Define directories to backup (only user data)
-USER_DIRS=("/home" "/root" "/var/www/html")
-
-# Application data directories
-APP_DIRS=(
-  "/etc/mysql"         # MySQL configuration
-  "/etc/php"           # PHP configuration
-  "/etc/apache2"       # Apache configuration
-  "/etc/nginx"         # Nginx configuration (if used)
-  "/var/lib/mysql"     # MySQL data
-  "/var/lib/php"       # PHP sessions and data
-  "/etc/letsencrypt"   # SSL certificates
-  "/usr/local/aapanel" # aaPanel data (if installed)
-)
-
-# Optional directories (only backed up if they exist)
-OPTIONAL_DIRS=("/var/lib/tailscale" "/etc/ssh")
-
-echo "🛸 USER DATA BACKUP STARTING 👽"
-echo "⏰ Backup Start: $(date)"
-
-# Create temporary directory for backup
-TEMP_DIR=$(mktemp -d)
-sudo mkdir -p "$TEMP_DIR/selective_backup"
-
-# Backup function
-backup_directory() {
-  local src_dir="$1"
-  local dest_dir="$2"
-  local description="$3"
-  
-  if [[ -d "$src_dir" ]]; then
-    echo "📂 Backing up $description..."
-    sudo mkdir -p "$dest_dir"
-    sudo cp -rf "$src_dir" "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir" "$dest_dir/" 2>/dev/null || true
-  fi
-}
-
-# Backup required user directories
-for dir in "${USER_DIRS[@]}"; do
-  dir_name=$(basename "$dir")
-  backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
-done
-
-# Backup application data directories if they exist
-for dir in "${APP_DIRS[@]}"; do
-  if [[ -d "$dir" ]]; then
-    dir_name=$(basename "$dir")
-    backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
-  fi
-done
-
-# Backup optional directories if they exist
-for dir in "${OPTIONAL_DIRS[@]}"; do
-  if [[ -d "$dir" ]]; then
-    dir_name=$(basename "$dir")
-    backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
-  fi
-done
-
-# Special handling for MySQL databases
-if command -v mysqldump >/dev/null 2>&1; then
-  echo "📂 Backing up MySQL databases..."
-  sudo mkdir -p "$TEMP_DIR/selective_backup/mysql_dumps"
-  
-  # Create MySQL dump with all databases
-  sudo mysqldump --all-databases --single-transaction --quick --lock-tables=false > "$TEMP_DIR/selective_backup/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL dump failed, but continuing..."
-fi
-
-# Create the backup archive
-echo "📦 Creating backup archive..."
-sudo tar -czf "$BACKUP_DIR/$BACKUP_FILE" -C "$TEMP_DIR" selective_backup
-sudo ln -sf "$BACKUP_DIR/$BACKUP_FILE" "$BACKUP_DIR/$LATEST_LINK"
-
-# Clean up and set permissions
-sudo rm -rf "$TEMP_DIR"
-sudo chmod 600 "$BACKUP_DIR/$BACKUP_FILE"
-
-echo "✅ USER DATA BACKUP COMPLETE!"
-echo "📁 Backup Location: $BACKUP_DIR/$BACKUP_FILE"
-echo "📊 Backup Size: $(sudo du -h "$BACKUP_DIR/$BACKUP_FILE" | cut -f1)"
-EOF
+        #!/bin/bash
+        # User Data Backup Script - Only backs up user data with persistence
+        
+        BACKUP_DIR="/mnt/omnitrix/backups"
+        BACKUP_FILE="userdata-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+        LATEST_LINK="latest-userdata-backup.tar.gz"
+        
+        sudo mkdir -p "$BACKUP_DIR"
+        
+        # Define directories to backup (only user data)
+        USER_DIRS=("/home" "/root" "/var/www/html")
+        
+        # Application data directories
+        APP_DIRS=(
+        "/etc/mysql"         # MySQL configuration
+        "/etc/php"           # PHP configuration
+        "/etc/apache2"       # Apache configuration
+        "/etc/nginx"         # Nginx configuration (if used)
+        "/var/lib/mysql"     # MySQL data
+        "/var/lib/php"       # PHP sessions and data
+        "/etc/letsencrypt"   # SSL certificates
+        "/usr/local/aapanel" # aaPanel data (if installed)
+        )
+        
+        # Optional directories (only backed up if they exist)
+        OPTIONAL_DIRS=("/var/lib/tailscale" "/etc/ssh")
+        
+        echo "🛸 USER DATA BACKUP STARTING 👽
+        
+        echo "⏰ Backup Start: $(date)"
+        
+        # Create temporary directory for backup
+        TEMP_DIR=$(mktemp -d)
+        sudo mkdir -p "$TEMP_DIR/selective_backup"
+        
+        # Backup function
+        backup_directory() {
+        local src_dir="$1"
+        local dest_dir="$2"
+        local description="$3"
+        
+        if [[ -d "$src_dir" ]]; then
+        echo "📂 Backing up $description..."
+        sudo mkdir -p "$dest_dir"
+        sudo cp -rf "$src_dir" "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir" "$dest_dir/" 2>/dev/null || true
+        fi
+        }
+        
+        # Backup required user directories
+        for dir in "${USER_DIRS[@]}"; do
+        dir_name=$(basename "$dir")
+        backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+        done
+        
+        # Backup application data directories if they exist
+        for dir in "${APP_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+        dir_name=$(basename "$dir")
+        backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+        fi
+        done
+        
+        # Backup optional directories if they exist
+        for dir in "${OPTIONAL_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+        dir_name=$(basename "$dir")
+        backup_directory "$dir" "$TEMP_DIR/selective_backup" "$dir_name"
+        fi
+        done
+        
+        # Special handling for MySQL databases
+        if command -v mysqldump >/dev/null 2>&1; then
+        echo "📂 Backing up MySQL databases..."
+        sudo mkdir -p "$TEMP_DIR/selective_backup/mysql_dumps"
+        # Create MySQL dump with all databases
+        sudo mysqldump --all-databases --single-transaction --quick --lock-tables=false > "$TEMP_DIR/selective_backup/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL dump failed, but continuing..."
+        fi
+        
+        # Create the backup archive
+        echo "📦 Creating backup archive..."
+        sudo tar -czf "$BACKUP_DIR/$BACKUP_FILE" -C "$TEMP_DIR" selective_backup
+        sudo ln -sf "$BACKUP_DIR/$BACKUP_FILE" "$BACKUP_DIR/$LATEST_LINK"
+        
+        # Clean up and set permissions
+        sudo rm -rf "$TEMP_DIR"
+        sudo chmod 600 "$BACKUP_DIR/$BACKUP_FILE"
+        
+        echo "✅ USER DATA BACKUP COMPLETE!"
+        echo "📁 Backup Location: $BACKUP_DIR/$BACKUP_FILE"
+        echo "📊 Backup Size: $(sudo du -h "$BACKUP_DIR/$BACKUP_FILE" | cut -f1)"
+        EOF
 
         # Create restore.sh script
         cat > /tmp/restore.sh << 'EOF'
-#!/bin/bash
-# User Data Restore Script - Only restores user data with persistence
-
-BACKUP_DIR="/mnt/omnitrix/backups"
-LATEST_LINK="latest-userdata-backup.tar.gz"
-
-echo "🛸 USER DATA RESTORATION STARTING 👽"
-echo "⏰ Restore Start: $(date)"
-
-# Create temporary directory for restoration
-RESTORE_CHAMBER="/tmp/userdata_restore"
-sudo rm -rf "$RESTORE_CHAMBER" 2>/dev/null || true
-sudo mkdir -p "$RESTORE_CHAMBER"
-sudo chmod 777 "$RESTORE_CHAMBER"
-cd "$RESTORE_CHAMBER"
-
-# Find backup file (local only)
-BACKUP_FILE=""
-
-# Check local backup
-if [[ -f "$BACKUP_DIR/$LATEST_LINK" ]]; then
-  BACKUP_FILE="$BACKUP_DIR/$LATEST_LINK"
-elif [[ -d "$BACKUP_DIR" ]]; then
-  LATEST_BACKUP=$(sudo find "$BACKUP_DIR" -name "userdata-backup-*.tar.gz" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d' ' -f2-)
-  if [[ -n "$LATEST_BACKUP" ]]; then
-    BACKUP_FILE="$LATEST_BACKUP"
-  fi
-fi
-
-# Exit if no backup found
-if [[ -z "$BACKUP_FILE" ]]; then
-  echo "❌ No backup file found. Cannot restore user data."
-  exit 1
-fi
-
-# Extract backup
-STAGING_AREA="/tmp/restore_data"
-sudo rm -rf "$STAGING_AREA" 2>/dev/null || true
-sudo mkdir -p "$STAGING_AREA"
-sudo chmod 777 "$STAGING_AREA"
-
-if ! sudo tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA"; then
-  echo "❌ Failed to extract backup."
-  exit 1
-fi
-
-# Find data directory
-DATA_ROOT=""
-if [[ -d "$STAGING_AREA/selective_backup" ]]; then
-  DATA_ROOT="$STAGING_AREA/selective_backup"
-else
-  DATA_ROOT=$(sudo find "$STAGING_AREA" -type d -name "*backup*" -o -name "*selective*" | head -1)
-  if [[ -z "$DATA_ROOT" ]]; then
-    DATA_ROOT="$STAGING_AREA"
-  fi
-fi
-
-# Restore function
-restore_directory() {
-  local src_dir="$1"
-  local dest_dir="$2"
-  local description="$3"
-  local owner="$4"
-  
-  if [[ -d "$src_dir" ]] && [[ -n "$(ls -A "$src_dir" 2>/dev/null)" ]]; then
-    echo "📂 Restoring $description..."
-    sudo mkdir -p "$dest_dir"
-    sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir"/ "$dest_dir"/ 2>/dev/null || true
-    if [[ -n "$owner" ]]; then
-      sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
-    fi
-  fi
-}
-
-# Restore user data
-[[ -d "$DATA_ROOT/home" ]] && restore_directory "$DATA_ROOT/home" "/home" "User home directories" "root:root"
-[[ -d "$DATA_ROOT/root" ]] && restore_directory "$DATA_ROOT/root" "/root" "Root user data" "root:root"
-[[ -d "$DATA_ROOT/html" ]] && restore_directory "$DATA_ROOT/html" "/var/www/html" "Web content" "www-data:www-data"
-
-# Restore application data
-[[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/etc/mysql" "MySQL configuration" "mysql:mysql"
-[[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/etc/php" "PHP configuration" "root:root"
-[[ -d "$DATA_ROOT/apache2" ]] && restore_directory "$DATA_ROOT/apache2" "/etc/apache2" "Apache configuration" "root:www-data"
-[[ -d "$DATA_ROOT/nginx" ]] && restore_directory "$DATA_ROOT/nginx" "/etc/nginx" "Nginx configuration" "root:www-data"
-[[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/var/lib/mysql" "MySQL data" "mysql:mysql"
-[[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/var/lib/php" "PHP data" "root:root"
-[[ -d "$DATA_ROOT/letsencrypt" ]] && restore_directory "$DATA_ROOT/letsencrypt" "/etc/letsencrypt" "SSL certificates" "root:root"
-[[ -d "$DATA_ROOT/aapanel" ]] && restore_directory "$DATA_ROOT/aapanel" "/usr/local/aapanel" "aaPanel data" "root:root"
-
-# Restore MySQL dumps if they exist
-if [[ -d "$DATA_ROOT/mysql_dumps" ]]; then
-  echo "📂 Restoring MySQL databases..."
-  if [[ -f "$DATA_ROOT/mysql_dumps/all_databases.sql" ]]; then
-    # Start MySQL service if not running
-    sudo service mysql start 2>/dev/null || sudo systemctl start mysql 2>/dev/null || sudo systemctl start mariadb 2>/dev/null || true
+        #!/bin/bash
+        # User Data Restore Script - Only restores user data with persistence
+        
+        BACKUP_DIR="/mnt/omnitrix/backups"
+        LATEST_LINK="latest-userdata-backup.tar.gz"
+        
+        echo "🛸 USER DATA RESTORATION STARTING 👽"
+        echo "⏰ Restore Start: $(date)"
+        
+        # Create temporary directory for restoration
+        RESTORE_CHAMBER="/tmp/userdata_restore"
+        sudo rm -rf "$RESTORE_CHAMBER" 2>/dev/null || true
+        sudo mkdir -p "$RESTORE_CHAMBER"
+        sudo chmod 777 "$RESTORE_CHAMBER"
+        cd "$RESTORE_CHAMBER"
+        
+        # Find backup file (local only)
+        BACKUP_FILE=""
+        
+        # Check local backup
+        if [[ -f "$BACKUP_DIR/$LATEST_LINK" ]]; then
+        BACKUP_FILE="$BACKUP_DIR/$LATEST_LINK"
+        elif [[ -d "$BACKUP_DIR" ]]; then
+        LATEST_BACKUP=$(sudo find "$BACKUP_DIR" -name "userdata-backup-*.tar.gz" -type f -printf "%T@ %p\n" | sort -nr | head -1 | cut -d' ' -f2-)
+        if [[ -n "$LATEST_BACKUP" ]]; then
+        BACKUP_FILE="$LATEST_BACKUP"
+        fi
+        fi
+        # Exit if no backup found
+        if [[ -z "$BACKUP_FILE" ]]; then
+        echo "❌ No backup file found. Cannot restore user data."
+        exit 1
+        fi
+        
+        # Extract backup
+        STAGING_AREA="/tmp/restore_data"
+        sudo rm -rf "$STAGING_AREA" 2>/dev/null || true
+        sudo mkdir -p "$STAGING_AREA"
+        sudo chmod 777 "$STAGING_AREA"
+        
+        if ! sudo tar -xzf "$BACKUP_FILE" -C "$STAGING_AREA"; then
+        echo "❌ Failed to extract backup."
+        exit 1
+        fi
+        
+        # Find data directory
+        DATA_ROOT=""
+        if [[ -d "$STAGING_AREA/selective_backup" ]]; then
+        DATA_ROOT="$STAGING_AREA/selective_backup"
+        else
+        DATA_ROOT=$(sudo find "$STAGING_AREA" -type d -name "*backup*" -o -name "*selective*" | head -1)
+        if [[ -z "$DATA_ROOT" ]]; then
+        DATA_ROOT="$STAGING_AREA"
+        fi
+        fi
+        
+        # Restore function
+        restore_directory() {
+        local src_dir="$1"
+        local dest_dir="$2"
+        local description="$3"
+        local owner="$4"
+        if [[ -d "$src_dir" ]] && [[ -n "$(ls -A "$src_dir" 2>/dev/null)" ]]; then
+        echo "📂 Restoring $description..."
+        sudo mkdir -p "$dest_dir"
+        sudo cp -rf "$src_dir"/* "$dest_dir/" 2>/dev/null || sudo rsync -av "$src_dir"/ "$dest_dir"/ 2>/dev/null || true
+        if [[ -n "$owner" ]]; then
+        sudo chown -R "$owner" "$dest_dir" 2>/dev/null || true
+        fi
+        fi
+        }
+        
+        # Restore user data
+        [[ -d "$DATA_ROOT/home" ]] && restore_directory "$DATA_ROOT/home" "/home" "User home directories" "root:root"
+        [[ -d "$DATA_ROOT/root" ]] && restore_directory "$DATA_ROOT/root" "/root" "Root user data" "root:root"
+        [[ -d "$DATA_ROOT/html" ]] && restore_directory "$DATA_ROOT/html" "/var/www/html" "Web content" "www-data:www-data"
+        
+        # Restore application data
+        [[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/etc/mysql" "MySQL configuration" "mysql:mysql"
+        [[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/etc/php" "PHP configuration" "root:root"
+        [[ -d "$DATA_ROOT/apache2" ]] && restore_directory "$DATA_ROOT/apache2" "/etc/apache2" "Apache configuration" "root:www-data"
+        [[ -d "$DATA_ROOT/nginx" ]] && restore_directory "$DATA_ROOT/nginx" "/etc/nginx" "Nginx configuration" "root:www-data"
+        [[ -d "$DATA_ROOT/mysql" ]] && restore_directory "$DATA_ROOT/mysql" "/var/lib/mysql" "MySQL data" "mysql:mysql"
+        [[ -d "$DATA_ROOT/php" ]] && restore_directory "$DATA_ROOT/php" "/var/lib/php" "PHP data" "root:root"
+        [[ -d "$DATA_ROOT/letsencrypt" ]] && restore_directory "$DATA_ROOT/letsencrypt" "/etc/letsencrypt" "SSL certificates" "root:root"
+        [[ -d "$DATA_ROOT/aapanel" ]] && restore_directory "$DATA_ROOT/aapanel" "/usr/local/aapanel" "aaPanel data" "root:root"
+        
+        # Restore MySQL dumps if they exist
+        if [[ -d "$DATA_ROOT/mysql_dumps" ]]; then
+        echo "📂 Restoring MySQL databases..."
+        if [[ -f "$DATA_ROOT/mysql_dumps/all_databases.sql" ]]; then
+        # Start MySQL service if not running
+        sudo service mysql start 2>/dev/null || sudo systemctl start mysql 2>/dev/null || sudo systemctl start mariadb 2>/dev/null || true
     
-    # Restore databases
-    sudo mysql < "$DATA_ROOT/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL restore failed, but continuing..."
-  fi
-fi
-
-# Restore optional directories
-[[ -d "$DATA_ROOT/tailscale" ]] && restore_directory "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Network configuration" "root:root"
-[[ -d "$DATA_ROOT/ssh" ]] && restore_directory "$DATA_ROOT/ssh" "/etc/ssh" "SSH configuration" "root:root"
-
-# Fix permissions
-sudo chmod -R 755 /home/* 2>/dev/null || true
-sudo chmod 700 /root 2>/dev/null || true
-sudo chmod 644 /etc/ssh/ssh_config* 2>/dev/null || true
-sudo chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
-sudo chmod 644 /etc/mysql/my.cnf 2>/dev/null || true
-sudo chmod 644 /etc/php/*/*/php.ini 2>/dev/null || true
-sudo chmod 644 /etc/apache2/apache2.conf 2>/dev/null || true
-sudo chmod 644 /etc/nginx/nginx.conf 2>/dev/null || true
-
-# Restart services if needed
-sudo service mysql restart 2>/dev/null || sudo systemctl restart mysql 2>/dev/null || sudo systemctl restart mariadb 2>/dev/null || true
-sudo service apache2 restart 2>/dev/null || sudo systemctl restart apache2 2>/dev/null || true
-sudo service nginx restart 2>/dev/null || sudo systemctl restart nginx 2>/dev/null || true
-sudo service php* restart 2>/dev/null || sudo systemctl restart php* 2>/dev/null || true
-
-# Cleanup
-sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER" 2>/dev/null || true
-
-echo "✅ USER DATA RESTORATION COMPLETE!"
-EOF
+        # Restore databases
+        sudo mysql < "$DATA_ROOT/mysql_dumps/all_databases.sql" 2>/dev/null || echo "⚠️ MySQL restore failed, but continuing..."
+        fi
+        fi
+        
+        # Restore optional directories
+        [[ -d "$DATA_ROOT/tailscale" ]] && restore_directory "$DATA_ROOT/tailscale" "/var/lib/tailscale" "Network configuration" "root:root"
+        [[ -d "$DATA_ROOT/ssh" ]] && restore_directory "$DATA_ROOT/ssh" "/etc/ssh" "SSH configuration" "root:root"
+        # Fix permissions
+        sudo chmod -R 755 /home/* 2>/dev/null || true
+        sudo chmod 700 /root 2>/dev/null || true
+        sudo chmod 644 /etc/ssh/ssh_config* 2>/dev/null || true
+        sudo chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
+        sudo chmod 644 /etc/mysql/my.cnf 2>/dev/null || true
+        sudo chmod 644 /etc/php/*/*/php.ini 2>/dev/null || true
+        sudo chmod 644 /etc/apache2/apache2.conf 2>/dev/null || true
+        sudo chmod 644 /etc/nginx/nginx.conf 2>/dev/null || true
+        
+        # Restart services if needed
+        sudo service mysql restart 2>/dev/null || sudo systemctl restart mysql 2>/dev/null || sudo systemctl restart mariadb 2>/dev/null || true
+        sudo service apache2 restart 2>/dev/null || sudo systemctl restart apache2 2>/dev/null || true
+        sudo service nginx restart 2>/dev/null || sudo systemctl restart nginx 2>/dev/null || true
+        sudo service php* restart 2>/dev/null || sudo systemctl restart php* 2>/dev/null || true
+        
+        # Cleanup
+        sudo rm -rf "$STAGING_AREA" "$RESTORE_CHAMBER" 2>/dev/null || true
+        echo "✅ USER DATA RESTORATION COMPLETE!"
+        EOF
 
         # Create persistence.sh script
         cat > /tmp/persistence.sh << 'EOF'
-#!/bin/bash
-# Persistence Mechanism for User Data Backups
-
-BACKUP_DIR="/mnt/omnitrix/backups"
-PERSISTENCE_FILE="backup_persistence.json"
-
-sudo mkdir -p "$BACKUP_DIR"
-
-# Create persistence file if it doesn't exist
-if [[ ! -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Creating persistence file..."
-  cat > "/tmp/$PERSISTENCE_FILE" << EOFINNER
-{
-  "last_backup": "",
-  "backup_history": [],
-  "restore_history": [],
-  "session_count": 0
-}
-EOFINNER
-  sudo mv "/tmp/$PERSISTENCE_FILE" "$BACKUP_DIR/$PERSISTENCE_FILE"
-  sudo chmod 644 "$BACKUP_DIR/$PERSISTENCE_FILE"
-fi
-
-# Update session count
-if [[ -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
-  SESSION_COUNT=$(grep -o '"session_count": [0-9]*' "$BACKUP_DIR/$PERSISTENCE_FILE" | awk '{print $2}')
-  SESSION_COUNT=$((SESSION_COUNT + 1))
-  sudo sed -i "s/\"session_count\": [0-9]*/\"session_count\": $SESSION_COUNT/" "$BACKUP_DIR/$PERSISTENCE_FILE"
-  
-  # Check if we need to run a backup
-  LAST_BACKUP=$(grep -o '"last_backup": "[^"]*"' "$BACKUP_DIR/$PERSISTENCE_FILE" | cut -d'"' -f4)
-  if [[ -z "$LAST_BACKUP" ]] || [[ ! -f "$LAST_BACKUP" ]] || [[ $(sudo find "$LAST_BACKUP" -mtime +1 -print 2>/dev/null) ]]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running scheduled backup..."
-    sudo bash /usr/local/bin/backup.sh
-  fi
-fi
-EOF
+        #!/bin/bash
+        # Persistence Mechanism for User Data Backups
+        
+        BACKUP_DIR="/mnt/omnitrix/backups"
+        PERSISTENCE_FILE="backup_persistence.json"
+        
+        sudo mkdir -p "$BACKUP_DIR"
+        
+        # Create persistence file if it doesn't exist
+        if [[ ! -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Creating persistence file..."
+        cat > "/tmp/$PERSISTENCE_FILE" << EOFINNER
+        {
+        "last_backup": "",
+        "backup_history": [],
+        "restore_history": [],
+        "session_count": 0
+        }
+        EOFINNER
+        sudo mv "/tmp/$PERSISTENCE_FILE" "$BACKUP_DIR/$PERSISTENCE_FILE"
+        sudo chmod 644 "$BACKUP_DIR/$PERSISTENCE_FILE"
+        fi
+        
+        # Update session count
+        if [[ -f "$BACKUP_DIR/$PERSISTENCE_FILE" ]]; then
+        SESSION_COUNT=$(grep -o '"session_count": [0-9]*' "$BACKUP_DIR/$PERSISTENCE_FILE" | awk '{print $2}')
+        SESSION_COUNT=$((SESSION_COUNT + 1))
+        sudo sed -i "s/\"session_count\": [0-9]*/\"session_count\": $SESSION_COUNT/" "$BACKUP_DIR/$PERSISTENCE_FILE"
+        
+        # Check if we need to run a backup
+        LAST_BACKUP=$(grep -o '"last_backup": "[^"]*"' "$BACKUP_DIR/$PERSISTENCE_FILE" | cut -d'"' -f4)
+        if [[ -z "$LAST_BACKUP" ]] || [[ ! -f "$LAST_BACKUP" ]] || [[ $(sudo find "$LAST_BACKUP" -mtime +1 -print 2>/dev/null) ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running scheduled backup..."
+        sudo bash /usr/local/bin/backup.sh
+        fi
+        fi
+        EOF
 
         # Install the scripts
         sudo mv /tmp/backup.sh /usr/local/bin/backup.sh
