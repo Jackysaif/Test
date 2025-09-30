@@ -1,332 +1,198 @@
-# 🛸 OMNITRIX VPS SESSION - BEN 10 ALIEN FORCE EDITION 👽
-# ═══════════════════════════════════════════════════════════════════
-#                    🔋 POWERED BY ALIEN TECHNOLOGY 🔋
-# ═══════════════════════════════════════════════════════════════════
-# This version incorporates optimized workflow patterns for reliability
-# and efficiency, ensuring complete persistent VPS functionality.
-
-name: "🛸 OMNITRIX VPS - Ben 10 Alien Force Edition 👽"
+name: 🕷️ Spidey Persistent VPS - Snapshot Optimized
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
 
 env:
-  BACKUP_NEXUS: /var/backups/omnitrix
-  BACKUP_ARTIFACT: omnitrix-data-core.tar.gz
-  GALVAN_CLOUD: mega:omnitrix-vault
-  HERO_SESSION_DURATION: 19800  # 5.5 hours (5:30)
-  PLUMBER_NETWORK: Plumbers-HQ
-  
+  SNAPSHOT_NAME: vps-snapshot-latest.img
+  SNAPSHOT_MOUNT: /mnt/snapshot
+  MEGA_REMOTE: mega:vps-backup
+
 jobs:
-  omnitrix_session:
-    name: "🛸 OMNITRIX UNIVERSE SESSION 👽"
+  vps:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350
-    permissions:
-      contents: read
-      actions: write
-    
+    timeout-minutes: 360
+
     steps:
-    - name: "🛸 Scanning Universe Repository"
-      uses: actions/checkout@v4
-      
-    - name: "⚡ DEPLOYING ALIEN TECHNOLOGY SUITE"
-      run: |
-        set -e
-        
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🛸            OMNITRIX SYSTEM ACTIVATION               👽"
-        echo "═══════════════════════════════════════════════════════════"
-        echo "🔋 Alien Form: Jetray (High-Speed Operations)"
-        echo "⏰ Mission Start: $(date)"
-        echo "═══════════════════════════════════════════════════════════"
-        
-        # Update package registry
-        echo "🛸 Updating Galactic Package Registry..."
-        sudo apt-get update -qq || {
-          echo "⚠️ Primary update failed, trying alternatives..."
-          sudo apt-get update --fix-missing -qq || true
-        }
-        
-        # Install rclone with multiple methods
-        echo "🔗 Installing Plumber Communication Suite..."
-        if ! command -v rclone >/dev/null 2>&1; then
-          if curl -fsSL https://rclone.org/install.sh | sudo bash; then
-            echo "✅ Rclone installed via official installer"
-          else
-            echo "🔄 Trying alternative rclone installation..."
-            cd /tmp
-            if wget -q https://downloads.rclone.org/rclone-current-linux-amd64.zip; then
-              sudo apt-get install -y unzip || true
-              if unzip -q rclone-current-linux-amd64.zip 2>/dev/null; then
-                sudo cp rclone-*/rclone /usr/bin/ && sudo chmod +x /usr/bin/rclone
-                echo "✅ Rclone installed via direct download"
-              fi
-            fi
-          fi
-        fi
-        
-        # Install essential tools
-        echo "👽 Installing Essential Alien Technology..."
-        TOOLS="curl wget jq tar gzip unzip openssh-server nano vim git net-tools"
-        TOOLS="$TOOLS software-properties-common apt-transport-https ca-certificates"
-        TOOLS="$TOOLS gnupg psmisc screen expect tmate mariadb-server mariadb-client"
-        
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $TOOLS || {
-          echo "⚠️ Some tools failed to install, continuing..."
-        }
-        
-        echo "✅ ALIEN TECHNOLOGY DEPLOYMENT COMPLETE! 🛸"
-
-    - name: "☁️ GALVAN PRIME CLOUD CONFIGURATION"
-      run: |
-        set -e
-        
-        echo "Configuring Rclone for Galvan Prime (MEGA)..."
-        mkdir -p ~/.config/rclone
-        cat > ~/.config/rclone/rclone.conf <<EOF
-        [mega]
-        type = mega
-        user = ${{ secrets.MEGA_USER || '' }}
-        pass = ${{ secrets.MEGA_PASS || '' }}
-        EOF
-        
-        # Test connectivity
-        echo "🧪 Testing Galvan Prime connectivity..."
-        if rclone lsd mega: >/dev/null 2>&1; then
-          echo "✅ Galvan Prime connection established! 🌌"
-        else
-          echo "⚠️ Connectivity test failed, proceeding with limited cloud features"
-        fi
-
-    - name: "♻️ TEMPORAL DATA CORE RECOVERY OR INITIALIZATION"
-      id: restore
-      run: |
-        set -e
-        
-        echo "🔍 Checking for existing temporal data core on Galvan Prime..."
-        if rclone ls ${GALVAN_CLOUD}/${BACKUP_ARTIFACT} >/dev/null 2>&1; then
-          echo "✅ Temporal data core found! Restoring universe state..."
-          rclone copy ${GALVAN_CLOUD}/${BACKUP_ARTIFACT} /tmp/
-          sudo tar -xzf /tmp/${BACKUP_ARTIFACT} --absolute-names -C / 2>/dev/null || true
-          echo "is_new_install=false" >> $GITHUB_OUTPUT
-          echo "✅ Universe state restored from temporal data core!"
-        else
-          echo "ℹ️ No temporal data core found. Fresh installation mode activated."
-          sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
-          echo "is_new_install=true" >> $GITHUB_OUTPUT
-          echo "🎆 Fresh universe initialized!"
-        fi
-
-    - name: "🚀 ALIEN CONTROL PANEL DEPLOYMENT"
-      run: |
-        set -e
-        
-        echo "Running Alien Control Panel installer to configure over restored files..."
-        curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
-        # Pipe 'y' and 'yes' to the installer to handle both prompts
-        (echo "y" && echo "yes") | sudo bash /tmp/install.sh || true
-        
-    - name: "🚀 START ALIEN POWER SYSTEMS"
-      run: |
-        set -e
-        
-        echo "🔄 (Re)loading alien power systems..."
-        sudo systemctl daemon-reload
-        
-        echo "🔧 Running Alien Control Panel repair sequence..."
-        sudo bt 16 || true
-        
-        echo "🕷️ Installing and starting Plumber Network (Tailscale)..."
-        if ! command -v tailscale >/dev/null 2>&1; then
-          curl -fsSL https://tailscale.com/install.sh | sh
-        fi
-        sudo systemctl enable --now tailscaled
-        # Use --accept-dns=false to prevent DNS conflicts inside the runner
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY || '' }} --hostname=$PLUMBER_NETWORK --reset --accept-dns=false || true
-        
-        echo "Pausing for 20 seconds for Tailscale HTTPS cert generation..."
-        sleep 20
-        
-        echo "🔐 Applying Tailscale SSL Certificate to aaPanel..."
-        # Find the full MagicDNS hostname provided by Tailscale
-        TS_HOSTNAME=$(sudo tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$PLUMBER_NETWORK\") | .DNSName" | sed 's/\.$//')
-        
-        if [ -n "$TS_HOSTNAME" ]; then
-          CERT_PATH="/var/lib/tailscale/certs/${TS_HOSTNAME}.crt"
-          KEY_PATH="/var/lib/tailscale/certs/${TS_HOSTNAME}.key"
-          
-          if [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then
-            # Commands to set panel SSL certificate and key
-            sudo bt 25 "$CERT_PATH"
-            sudo bt 26 "$KEY_PATH"
-            echo "✅ Tailscale SSL Certificate applied successfully!"
-          else
-            echo "⚠️ Could not find Tailscale certificates. Panel will use a self-signed cert."
-          fi
-        else
-          echo "⚠️ Could not determine Tailscale hostname."
-        fi
-
-        echo "⚙️ Starting database, Alien Control Panel, and web services..."
-        sudo systemctl start mariadb || true
-        sudo bt restart || true
-        
-        echo "✅ All alien power systems are running."
-        TS_IP=$(sudo tailscale ip -4 || echo "Not available")
-        echo "🌐 Plumber Network IP: $TS_IP"
-        if [ -n "$TS_HOSTNAME" ]; then
-          echo "🔐 Access Panel Securely at: https://${TS_HOSTNAME}:7800"
-        else
-          echo "🎛️ Access Panel at: http://${TS_IP}:7800"
-        fi
-        
-    - name: "🔐 SET ALIEN CONTROL PANEL CREDENTIALS"
-      run: |
-        echo "Setting Alien Control Panel username and password..."
-        echo "Ben10" | sudo bt 6
-        echo "omnitrix" | sudo bt 5
-        echo "✅ Control Panel username is 'Ben10' and password has been set to 'omnitrix'."
-        
-    - name: "👤 UNIVERSAL HERO SETUP"
-      run: |
-        set -e
-        
-        echo "🚀 Creating universal hero and hostname setup..."
-        
-        # Create hero account (runs every time to ensure user exists)
-        if ! id jacky >/dev/null 2>&1; then
+      # 1. Initial Setup
+      - name: 👤 Create User & Set Hostname
+        run: |
+          echo "🚀 Creating universal user and hostname setup..."
           sudo useradd -m -s /bin/bash jacky
-          echo "✅ Hero account 'jacky' created!"
-        else
-          echo "✅ Hero account 'jacky' already exists!"
-        fi
-        
-        # Set password and permissions
-        echo "jacky:${{ secrets.USER_PASSWORD || 'omnitrix' }}" | sudo chpasswd
-        sudo usermod -aG sudo jacky
-        echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky >/dev/null
-        
-        # Set hostname
-        sudo hostnamectl set-hostname "$PLUMBER_NETWORK"
-        echo "127.0.1.1 $PLUMBER_NETWORK" | sudo tee -a /etc/hosts >/dev/null
-        
-        echo "✅ Hero 'jacky' configured with Omnitrix powers!"
-        echo "🌍 Hostname set to: $PLUMBER_NETWORK"
+          echo "jacky:root" | sudo chpasswd
+          sudo usermod -aG sudo jacky
+          echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
+          sudo hostnamectl set-hostname github-vps
 
-    - name: "⏳ MAINTAIN OMNITRIX SESSION (5:30 HOURS)"
-      run: |
-        set -e
-        
-        echo "🛸 OMNITRIX is now operational for 5:30 hours. To trigger manual shutdown, create '/tmp/stop_session'."
-        echo "⏰ Session will automatically end after 5 hours 30 minutes (19,800 seconds)"
-        echo "🕐 Mission Start: $(date)"
-        
-        MISSION_START=$(date +%s)
-        LAST_STATUS=0
-        STATUS_INTERVAL=300  # 5 minutes status updates
-        
-        while [ ! -f /tmp/stop_session ]; do
-          CURRENT_TIME=$(date +%s)
-          ELAPSED=$((CURRENT_TIME - MISSION_START))
-          
-          # Check for mission completion (5:30 hours = 19800 seconds)
-          if [ $ELAPSED -gt $HERO_SESSION_DURATION ]; then
-            echo "⏰ Mission duration of 5:30 hours completed! Initiating universe preservation..."
-            break
+      # 2. Install Required Tools
+      - name: ⚡ Install System Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server \
+            mariadb-server apache2 php php-mysql qemu-utils cloud-utils
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          sudo systemctl enable --now ssh
+
+      # 3. Configure Rclone for MEGA
+      - name: ☁️ Configure Rclone (MEGA)
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [mega]
+          type = mega
+          user = ${{ secrets.MEGA_USER }}
+          pass = ${{ secrets.MEGA_PASS }}
+          EOF
+
+      # 4. Snapshot Restoration
+      - name: ♻️ Restore from Snapshot
+        id: restore
+        run: |
+          echo "🔍 Checking for existing snapshot on MEGA..."
+          if rclone ls ${MEGA_REMOTE}/${SNAPSHOT_NAME} >/dev/null 2>&1; then
+            echo "✅ Snapshot found. Restoring system..."
+            
+            # Download snapshot
+            rclone copy ${MEGA_REMOTE}/${SNAPSHOT_NAME} /tmp/
+            
+            # Create mount point
+            sudo mkdir -p ${SNAPSHOT_MOUNT}
+            
+            # Mount the snapshot image
+            sudo mount -o loop /tmp/${SNAPSHOT_NAME} ${SNAPSHOT_MOUNT}
+            
+            # Rsync data back to root filesystem
+            echo "🔄 Syncing snapshot data to live system..."
+            sudo rsync -a ${SNAPSHOT_MOUNT}/ / --exclude=/proc --exclude=/sys --exclude=/dev
+            
+            # Cleanup
+            sudo umount ${SNAPSHOT_MOUNT}
+            sudo rm -f /tmp/${SNAPSHOT_NAME}
+            
+            echo "is_new_install=false" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ No snapshot found. Fresh installation."
+            echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-          
-          # Periodic status updates every 5 minutes
-          if [ $((CURRENT_TIME - LAST_STATUS)) -gt $STATUS_INTERVAL ]; then
-            REMAINING=$((HERO_SESSION_DURATION - ELAPSED))
-            HOURS=$((REMAINING / 3600))
-            MINUTES=$(((REMAINING % 3600) / 60))
-            
-            echo "═══════════════════════════════════════════════════════════"
-            echo "🛸 OMNITRIX STATUS - $(date) - Time Remaining: ${HOURS}h ${MINUTES}m"
-            echo "🌐 Network: $(sudo tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null || echo 'Unknown')"
-            echo "🗄️ Database: $(systemctl is-active mariadb 2>/dev/null || echo 'Unknown')"
-            echo "🎛️ Panel: $(systemctl is-active bt 2>/dev/null || echo 'Unknown')"
-            echo "💾 Disk: $(df -h / | awk 'NR==2 {print $5}') | Memory: $(free | awk 'NR==2{printf "%.1f%%", $3*100/$2}')"
-            
-            # Display access information
-            PLUMBER_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Acquiring...")
-            TS_HOSTNAME=$(sudo tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$PLUMBER_NETWORK\") | .DNSName" | sed 's/\.$//' 2>/dev/null || true)
-            
-            echo "🔐 Hero SSH: ssh jacky@$PLUMBER_IP"
-            if [ -n "$TS_HOSTNAME" ]; then
-                echo "🎛️ Control Panel (Secure): https://${TS_HOSTNAME}:7800"
-            else
-                echo "🎛️ Control Panel: http://$PLUMBER_IP:7800 (Ben10/omnitrix)"
-            fi
-            echo "═══════════════════════════════════════════════════════════"
-            
-            LAST_STATUS=$CURRENT_TIME
-          fi
-          
-          echo "Session is active. Sleeping for 60 seconds..."
-          sleep 60
-        done
-        
-        echo "Graceful shutdown initiated. Proceeding to universe preservation."
 
-    - name: "💾 CREATE FINAL TEMPORAL DATA CORE"
-      if: always()
-      run: |
-        set -e
-        
-        echo "🛑 Stopping alien power systems for clean backup..."
-        sudo systemctl stop tailscaled || true
-        sudo systemctl stop btpanel.service || true
-        sudo systemctl stop apache2 || true
-        sudo systemctl stop mariadb || true
-        sudo pkill -f "tmate" || true
-        
-        # Create the backup store directory
-        sudo mkdir -p ${BACKUP_NEXUS}
-        
-        echo "📦 Creating final temporal data core archive..."
-        sudo tar --ignore-failed-read -czf ${BACKUP_NEXUS}/${BACKUP_ARTIFACT} \
-          --absolute-names \
-          /etc/hostname \
-          /etc/hosts \
-          /etc/systemd/system \
-          /var/lib/tailscale \
-          /opt \
-          /srv \
-          /var/www \
-          /etc/ssh \
-          /etc/apache2 \
-          /www/server \
-          /root \
-          /home/jacky \
-          /usr/lib/systemd/system \
-          /var/lib/mysql \
-          /etc/sudoers.d/ \
-          /usr/bin/bt \
-          /etc/init.d \
-          /etc/ld.so.conf.d \
-          2>/dev/null || true
-        
-        echo "✅ Final temporal data core created at ${BACKUP_NEXUS}/${BACKUP_ARTIFACT}"
-        
-    - name: "☁️ UPLOAD TEMPORAL DATA CORE TO GALVAN PRIME"
-      if: always()
-      run: |
-        echo "🚀 Uploading final temporal data core to Galvan Prime..."
-        rclone copy ${BACKUP_NEXUS}/${BACKUP_ARTIFACT} ${GALVAN_CLOUD} --progress
-        echo "✅ Final temporal data core uploaded successfully to Galvan Prime."
+      # 5. Delete Old Snapshot
+      - name: 🗑️ Delete Old Snapshot
+        if: steps.restore.outputs.is_new_install == 'false'
+        run: |
+          echo "Deleting old snapshot from MEGA..."
+          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.SNAPSHOT_NAME }}
 
-    - name: "📝 FINAL MISSION STATUS REPORT"
-      if: always()
-      run: |
-        echo "=== OMNITRIX VPS SESSION ENDED ==="
-        echo "Final job status: ${{ job.status }}"
-        echo "Temporal data core uploaded to: ${GALVAN_CLOUD}/${BACKUP_ARTIFACT}"
-        echo "Session Duration: 5 hours 30 minutes"
-        echo "Hero Account: jacky (omnitrix powers)"
-        echo "Control Panel: Ben10/omnitrix"
-        echo "It's Hero Time - Mission Complete! 💥"
-        echo "============================="
+      # 6. System Setup & Services
+      - name: 🚀 System Setup
+        run: |
+          # Create essential directories
+          sudo mkdir -p /opt /srv /var/www /var/lib/mysql /www/server /home/jacky
+          
+          # Install Aapanel (non-interactive)
+          curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          (echo "y" && echo "yes") | sudo bash /tmp/install.sh
+
+      # 7. Start Services
+      - name: 🚀 Start Services
+        run: |
+          sudo systemctl daemon-reload
+          
+          # Setup Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
+          
+          sleep 10
+          
+          # Start services
+          sudo systemctl start mariadb || true
+          sudo bt restart || true
+          sudo systemctl start apache2 || true
+
+      # 8. Configure Aapanel
+      - name: 🔐 Set Aapanel Credentials
+        run: |
+          echo "jacky" | sudo bt 6
+          echo "spidey" | sudo bt 5
+          echo "✅ Aapanel configured: jacky/spidey"
+
+      # 9. Start Tmate Session
+      - name: 🛰️ Start Tmate Session
+        run: |
+          sudo apt-get install -y tmate
+          sudo -u jacky screen -dmS tmate-session tmate
+          sleep 3
+
+      # 10. Maintain Session
+      - name: ⏳ Maintain VPS Session
+        run: |
+          echo "🖥️ VPS is now running. Create '/tmp/stop_session' to shutdown gracefully."
+          while [ ! -f /tmp/stop_session ]; do
+            sleep 60
+          done
+          echo "Graceful shutdown initiated."
+
+      # 11. Create Snapshot (Always Runs)
+      - name: 💾 Create System Snapshot
+        if: always()
+        run: |
+          echo "🛑 Preparing for snapshot..."
+          
+          # Stop services cleanly
+          sudo systemctl stop tailscaled || true
+          sudo systemctl stop btpanel.service || true
+          sudo systemctl stop apache2 || true
+          sudo systemctl stop mariadb || true
+          sudo pkill -f "tmate" || true
+          
+          # Create snapshot image
+          echo "📸 Creating system snapshot..."
+          sudo mkdir -p /mnt/snapshot
+          
+          # Create a sparse image file (compressed)
+          sudo dd if=/dev/zero of=/tmp/${SNAPSHOT_NAME} bs=1M count=1024 oflag=direct
+          sudo mkfs.ext4 /tmp/${SNAPSHOT_NAME}
+          
+          # Mount and copy system data
+          sudo mount -o loop /tmp/${SNAPSHOT_NAME} /mnt/snapshot
+          
+          # Copy essential system data (exclude volatile directories)
+          sudo rsync -a --delete \
+            --exclude=/proc \
+            --exclude=/sys \
+            --exclude=/dev \
+            --exclude=/tmp \
+            --exclude=/run \
+            --exclude=/mnt \
+            --exclude=/media \
+            --exclude=/var/cache \
+            --exclude=/var/tmp \
+            / /mnt/snapshot/
+          
+          # Cleanup
+          sudo umount /mnt/snapshot
+          
+          # Compress the snapshot
+          echo "🗜️ Compressing snapshot..."
+          sudo gzip /tmp/${SNAPSHOT_NAME}
+          
+          echo "✅ Snapshot created: /tmp/${SNAPSHOT_NAME}.gz"
+
+      # 12. Upload Snapshot
+      - name: ☁️ Upload Snapshot to MEGA
+        if: always()
+        run: |
+          echo "🚀 Uploading snapshot to MEGA..."
+          rclone copy /tmp/${SNAPSHOT_NAME}.gz ${{ env.MEGA_REMOTE }} --progress
+          echo "✅ Snapshot uploaded successfully."
+
+      # 13. Final Cleanup
+      - name: 🧹 Final Cleanup
+        if: always()
+        run: |
+          sudo rm -f /tmp/${SNAPSHOT_NAME}* /tmp/stop_session
+          echo "=== VPS Session Complete ==="
+          echo "Final status: ${{ job.status }}"
+          echo "Snapshot: ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz"
