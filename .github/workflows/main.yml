@@ -51,11 +51,14 @@ jobs:
         id: restore
         run: |
           echo "🔍 Checking for existing snapshot on MEGA..."
-          if rclone ls ${MEGA_REMOTE}/${SNAPSHOT_NAME} >/dev/null 2>&1; then
+          if rclone ls ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz >/dev/null 2>&1; then
             echo "✅ Snapshot found. Restoring system..."
             
             # Download snapshot
-            rclone copy ${MEGA_REMOTE}/${SNAPSHOT_NAME} /tmp/
+            rclone copy ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz /tmp/
+            
+            # Decompress
+            gunzip /tmp/${SNAPSHOT_NAME}.gz
             
             # Create mount point
             sudo mkdir -p ${SNAPSHOT_MOUNT}
@@ -82,9 +85,29 @@ jobs:
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
           echo "Deleting old snapshot from MEGA..."
-          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.SNAPSHOT_NAME }}
+          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.SNAPSHOT_NAME }}.gz
 
-      # 6. System Setup & Services
+      # 6. Install and Configure Tailscale
+      - name: 🦊 Install & Setup Tailscale
+        run: |
+          echo "🦊 Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          echo "🔧 Starting Tailscale service..."
+          sudo systemctl enable --now tailscaled
+          
+          echo "🌐 Connecting to Tailscale network..."
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
+          
+          # Wait for network to stabilize
+          echo "⏳ Waiting for Tailscale network to establish..."
+          sleep 15
+          
+          # Display Tailscale IP
+          TAILSCALE_IP=$(sudo tailscale ip -4)
+          echo "✅ Tailscale IP: $TAILSCALE_IP"
+
+      # 7. System Setup & Services
       - name: 🚀 System Setup
         run: |
           # Create essential directories
@@ -94,64 +117,74 @@ jobs:
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
-      # 7. Start Services
+      # 8. Start Services
       - name: 🚀 Start Services
         run: |
           sudo systemctl daemon-reload
           
-          # Setup Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl enable --now tailscaled
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
-          
-          sleep 10
-          
-          # Start services
+          # Start services in order
           sudo systemctl start mariadb || true
           sudo bt restart || true
           sudo systemctl start apache2 || true
+          
+          # Verify Tailscale is still running
+          sudo systemctl restart tailscaled || true
+          echo "✅ All services started"
 
-      # 8. Configure Aapanel
+      # 9. Configure Aapanel
       - name: 🔐 Set Aapanel Credentials
         run: |
           echo "jacky" | sudo bt 6
           echo "spidey" | sudo bt 5
           echo "✅ Aapanel configured: jacky/spidey"
 
-      # 9. Start Tmate Session
+      # 10. Start Tmate Session
       - name: 🛰️ Start Tmate Session
         run: |
           sudo apt-get install -y tmate
           sudo -u jacky screen -dmS tmate-session tmate
           sleep 3
+          echo "✅ Tmate session started"
 
-      # 10. Maintain Session
+      # 11. Display Connection Info
+      - name: 📊 Display Connection Information
+        run: |
+          echo "=== 🖥️ VPS CONNECTION INFORMATION ==="
+          echo "SSH Access: ssh jacky@$(sudo tailscale ip -4)"
+          echo "SSH Password: root"
+          echo "Aapanel URL: https://$(sudo tailscale ip -4):7800"
+          echo "Aapanel Username: jacky"
+          echo "Aapanel Password: spidey"
+          echo "Tailscale IP: $(sudo tailscale ip -4)"
+          echo "======================================"
+
+      # 12. Maintain Session
       - name: ⏳ Maintain VPS Session
         run: |
           echo "🖥️ VPS is now running. Create '/tmp/stop_session' to shutdown gracefully."
           while [ ! -f /tmp/stop_session ]; do
+            echo "✅ Session active - Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Connecting...')"
             sleep 60
           done
           echo "Graceful shutdown initiated."
 
-      # 11. Create Snapshot (Always Runs)
+      # 13. Create Snapshot (Always Runs)
       - name: 💾 Create System Snapshot
         if: always()
         run: |
           echo "🛑 Preparing for snapshot..."
           
           # Stop services cleanly
-          sudo systemctl stop tailscaled || true
-          sudo systemctl stop btpanel.service || true
           sudo systemctl stop apache2 || true
           sudo systemctl stop mariadb || true
+          sudo systemctl stop btpanel.service || true
           sudo pkill -f "tmate" || true
           
-          # Create snapshot image
+          # Note: Don't stop Tailscale yet - we need it for upload
           echo "📸 Creating system snapshot..."
           sudo mkdir -p /mnt/snapshot
           
-          # Create a sparse image file (compressed)
+          # Create a sparse image file
           sudo dd if=/dev/zero of=/tmp/${SNAPSHOT_NAME} bs=1M count=1024 oflag=direct
           sudo mkfs.ext4 /tmp/${SNAPSHOT_NAME}
           
@@ -169,6 +202,7 @@ jobs:
             --exclude=/media \
             --exclude=/var/cache \
             --exclude=/var/tmp \
+            --exclude=/var/lib/tailscale/tailscaled.state \
             / /mnt/snapshot/
           
           # Cleanup
@@ -180,7 +214,7 @@ jobs:
           
           echo "✅ Snapshot created: /tmp/${SNAPSHOT_NAME}.gz"
 
-      # 12. Upload Snapshot
+      # 14. Upload Snapshot
       - name: ☁️ Upload Snapshot to MEGA
         if: always()
         run: |
@@ -188,10 +222,14 @@ jobs:
           rclone copy /tmp/${SNAPSHOT_NAME}.gz ${{ env.MEGA_REMOTE }} --progress
           echo "✅ Snapshot uploaded successfully."
 
-      # 13. Final Cleanup
-      - name: 🧹 Final Cleanup
+      # 15. Final Cleanup
+      - name: 🧹 Final Cleanup & Disconnect Tailscale
         if: always()
         run: |
+          echo "🔌 Disconnecting Tailscale..."
+          sudo tailscale down || true
+          sudo systemctl stop tailscaled || true
+          
           sudo rm -f /tmp/${SNAPSHOT_NAME}* /tmp/stop_session
           echo "=== VPS Session Complete ==="
           echo "Final status: ${{ job.status }}"
