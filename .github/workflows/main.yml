@@ -119,8 +119,6 @@ jobs:
           echo "is_new_install=true" >> $GITHUB_OUTPUT
           echo "🎆 Fresh universe initialized!"
         fi
-        
-    
 
     - name: "🚀 ALIEN CONTROL PANEL DEPLOYMENT"
       run: |
@@ -138,25 +136,52 @@ jobs:
         echo "🔄 (Re)loading alien power systems..."
         sudo systemctl daemon-reload
         
+        echo "🔧 Running Alien Control Panel repair sequence..."
+        sudo bt 16 || true
+        
         echo "🕷️ Installing and starting Plumber Network (Tailscale)..."
-        curl -fsSL https://tailscale.com/install.sh | sh
+        if ! command -v tailscale >/dev/null 2>&1; then
+          curl -fsSL https://tailscale.com/install.sh | sh
+        fi
         sudo systemctl enable --now tailscaled
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY || '' }} --hostname=$PLUMBER_NETWORK --reset || true
+        # Use --accept-dns=false to prevent DNS conflicts inside the runner
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY || '' }} --hostname=$PLUMBER_NETWORK --reset --accept-dns=false || true
         
-        # Wait for Tailscale network to fully stabilize
-        echo "Pausing for 10 seconds to allow Plumber Network to establish..."
-        sleep 10
+        echo "Pausing for 20 seconds for Tailscale HTTPS cert generation..."
+        sleep 20
         
-        # Start the services in a logical order
+        echo "🔐 Applying Tailscale SSL Certificate to aaPanel..."
+        # Find the full MagicDNS hostname provided by Tailscale
+        TS_HOSTNAME=$(sudo tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$PLUMBER_NETWORK\") | .DNSName" | sed 's/\.$//')
+        
+        if [ -n "$TS_HOSTNAME" ]; then
+          CERT_PATH="/var/lib/tailscale/certs/${TS_HOSTNAME}.crt"
+          KEY_PATH="/var/lib/tailscale/certs/${TS_HOSTNAME}.key"
+          
+          if [ -f "$CERT_PATH" ] && [ -f "$KEY_PATH" ]; then
+            # Commands to set panel SSL certificate and key
+            sudo bt 25 "$CERT_PATH"
+            sudo bt 26 "$KEY_PATH"
+            echo "✅ Tailscale SSL Certificate applied successfully!"
+          else
+            echo "⚠️ Could not find Tailscale certificates. Panel will use a self-signed cert."
+          fi
+        else
+          echo "⚠️ Could not determine Tailscale hostname."
+        fi
+
         echo "⚙️ Starting database, Alien Control Panel, and web services..."
         sudo systemctl start mariadb || true
-        
-        # Restart aaPanel after Tailscale is configured
         sudo bt restart || true
-        sudo systemctl start apache2 || true
         
         echo "✅ All alien power systems are running."
-        echo "🌐 Plumber Network IP: $(sudo tailscale ip -4 || echo 'Not available')"
+        TS_IP=$(sudo tailscale ip -4 || echo "Not available")
+        echo "🌐 Plumber Network IP: $TS_IP"
+        if [ -n "$TS_HOSTNAME" ]; then
+          echo "🔐 Access Panel Securely at: https://${TS_HOSTNAME}:7800"
+        else
+          echo "🎛️ Access Panel at: http://${TS_IP}:7800"
+        fi
         
     - name: "🔐 SET ALIEN CONTROL PANEL CREDENTIALS"
       run: |
@@ -165,7 +190,6 @@ jobs:
         echo "omnitrix" | sudo bt 5
         echo "✅ Control Panel username is 'Ben10' and password has been set to 'omnitrix'."
         
-    
     - name: "👤 UNIVERSAL HERO SETUP"
       run: |
         set -e
@@ -229,8 +253,14 @@ jobs:
             
             # Display access information
             PLUMBER_IP=$(sudo tailscale ip -4 2>/dev/null || echo "Acquiring...")
+            TS_HOSTNAME=$(sudo tailscale status --json | jq -r ".Peer[] | select(.HostName == \"$PLUMBER_NETWORK\") | .DNSName" | sed 's/\.$//' 2>/dev/null || true)
+            
             echo "🔐 Hero SSH: ssh jacky@$PLUMBER_IP"
-            echo "🎛️ Control Panel: http://$PLUMBER_IP:7800 (Ben10/omnitrix)"
+            if [ -n "$TS_HOSTNAME" ]; then
+                echo "🎛️ Control Panel (Secure): https://${TS_HOSTNAME}:7800"
+            else
+                echo "🎛️ Control Panel: http://$PLUMBER_IP:7800 (Ben10/omnitrix)"
+            fi
             echo "═══════════════════════════════════════════════════════════"
             
             LAST_STATUS=$CURRENT_TIME
@@ -276,6 +306,8 @@ jobs:
           /var/lib/mysql \
           /etc/sudoers.d/ \
           /usr/bin/bt \
+          /etc/init.d \
+          /etc/ld.so.conf.d \
           2>/dev/null || true
         
         echo "✅ Final temporal data core created at ${BACKUP_NEXUS}/${BACKUP_ARTIFACT}"
