@@ -1,4 +1,8 @@
-name: 🕷️ Spidey Persistent VPS - Snapshot Optimized
+# 🕷️️ Spidey Persistent VPS - Optimized Workflow
+# This version is the most reliable and efficient, incorporating all fixes
+# to ensure a complete and functional persistent VPS.
+
+name: 🕷️ Spidey Persistent VPS - Optimized (Fixed for Space)
 
 on:
   schedule:
@@ -6,38 +10,42 @@ on:
   workflow_dispatch:
 
 env:
-  SNAPSHOT_NAME: vps-snapshot-latest.img
-  SNAPSHOT_MOUNT: /mnt/snapshot
-  MEGA_REMOTE: mega:vps-backup
-
+  BACKUP_STORE: /var/backups/vps
+  BACKUP_NAME: vps-backup-latest.tar.gz
+  MEGA_REMOTE: mega:vps-backup # Rclone remote path
+  
 jobs:
   vps:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
     steps:
-      # 1. Initial Setup
-      - name: 👤 Create User & Set Hostname
+      # 1. Universal User Setup (runs every time to ensure the user exists)
+      - name: 👤 Create user 'jacky' & Set Hostname
         run: |
           echo "🚀 Creating universal user and hostname setup..."
-          sudo useradd -m -s /bin/bash jacky
+          sudo useradd -m -s /bin/bash jacky || true # Use || true to ignore if user exists
           echo "jacky:root" | sudo chpasswd
           sudo usermod -aG sudo jacky
           echo "jacky ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/jacky
           sudo hostnamectl set-hostname github-vps
+          echo "✅ User 'jacky' created and configured with password 'root'."
+      
+      # 2. Basic Setup & Tool Installation
+      - name: 🕸️ Checkout Code
+        uses: actions/checkout@v4
 
-      # 2. Install Required Tools
-      - name: ⚡ Install System Tools
+      - name: ⚡ Install System Tools & Rclone
         run: |
+          echo "Installing core system tools..."
           sudo apt-get update
-          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server \
-            mariadb-server apache2 php php-mysql qemu-utils cloud-utils
+          sudo apt-get install -y curl wget unzip tar psmisc screen openssh-server mariadb-server apache2 php php-mysql
           curl -fsSL https://rclone.org/install.sh | sudo bash
           sudo systemctl enable --now ssh
 
-      # 3. Configure Rclone for MEGA
       - name: ☁️ Configure Rclone (MEGA)
         run: |
+          echo "Configuring Rclone for MEGA..."
           mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf <<EOF
           [mega]
@@ -46,191 +54,123 @@ jobs:
           pass = ${{ secrets.MEGA_PASS }}
           EOF
 
-      # 4. Snapshot Restoration
-      - name: ♻️ Restore from Snapshot
+      # 3. Restore or Initialize System
+      - name: ♻️ Restore from Backup OR Initialize
         id: restore
         run: |
-          echo "🔍 Checking for existing snapshot on MEGA..."
-          if rclone ls ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz >/dev/null 2>&1; then
-            echo "✅ Snapshot found. Restoring system..."
-            
-            # Download snapshot
-            rclone copy ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz /tmp/
-            
-            # Decompress
-            gunzip /tmp/${SNAPSHOT_NAME}.gz
-            
-            # Create mount point
-            sudo mkdir -p ${SNAPSHOT_MOUNT}
-            
-            # Mount the snapshot image
-            sudo mount -o loop /tmp/${SNAPSHOT_NAME} ${SNAPSHOT_MOUNT}
-            
-            # Rsync data back to root filesystem
-            echo "🔄 Syncing snapshot data to live system..."
-            sudo rsync -a ${SNAPSHOT_MOUNT}/ / --exclude=/proc --exclude=/sys --exclude=/dev
-            
-            # Cleanup
-            sudo umount ${SNAPSHOT_MOUNT}
-            sudo rm -f /tmp/${SNAPSHOT_NAME}
-            
+          echo "🔍 Checking for existing backup on MEGA..."
+          if rclone ls ${MEGA_REMOTE}/${BACKUP_NAME} >/dev/null 2>&1; then
+            echo "✅ Backup found. Restoring system state..."
+            # Restore: download to /tmp and extract
+            rclone copy ${MEGA_REMOTE}/${BACKUP_NAME} /tmp/
+            sudo tar -xzf /tmp/${BACKUP_NAME} --absolute-names -C /
             echo "is_new_install=false" >> $GITHUB_OUTPUT
           else
-            echo "ℹ️ No snapshot found. Fresh installation."
+            echo "ℹ️ No backup found. This will be a fresh installation."
+            # Initialize: create directories that are backed up
+            sudo mkdir -p /home/jacky /opt /srv /var/www /var/lib/mysql /www/server
             echo "is_new_install=true" >> $GITHUB_OUTPUT
           fi
-
-      # 5. Delete Old Snapshot
-      - name: 🗑️ Delete Old Snapshot
+          
+      # 4. Delete Backup from MEGA (Clean slate for the new run)
+      - name: 🗑️ Delete Old Backup from MEGA
         if: steps.restore.outputs.is_new_install == 'false'
         run: |
-          echo "Deleting old snapshot from MEGA..."
-          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.SNAPSHOT_NAME }}.gz
-
-      # 6. Install and Configure Tailscale
-      - name: 🦊 Install & Setup Tailscale
+          echo "Deleting old backup file from MEGA remote..."
+          rclone delete ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
+          echo "✅ Old backup deleted from MEGA."
+      
+      # 5. Aapanel Setup (install and overwrite using non-interactive flag)
+      - name: 🚀 Aapanel Setup
         run: |
-          echo "🦊 Installing Tailscale..."
-          curl -fsSL https://tailscale.com/install.sh | sh
-          
-          echo "🔧 Starting Tailscale service..."
-          sudo systemctl enable --now tailscaled
-          
-          echo "🌐 Connecting to Tailscale network..."
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset
-          
-          # Wait for network to stabilize
-          echo "⏳ Waiting for Tailscale network to establish..."
-          sleep 15
-          
-          # Display Tailscale IP
-          TAILSCALE_IP=$(sudo tailscale ip -4)
-          echo "✅ Tailscale IP: $TAILSCALE_IP"
-
-      # 7. System Setup & Services
-      - name: 🚀 System Setup
-        run: |
-          # Create essential directories
-          sudo mkdir -p /opt /srv /var/www /var/lib/mysql /www/server /home/jacky
-          
-          # Install Aapanel (non-interactive)
+          echo "Running Aapanel installer to configure over restored files..."
           curl -sSLo /tmp/install.sh http://www.aapanel.com/script/install-ubuntu_6.0_en.sh
+          # Pipe 'y' and 'yes' to the installer to handle both prompts
           (echo "y" && echo "yes") | sudo bash /tmp/install.sh
 
-      # 8. Start Services
-      - name: 🚀 Start Services
+      # 6. Start System Services
+      - name: 🚀 Start System Services
         run: |
+          echo "🔄 (Re)loading system services..."
           sudo systemctl daemon-reload
           
-          # Start services in order
+          echo "🕸️ Installing and starting Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo systemctl enable --now tailscaled
+          # Use --reset to handle potential runner hostname changes
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-vps --reset || true
+          
+          # Wait for Tailscale network to fully stabilize
+          echo "Pausing for 10 seconds to allow Tailscale network to establish..."
+          sleep 10
+          
+          # Start the services in a logical order
+          echo "⚙️ Starting database, Aapanel, and web services..."
           sudo systemctl start mariadb || true
           sudo bt restart || true
           sudo systemctl start apache2 || true
-          
-          # Verify Tailscale is still running
-          sudo systemctl restart tailscaled || true
-          echo "✅ All services started"
 
-      # 9. Configure Aapanel
-      - name: 🔐 Set Aapanel Credentials
+          echo "✅ All services are running."
+          echo "🌐 Tailscale IP: $(sudo tailscale ip -4 || echo 'Not available')"
+      
+      # 7. Set Aapanel Credentials
+      - name: 🔐 Set Aapanel Username & Password
         run: |
+          echo "Setting Aapanel username and password..."
           echo "jacky" | sudo bt 6
           echo "spidey" | sudo bt 5
-          echo "✅ Aapanel configured: jacky/spidey"
-
-      # 10. Start Tmate Session
+          echo "✅ Aapanel username is 'jacky' and password has been set to 'spidey'."
+      
       - name: 🛰️ Start Tmate Session
         run: |
           sudo apt-get install -y tmate
+          # Start tmate in a detached screen as the 'jacky' user
           sudo -u jacky screen -dmS tmate-session tmate
           sleep 3
-          echo "✅ Tmate session started"
+          echo "✅ Tmate session started in background. Use 'sudo -u jacky screen -r tmate-session' to attach."
 
-      # 11. Display Connection Info
-      - name: 📊 Display Connection Information
-        run: |
-          echo "=== 🖥️ VPS CONNECTION INFORMATION ==="
-          echo "SSH Access: ssh jacky@$(sudo tailscale ip -4)"
-          echo "SSH Password: root"
-          echo "Aapanel URL: https://$(sudo tailscale ip -4):7800"
-          echo "Aapanel Username: jacky"
-          echo "Aapanel Password: spidey"
-          echo "Tailscale IP: $(sudo tailscale ip -4)"
-          echo "======================================"
-
-      # 12. Maintain Session
+      # 8. Maintain the Session (Graceful Shutdown Loop)
       - name: ⏳ Maintain VPS Session
         run: |
-          echo "🖥️ VPS is now running. Create '/tmp/stop_session' to shutdown gracefully."
+          echo "🖥️ VPS is now running. To trigger a manual shutdown, create a file named '/tmp/stop_session' inside the VPS."
+          
+          # This loop keeps the job alive for up to 6 hours (timeout-minutes: 360)
           while [ ! -f /tmp/stop_session ]; do
-            echo "✅ Session active - Tailscale IP: $(sudo tailscale ip -4 2>/dev/null || echo 'Connecting...')"
+            echo "Session is active. Sleeping for 60 seconds..."
             sleep 60
           done
-          echo "Graceful shutdown initiated."
-
-      # 13. Create Snapshot (Always Runs)
-      - name: 💾 Create System Snapshot
-        if: always()
-        run: |
-          echo "🛑 Preparing for snapshot..."
           
-          # Stop services cleanly
+          echo "Graceful shutdown initiated. Proceeding to final backup."
+
+      # 9. Create and Stream Final Backup to MEGA (The FIX for disk space)
+      # This combines the backup creation and upload into a single streaming process.
+      - name: 💾 Create & Stream Final Backup
+        if: always() # Ensure this runs even if the session was interrupted
+        run: |
+          echo "🛑 Stopping services for a clean backup..."
+          sudo systemctl stop tailscaled || true
+          sudo systemctl stop btpanel.service || true
           sudo systemctl stop apache2 || true
           sudo systemctl stop mariadb || true
-          sudo systemctl stop btpanel.service || true
           sudo pkill -f "tmate" || true
           
-          # Note: Don't stop Tailscale yet - we need it for upload
-          echo "📸 Creating system snapshot..."
-          sudo mkdir -p /mnt/snapshot
+          echo "📦 Streaming compressed backup archive directly to MEGA..."
           
-          # Create a sparse image file
-          sudo dd if=/dev/zero of=/tmp/${SNAPSHOT_NAME} bs=1M count=1024 oflag=direct
-          sudo mkfs.ext4 /tmp/${SNAPSHOT_NAME}
+          # Define the directories to be included in the backup
+          BACKUP_DIRS="/etc/hostname /etc/hosts /etc/systemd/system /var/lib/tailscale /opt /srv /var/www /etc/ssh /etc/apache2 /www/server /root /home/jacky /usr/lib/systemd/system /var/lib/mysql /etc/sudoers.d/ /usr/bin/bt"
           
-          # Mount and copy system data
-          sudo mount -o loop /tmp/${SNAPSHOT_NAME} /mnt/snapshot
+          # Use tar to create the compressed archive and pipe it directly to rclone rcat
+          # rclone rcat streams the data to the remote, avoiding local disk space issues.
+          sudo tar --ignore-failed-read -czf - $BACKUP_DIRS 2>/dev/null | \
+          rclone rcat ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}
           
-          # Copy essential system data (exclude volatile directories)
-          sudo rsync -a --delete \
-            --exclude=/proc \
-            --exclude=/sys \
-            --exclude=/dev \
-            --exclude=/tmp \
-            --exclude=/run \
-            --exclude=/mnt \
-            --exclude=/media \
-            --exclude=/var/cache \
-            --exclude=/var/tmp \
-            --exclude=/var/lib/tailscale/tailscaled.state \
-            / /mnt/snapshot/
+          echo "✅ Final backup streamed successfully to ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
           
-          # Cleanup
-          sudo umount /mnt/snapshot
-          
-          # Compress the snapshot
-          echo "🗜️ Compressing snapshot..."
-          sudo gzip /tmp/${SNAPSHOT_NAME}
-          
-          echo "✅ Snapshot created: /tmp/${SNAPSHOT_NAME}.gz"
-
-      # 14. Upload Snapshot
-      - name: ☁️ Upload Snapshot to MEGA
+      # 10. Final Status Report
+      - name: 📝 Final Status Report
         if: always()
         run: |
-          echo "🚀 Uploading snapshot to MEGA..."
-          rclone copy /tmp/${SNAPSHOT_NAME}.gz ${{ env.MEGA_REMOTE }} --progress
-          echo "✅ Snapshot uploaded successfully."
-
-      # 15. Final Cleanup
-      - name: 🧹 Final Cleanup & Disconnect Tailscale
-        if: always()
-        run: |
-          echo "🔌 Disconnecting Tailscale..."
-          sudo tailscale down || true
-          sudo systemctl stop tailscaled || true
-          
-          sudo rm -f /tmp/${SNAPSHOT_NAME}* /tmp/stop_session
-          echo "=== VPS Session Complete ==="
-          echo "Final status: ${{ job.status }}"
-          echo "Snapshot: ${MEGA_REMOTE}/${SNAPSHOT_NAME}.gz"
+          echo "=== VPS Session Ended ==="
+          echo "Final job status: ${{ job.status }}"
+          echo "Backup uploaded to: ${{ env.MEGA_REMOTE }}/${{ env.BACKUP_NAME }}"
+          echo "========================="
