@@ -120,12 +120,7 @@ jobs:
           echo "🎆 Fresh universe initialized!"
         fi
         
-    - name: "🗄️ DELETE TEMPORAL DATA CORE FROM GALVAN PRIME"
-      if: steps.restore.outputs.is_new_install == 'false'
-      run: |
-        echo "Deleting temporal data core from Galvan Prime vault..."
-        rclone delete ${GALVAN_CLOUD}/${BACKUP_ARTIFACT}
-        echo "✅ Temporal data core cleared from Galvan Prime."
+    
 
     - name: "🚀 ALIEN CONTROL PANEL DEPLOYMENT"
       run: |
